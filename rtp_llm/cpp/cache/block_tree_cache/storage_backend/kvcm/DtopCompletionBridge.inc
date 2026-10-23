@@ -19,9 +19,8 @@ bool configureFileCp2(StorageBackend::BufferResolver resolver) {
     }
     const int requested_tp = autil::EnvUtil::getEnv("RTP_DTOP_FILE_TARGET_P_TP", 2);
     if (!file_pace_ || (requested_tp != 2 && requested_tp != 4)
-        || parallelism_config_.prefill_cp_config.prefill_cp_size != requested_tp
-        || !parallelism_config_.prefill_cp_config.kv_cache_sharded) {
-        RTP_LLM_LOG_ERROR("DTOP native candidate requires matching PACE CP2 or CP4 sharded target");
+        || parallelism_config_.prefill_cp_config.prefill_cp_size != requested_tp) {
+        RTP_LLM_LOG_ERROR("DTOP native candidate requires matching PACE CP2 or CP4 target (sharded or replicated)");
         return false;
     }
     file_decode_ = parallelism_config_.role_type == RoleType::DECODE;
@@ -36,7 +35,7 @@ bool configureFileCp2(StorageBackend::BufferResolver resolver) {
         || !cache_config_.mtp_sub_configs.empty() || sp_config_.type != SP_TYPE_NONE
         || !((file_target_tp_ == 2 && (cp.prefill_cp_size == 1 || cp.prefill_cp_size == 2))
              || (file_target_tp_ == 4 && (cp.prefill_cp_size == 1 || cp.prefill_cp_size == 4)))
-        || (file_capture_blocks_ != 1 && file_capture_blocks_ != file_shards_ && !(file_shards_ == 1 && file_capture_blocks_ == 2))
+        || (file_capture_blocks_ != 1 && file_capture_blocks_ != file_shards_ && !(file_shards_ == 1 && file_capture_blocks_ == file_target_cp_))
         || !kv_cache_config_.kvcm_client_config.empty()
         || kv_cache_config_.kvcm_instance_id_salt.empty()
         || kv_cache_config_.kvcm_instance_group.rfind("linshuo_decode_remote_", 0) != 0

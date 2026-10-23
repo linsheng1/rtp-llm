@@ -1,10 +1,11 @@
 #include <cuda_runtime_api.h>
+#include <tuple>
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/GroupPolicy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 namespace rtp_llm { namespace {
 // Actual backend completion path with GPU source pages and a recording SDK.
-class NativeDtopCompletionTest: public ::testing::TestWithParam<int> {
+class NativeDtopCompletionTest: public ::testing::TestWithParam<std::tuple<int, bool>> {
 protected:
     autil::EnvGuard enable{"RTP_DTOP_FILE_CP2", "1"};
     autil::EnvGuard pace{"RTP_DTOP_PACE", "1"};
@@ -15,10 +16,12 @@ protected:
 };
 
 TEST_P(NativeDtopCompletionTest, CompleteCheckpointPublishesAllPSpecsOnlyAtFinishAndOnlyOnce) {
-    const int shards=GetParam(), checkpoints=shards==2 ? 3 : 2;
+    const int target=std::get<0>(GetParam());
+    const bool sharded=std::get<1>(GetParam());
+    const int shards=sharded ? target : 1, checkpoints=sharded ? (target==2 ? 3 : 2) : 8;
     const size_t end=128*shards*checkpoints;
-    autil::EnvGuard target_layout("RTP_DTOP_FILE_TARGET_P_TP",std::to_string(shards));
-    autil::EnvGuard capture_layout("RTP_DTOP_FILE_CAPTURE_BLOCKS",std::to_string(shards));
+    autil::EnvGuard target_layout("RTP_DTOP_FILE_TARGET_P_TP",std::to_string(target));
+    autil::EnvGuard capture_layout("RTP_DTOP_FILE_CAPTURE_BLOCKS",std::to_string(target));
     BackendEnvironment environment;
     environment.cache_config = test::makeSimpleMhaCacheConfig(1, 12, 128, DataType::TYPE_FP16, 1, 2);
     initializeEnvironmentPools(environment, "native_dtop_finish", 12);
@@ -43,12 +46,12 @@ TEST_P(NativeDtopCompletionTest, CompleteCheckpointPublishesAllPSpecsOnlyAtFinis
     EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Invoke(
         [&](const auto& configs, auto, const auto& registrations, const auto& tags) {
             std::vector<std::string> expected_tags;
-            for(int rank=0;rank<shards;++rank) expected_tags.push_back(tag+"#cp"+std::to_string(rank));
+            for(int rank=0;rank<target;++rank) expected_tags.push_back(tag+"#cp"+std::to_string(rank));
             EXPECT_EQ(tags,expected_tags);
-            EXPECT_EQ(registrations.size(),static_cast<size_t>(shards));
+            EXPECT_EQ(registrations.size(),static_cast<size_t>(target));
             const auto json=autil::legacy::ToJsonString(configs.at(""),true);
             EXPECT_NE(json.find("tp0_F"),std::string::npos);
-            for(int rank=1;rank<shards;++rank) EXPECT_NE(json.find("tp"+std::to_string(rank)+"_F"),std::string::npos);
+            for(int rank=1;rank<target;++rank) EXPECT_NE(json.find("tp"+std::to_string(rank)+"_F"),std::string::npos);
             return true;
         }));
     EXPECT_CALL(*client, shutdown()).Times(1);
@@ -58,10 +61,10 @@ TEST_P(NativeDtopCompletionTest, CompleteCheckpointPublishesAllPSpecsOnlyAtFinis
     config.kvcm_instance_id_salt="native_completion_v1";
     config.kvcm_model_sdk_config="[{\"type\":\"pace\"}]";
     ParallelismConfig parallel;
-    parallel.tp_size=1;parallel.dp_size=shards;parallel.ep_size=shards;
+    parallel.tp_size=1;parallel.dp_size=target;parallel.ep_size=target;
     parallel.role_type=RoleType::DECODE;
-    parallel.prefill_cp_config.prefill_cp_size=shards;
-    parallel.prefill_cp_config.kv_cache_sharded=true;
+    parallel.prefill_cp_config.prefill_cp_size=target;
+    parallel.prefill_cp_config.kv_cache_sharded=sharded;
     RuntimeConfig runtime;runtime.model_name="completion_test";
     BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config,config,runtime,
         parallel,SpeculativeExecutionConfig{},nullptr,false,nullptr,client));
@@ -73,7 +76,7 @@ TEST_P(NativeDtopCompletionTest, CompleteCheckpointPublishesAllPSpecsOnlyAtFinis
     location.block_mask=kv_cache_manager::BlockMaskOffset{0};
     for (int k=0;k<checkpoints;++k) {
         kv_cache_manager::Location one;
-        for (int rank=0;rank<shards;++rank) one.push_back({kvcm::genLocationSpecName(rank,"F"+tag),"key"+std::to_string(k)+"r"+std::to_string(rank)});
+        for (int rank=0;rank<target;++rank) one.push_back({kvcm::genLocationSpecName(rank,"F"+tag),"key"+std::to_string(k)+"r"+std::to_string(rank)});
         location.locations.push_back(one);
     }
     EXPECT_CALL(*client,getWriteLocation(_,_,_,_,_,_,_)).WillOnce(Invoke(
@@ -81,7 +84,7 @@ TEST_P(NativeDtopCompletionTest, CompleteCheckpointPublishesAllPSpecsOnlyAtFinis
             EXPECT_TRUE(finishing);++starts;EXPECT_EQ(keys,canonical_keys);
             return std::make_pair(true,location);
         }));
-    EXPECT_CALL(*client,saveKvCachesForTag(_,_,_,_)).Times(shards*checkpoints).WillRepeatedly(Invoke(
+    EXPECT_CALL(*client,saveKvCachesForTag(_,_,_,_)).Times(target*checkpoints).WillRepeatedly(Invoke(
         [&](const std::string& wiretag,const auto& uris,const auto& buffers,const auto&) {
             EXPECT_TRUE(finishing);++saves;EXPECT_EQ(buffers.size(),1u);EXPECT_EQ(uris.size(),1u);
             EXPECT_EQ(wiretag,tag+"#cp"+uris[0].back());
@@ -91,7 +94,7 @@ TEST_P(NativeDtopCompletionTest, CompleteCheckpointPublishesAllPSpecsOnlyAtFinis
             EXPECT_GT(iov.size,0u);
             const int key=uris[0].at(3)-'0',rank=uris[0].back()-'0';
             const auto* bytes=static_cast<const unsigned char*>(iov.base);
-            EXPECT_TRUE(std::all_of(bytes,bytes+iov.size,[&](unsigned char b){return b==shards*key+rank+1;}));
+            EXPECT_TRUE(std::all_of(bytes,bytes+iov.size,[&](unsigned char b){return b==shards*key+(sharded ? rank : 0)+1;}));
             return std::make_pair(true,kv_cache_manager::UriStrVec{"actual_"+uris[0]});
         }));
     EXPECT_CALL(*client,finishWrite(_,_,"finished_session",_,_)).WillOnce(Invoke(
@@ -107,13 +110,14 @@ TEST_P(NativeDtopCompletionTest, CompleteCheckpointPublishesAllPSpecsOnlyAtFinis
     EXPECT_EQ(resource.decodeCompletionSnapshot()->computed_end,end);
     finishing=true;
     ASSERT_TRUE(backend->captureCompletedDecode(resource,end+132,true));
-    EXPECT_EQ(starts,1);EXPECT_EQ(saves,shards*checkpoints);EXPECT_EQ(finishes,1);
+    EXPECT_EQ(starts,1);EXPECT_EQ(saves,target*checkpoints);EXPECT_EQ(finishes,1);
     ASSERT_EQ(resource.decodeCompletionSnapshot(),nullptr);
     ASSERT_TRUE(backend->captureCompletedDecode(resource,end+132,true));
     EXPECT_EQ(starts,1);EXPECT_EQ(finishes,1);
     environment.device_pool->decRef(*blocks);
 }
 
-INSTANTIATE_TEST_SUITE_P(CP2AndCP4,NativeDtopCompletionTest,::testing::Values(2,4));
+INSTANTIATE_TEST_SUITE_P(CP2AndCP4BothLayouts,NativeDtopCompletionTest,
+    ::testing::Combine(::testing::Values(2,4),::testing::Bool()));
 
 }}
