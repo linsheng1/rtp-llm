@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/TcpServer.h"
 
-#include "aios/network/arpc/arpc/metric/KMonitorANetServerMetricReporter.h"
+#include "aios/network/arpc/arpc/metric/KMonitorServerMetricReporter.h"
+#include "aios/network/anet/metric/KMonitorANetMetricReporter.h"
 #include "autil/LockFreeThreadPool.h"
 
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -25,12 +26,13 @@ bool TcpServer::init(uint32_t io_thread_count,
 
     rpc_server_.reset(new arpc::ANetRPCServer(rpc_server_transport_.get(), 3, 100));
     if (enable_metric) {
-        arpc::KMonitorANetMetricReporterConfig metricConfig;
-        metricConfig.metricLevel                 = kmonitor::FATAL;
-        metricConfig.anetConfig.enableANetMetric = true;
-        metricConfig.arpcConfig.enableArpcMetric = true;
-        auto metricReporter = std::make_shared<arpc::KMonitorANetServerMetricReporter>(metricConfig);
-        if (!metricReporter->init(rpc_server_transport_.get())) {
+        arpc::MetricReporterConfig rpcMetricConfig;
+        rpcMetricConfig.enableArpcMetric = true;
+        auto metricReporter = std::make_shared<arpc::KMonitorServerMetricReporter>(rpcMetricConfig, kmonitor::FATAL);
+        anet::ANetMetricReporterConfig transportMetricConfig;
+        transportMetricConfig.enableANetMetric = true;
+        transport_metrics_ = std::make_shared<anet::KMonitorANetMetricReporter>(transportMetricConfig, kmonitor::FATAL);
+        if (!metricReporter->init() || !transport_metrics_->init(rpc_server_transport_.get())) {
             RTP_LLM_LOG_WARNING("init anet metric reporter failed");
             return false;
         }
@@ -70,6 +72,13 @@ bool TcpServer::registerService(RPCService* rpc_service) {
 }
 
 void TcpServer::stop() {
+    // Stop reporting while both Transport and KMonitor are still alive,
+    // independently of RPC stats retaining their own request reporter.
+    if (transport_metrics_) {
+        transport_metrics_->release();
+        transport_metrics_.reset();
+        RTP_LLM_LOG_INFO("TcpServer ANet metrics stopped before transport teardown");
+    }
     if (rpc_server_transport_) {
         rpc_server_transport_->stop();
         rpc_server_transport_->wait();

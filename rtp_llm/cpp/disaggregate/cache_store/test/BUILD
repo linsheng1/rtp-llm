@@ -67,3 +67,10 @@ cc_test(
     },
     tags = ["H20_CU13"],
 )
+
+cc_test(
+    name = "tcp_server_metric_lifetime_test",
+    srcs = ["TcpServerMetricLifetimeTest.cpp"],
+    copts = ["-fno-access-control"] + copts(),
+    deps = ["//rtp_llm/models_py/bindings/core:exec_ops_test_lib", "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl", "//rtp_llm/cpp/model_rpc:model_rpc_server", "//rtp_llm/cpp/disaggregate/cache_store", "@com_google_googletest//:gtest", "@com_google_googletest//:gtest_main", "@havenask//aios/kmonitor:kmonitor_client_cpp"],
+)

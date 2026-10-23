@@ -132,6 +132,39 @@ def _small_prenorm_ms(max_m):
     return tuple(range(1, min(max(int(max_m), 0), 64) + 1))
 
 
+def _fused_pre_representative_ms(
+    max_m, num_sms, hidden=20480, *, use_small=True, backend="deepgemm"
+):
+    """Cover the split keys selected by pre_big_fuse._compute_num_split.
+
+    The fused wrapper uses hardware SMs / ceil(M/64), capped by K/256.
+    Both DeepGEMM and the TileLang epilogue specialize on that split count;
+    warming only M=1 and65 leaves intermediate prefills compiling after ready.
+    Above the first split1 representative all larger M reuse that kernel.
+    """
+    if int(max_m) <= 0:
+        return ()
+    if num_sms <= 0 or hidden <= 0 or hidden % 256:
+        raise ValueError("Invalid fused-pre device/hidden geometry")
+    max_m = min(int(max_m), 1 << 20)
+    small = (1,) if use_small else ()
+    if max_m <= 64:
+        return small
+    if backend in ("tilelang_single", "tilelang", "single"):
+        return small + (65,)
+    if backend not in ("", "auto", "deepgemm", "dg"):
+        raise ValueError("Unsupported fused-pre backend")
+    cap = hidden // 256
+    seen = {max(min(num_sms, cap), 1)} if small else set()
+    representatives = list(small)
+    for grid in range(2, min((max_m + 63) // 64, num_sms + 1) + 1):
+        splits = max(min(num_sms // grid, cap), 1)
+        if splits not in seen:
+            representatives.append((grid - 1) * 64 + 1)
+            seen.add(splits)
+    return tuple(representatives)
+
+
 def _tilelang_norm_ms(max_m, hidden, device, *, use_small):
     min_m = 65 if use_small else 1
     if int(max_m) < min_m:
@@ -276,6 +309,23 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
         for config, source in units.items()
     }
     fused_enabled = can_fuse_big_pre()
+    # This wrapper's planner uses hardware SMs, unlike mega_mhc's DG SM budget.
+    fused_num_sms = (
+        torch.cuda.get_device_properties(device).multi_processor_count
+        if fused_enabled
+        else 0
+    )
+    fused_ms = {
+        config: _fused_pre_representative_ms(
+            max_m,
+            fused_num_sms,
+            source.dim * source.hc_mult,
+            use_small=small_enabled and source.dim == 5120,
+            backend=os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", "").strip().lower(),
+        )
+        for config, source in units.items()
+        if fused_enabled and source.dim == 5120
+    }
     stream = torch.cuda.current_stream(device)
     key = (
         str(device),
@@ -288,14 +338,17 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
         num_sms,
         tuple(sorted(tile_ms.items())),
         fused_enabled,
+        fused_num_sms,
+        tuple(sorted(fused_ms.items())),
         os.environ.get("DSV4_MHC_PRE_GEMM_BACKEND", ""),
     )
     if key in _WARMED_KEYS:
         return
     logging.info(
-        "[V41 HC] JIT warmup: small M=%s mega M=%s configs=%d seams=%d",
+        "[V41 HC] JIT warmup: small M=%s mega M=%s fused M=%s configs=%d seams=%d",
         small_ms,
         mega_ms,
+        fused_ms,
         len(units),
         len(pairs),
     )
@@ -343,12 +396,7 @@ def warmup_v41_hc_jit(v4, *, max_m, device):
                     device=device,
                 )
             if fused_enabled and unit.dim == 5120:
-                # The delayed caller uses DG at M<=64, and the configured
-                # backend above 64. Neither requires standalone norm/split.
-                fused_ms = ((1,) if use_small else ()) + (
-                    (65,) if int(max_m) > 64 else ()
-                )
-                for tokens in fused_ms:
+                for tokens in fused_ms[config]:
                     common._run_tilelang_warmup_launch_with_retry(
                         "V41 HC fused pre",
                         f"config={config} m={tokens}",

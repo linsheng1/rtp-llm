@@ -196,6 +196,34 @@ class V41HCJitWarmupCPU(unittest.TestCase):
             collect.assert_not_called()
         self.assertFalse(warmup._WARMED_KEYS)
 
+    def test_fused_pre_covers_cold_prefill_split_keys_and_bounds_scratch(self):
+        for sms in (16, 128, 132, 148):
+            for maximum in (1, 64, 65, 256, 1244, 32768):
+                reps = warmup._fused_pre_representative_ms(maximum, sms)
+                # Independent runtime contract from pre_big_fuse.py: a 64-row
+                # grid and at least four K blocks per split, K=20480.
+                split = lambda m: max(1, min(sms // ((m + 63) // 64), 80))
+                self.assertEqual(
+                    {split(m) for m in reps},
+                    {split(m) for m in range(1, maximum + 1)},
+                )
+                self.assertEqual(len(reps), len({split(m) for m in reps}))
+                self.assertTrue(all(1 <= m <= maximum for m in reps))
+                self.assertLessEqual(max(reps), sms * 64 + 1)
+        reps = warmup._fused_pre_representative_ms(32768, 148)
+        self.assertIn(1153, reps)  # split7: observed first-use compilation >5s.
+        self.assertNotIn(7, {max(1, min(148 // ((m + 63) // 64), 80)) for m in (1, 65)})
+        self.assertEqual(warmup._fused_pre_representative_ms(0, 148), ())
+        self.assertEqual(
+            warmup._fused_pre_representative_ms(32768, 148, backend="tilelang"),
+            (1, 65),
+        )
+        self.assertEqual(
+            warmup._fused_pre_representative_ms(64, 148, use_small=False), (),
+        )
+        with self.assertRaises(ValueError):
+            warmup._fused_pre_representative_ms(128, 0)
+
     def test_wrong_architecture_and_capture_skip_or_fail_before_clone(self):
         with contextlib.ExitStack() as stack:
             self._mock_device(stack)
@@ -376,7 +404,7 @@ class V41HCJitWarmupCPU(unittest.TestCase):
                 self.assertEqual(actual, expected)
                 self.assertEqual(
                     [c.args[1] for c in fused.call_args_list],
-                    [1, 65] if maximum > 64 else [1],
+                    [1] + list(range(65, maximum + 1, 64)),
                 )
 
     def test_missing_small_backend_warms_aligned_small_split_without_mega(self):

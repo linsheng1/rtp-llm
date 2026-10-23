@@ -424,8 +424,38 @@ ClientWrapper::getCacheLocationsByBackend(const std::string& unique_id, const st
                                           const std::vector<std::string>& location_spec_names,
                                           kv_cache_manager::StorageType backend_type) {
     CHECK_INIT2(unique_id);
-    CALL_CLIENT2(GetCacheLocationsByBackend, trace_id, keys, tokens, block_mask, location_spec_names,
-                 backend_type, kv_cache_manager::BackendSelectStrategy::LSS_WEIGHTED_RANDOM);
+    auto [ec, locations] = client->GetCacheLocationsByBackend(
+        trace_id, keys, tokens, block_mask, location_spec_names,
+        backend_type, kv_cache_manager::BackendSelectStrategy::LSS_WEIGHTED_RANDOM);
+    if (!checkError(ec)) {
+        RTP_LLM_LOG_WARNING("GetCacheLocationsByBackend failed, ec [%d]", ec);
+        return {false, {}};
+    }
+    // Backend results are positional. Older managers can return locations for
+    // masked keys; clear those slots without shifting the remaining key indices.
+    if (!keys.empty() && locations.size() != keys.size()) {
+        RTP_LLM_LOG_WARNING("KVCM backend response has %zu slots for %zu keys", locations.size(), keys.size());
+        return {false, {}};
+    }
+    if (const auto* offset = std::get_if<kv_cache_manager::BlockMaskOffset>(&block_mask)) {
+        if (*offset > locations.size()) {
+            return {false, {}};
+        }
+        for (size_t i = 0; i < *offset; ++i) {
+            locations[i].clear();
+        }
+    } else {
+        const auto& mask = std::get<kv_cache_manager::BlockMaskVector>(block_mask);
+        if (!mask.empty() && mask.size() != locations.size()) {
+            return {false, {}};
+        }
+        for (size_t i = 0; i < mask.size(); ++i) {
+            if (mask[i]) {
+                locations[i].clear();
+            }
+        }
+    }
+    return {true, std::move(locations)};
 }
 
 std::pair<bool, kv_cache_manager::HostCacheState>

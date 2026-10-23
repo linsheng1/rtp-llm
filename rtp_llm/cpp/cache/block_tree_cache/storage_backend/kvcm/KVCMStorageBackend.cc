@@ -1,3 +1,6 @@
+#include <cctype>
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
+#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMStorageBackend.h"
 
 #include <algorithm>
@@ -89,6 +92,7 @@ public:
               StorageBackend::BufferResolver                                      buffer_resolver,
               const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver) {
         RTP_LLM_LOG_INFO("start init BlockTree KVCM storage backend");
+        if (!configureFileCp2(buffer_resolver)) { return false; }
         const auto quarantine_abort_ratio = remoteCacheQuarantineAbortRatio();
         if (!quarantine_abort_ratio.has_value()) {
             RTP_LLM_LOG_ERROR("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO must be a finite number in [0, 1]");
@@ -118,7 +122,7 @@ public:
             } else {
                 other_group_tags.push_back(group.tag);
             }
-            group_block_size_bytes.emplace(group.tag, cache_config_.blockSizeBytesForGroup(group.tag));
+            group_block_size_bytes.emplace(group.tag, fileWireBytes(group.tag));
         }
         if (other_group_tags.empty()) {
             group_policy_ = std::make_unique<kvcm::FullLayerGroupPolicy>(
@@ -224,6 +228,7 @@ public:
     }
 
     StorageMatchResult match(const StorageRequest& request) {
+        if (file_cp2_ && file_decode_) { return {request.local_matched_blocks_num, nullptr}; }
         RTP_LLM_CHECK_WITH_INFO(parallelism_config_.tp_rank == 0,
                                 "KVCM metadata match must run on tp rank 0, got %ld",
                                 parallelism_config_.tp_rank);
@@ -330,6 +335,9 @@ public:
     }
 
     void write(const StorageRequest& request) {
+        // Attributed experiment: only the completed D checkpoint publishes.
+        // Local tree reuse remains native and is never suppressed here.
+        if (file_cp2_ && (file_decode_ || !autil::EnvUtil::getEnv("RTP_DTOP_BENCH_PREFILL_PUBLISH", false))) { return; }
         RTP_LLM_CHECK_WITH_INFO(parallelism_config_.tp_rank == 0,
                                 "KVCM metadata write must run on tp rank 0, got %ld",
                                 parallelism_config_.tp_rank);
@@ -487,6 +495,8 @@ public:
         }
     }
 
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DtopCompletionBridge.inc"
+
     void reportQuarantineState(uint64_t generation, size_t task_count, size_t block_count) noexcept {
         reportQuarantineMetrics(generation, task_count, block_count);
         if (parallelism_config_.tp_rank == 0 && quarantine_abort_ratio_ > 0.0 && total_device_block_count_ > 0) {
@@ -510,7 +520,8 @@ private:
     }
 
     static bool isPayloadBackend(int type) {
-        return type == 1 || type == 2 || type == 3 || type == 4 || type == 5;
+        return type == 1 || type == 2 || type == 3 || type == 4 || type == 5
+               || (type == 9 && autil::EnvUtil::getEnv("RTP_DTOP_PACE_SSD_PACKED_IO", false));
     }
 
     kv_cache_manager::Locations selectBackendLocations(const kv_cache_manager::BackendLocations& result) const {
@@ -660,12 +671,12 @@ private:
         auto infos  = std::make_shared<kvcm::KVCMConfig::LocationSpecInfoMap>();
         auto groups = std::make_shared<kvcm::KVCMConfig::LocationSpecGroups>();
         RTP_LLM_CHECK_WITH_INFO(
-            group_policy_->buildLocationSpecGroups(static_cast<int>(parallelism_config_.tp_size), *groups),
+            group_policy_->buildLocationSpecGroups(file_cp2_ ? file_target_tp_ : static_cast<int>(parallelism_config_.tp_size), *groups),
             "failed to build KVCM location spec groups");
         for (const auto& [group_id, group] : group_policy_->groups()) {
-            for (int rank = 0; rank < parallelism_config_.tp_size; ++rank) {
+            for (int rank = 0; rank < (file_cp2_ ? file_target_tp_ : parallelism_config_.tp_size); ++rank) {
                 const std::string spec_name = kvcm::genLocationSpecName(rank, group.group_name);
-                infos->emplace(spec_name, cache_config_.blockSizeBytesForGroup(group.tag));
+                infos->emplace(spec_name, group.block_size_bytes);
             }
         }
         return {std::move(infos), std::move(groups)};
@@ -695,12 +706,17 @@ private:
         if (!cache_config_.mtp_sub_configs.empty()) {
             draft_info = '{' + sp_config_.to_string() + '}';
         }
+        const auto wire_tp = file_cp2_ ? file_target_tp_ : parallelism_config_.tp_size;
+        const auto wire_dp = file_cp2_ ? 1 : parallelism_config_.dp_size;
+        // Match the baseline P writer identity exactly. Canonical CP keys are
+        // selected by CPSlotMapper; the KVCM base block is still 128 tokens.
+        const auto wire_block = cache_config_.seq_size_per_block;
         std::stringstream identity;
         identity << "instance_group: " << kv_cache_config_.kvcm_instance_group
-                 << ";block_size:" << cache_config_.seq_size_per_block << ";model_name:" << model_name
+                 << ";block_size:" << wire_block << ";model_name:" << model_name
                  << ";dtype_str:" << dtype << ";use_mla:" << cache_config_.use_mla
-                 << ";fp8_kv_cache:" << kv_cache_config_.fp8_kv_cache << ";tp_size:" << parallelism_config_.tp_size
-                 << ";dp_size:" << parallelism_config_.dp_size << ";extra_info:" << extra
+                 << ";fp8_kv_cache:" << kv_cache_config_.fp8_kv_cache << ";tp_size:" << wire_tp
+                 << ";dp_size:" << wire_dp << ";extra_info:" << extra
                  << ";location_spec_info:" << autil::legacy::ToJsonString(location_infos, true)
                  << ";location_spec_groups:" << autil::legacy::ToJsonString(location_groups, true)
                  << ";default_query_type:" << default_query_type_
@@ -711,10 +727,21 @@ private:
         }
         instance_id += std::to_string(hashString(identity.str()));
 
+        if (file_cp2_ || autil::EnvUtil::getEnv("RTP_DTOP_FILE_AUDIT_BASELINE_P", false)) {
+            RTP_LLM_LOG_INFO("DTOP_FILE identity instance=%s tp=%ld dp=%ld base_tokens=%zu",
+                             instance_id.c_str(), static_cast<long>(wire_tp), static_cast<long>(wire_dp), wire_block);
+            for (const auto& group : cache_config_.topology().groups()) {
+                std::ostringstream layers;
+                for (const int layer : cache_config_.layerIdsForGroup(group.tag)) { layers << layer << ','; }
+                RTP_LLM_LOG_INFO("DTOP_FILE topology tag=%s reusable=%d layers=%s physical_bytes=%zu",
+                                 group.tag.c_str(), static_cast<int>(group.policy.enable_prefix_reuse),
+                                 layers.str().c_str(), cache_config_.blockSizeBytesForGroup(group.tag));
+            }
+        }
         auto config =
             std::make_shared<kvcm::KVCMConfig>(kv_cache_config_.kvcm_enable_vipserver,
                                                kv_cache_config_.kvcm_vipserver_domain,
-                                               static_cast<int32_t>(cache_config_.seq_size_per_block),
+                                               static_cast<int32_t>(wire_block),
                                                kv_cache_config_.kvcm_instance_group,
                                                instance_id,
                                                addresses,
@@ -725,8 +752,8 @@ private:
                                                kvcm::ModelDeployment(model_name,
                                                                      dtype,
                                                                      cache_config_.use_mla,
-                                                                     static_cast<int32_t>(parallelism_config_.tp_size),
-                                                                     static_cast<int32_t>(parallelism_config_.dp_size),
+                                                                     static_cast<int32_t>(wire_tp),
+                                                                     static_cast<int32_t>(wire_dp),
                                                                      1,
                                                                      extra,
                                                                      kv_cache_config_.kvcm_model_user_data));
@@ -817,8 +844,15 @@ private:
                              use_gdr ? "gdr" : "standard",
                              registration_size);
             pools_by_tag.emplace(tag, pool);
-            registration_tags.push_back(tag);
-            registrations.push_back(std::move(registration));
+            const int peers = file_cp2_ && file_decode_ ? file_target_tp_ : 1;
+            for (int peer = 0; peer < peers; ++peer) {
+                auto wire_registration = registration;
+                wire_registration.location_spec_name = kvcm::genLocationSpecName(
+                    file_cp2_ && file_decode_ ? peer : static_cast<int>(parallelism_config_.tp_rank),
+                    groups.at(group_id).group_name);
+                registration_tags.push_back(fileTag(tag, peer));
+                registrations.push_back(std::move(wire_registration));
+            }
         }
         pools_by_tag_      = std::move(pools_by_tag);
         registration_tags_ = std::move(registration_tags);
@@ -867,6 +901,7 @@ private:
                 if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
                     return TransferResult::FAILED;
                 }
+                logFileRead(tag, batch_blocks, batch_uris);
             } else {
                 auto [ec, result] =
                     client_wrapper_->saveKvCachesForTagWithStatus(tag, batch_uris, batch_buffers, trace_info);
@@ -1042,6 +1077,13 @@ private:
     }
 
 private:
+    int file_target_cp_{2}, file_target_tp_{2}, file_shards_{2}, file_capture_blocks_{2};
+    bool file_cp2_{false}, file_pace_{false}, file_decode_{false};
+    StorageBackend::BufferResolver file_resolver_;
+    mutable std::mutex file_mutex_;
+    mutable std::unordered_set<std::string> file_verified_uris_;
+    // Unknown completion retains CPU source buffers until SDK shutdown drains.
+    std::vector<std::shared_ptr<DecodeCompletionSnapshot>> file_quarantined_snapshots_;
     CacheConfig                          cache_config_;
     KVCacheConfig                        kv_cache_config_;
     RuntimeConfig                        runtime_config_;
@@ -1128,4 +1170,10 @@ bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, Remote
     return impl_->execute(request, response);
 }
 
+}  // namespace rtp_llm
+
+namespace rtp_llm {
+bool KVCMStorageBackend::captureCompletedDecode(const BatchKVCacheResource& resource, size_t end, bool finished) {
+    return impl_->captureCompletedDecode(resource, end, finished);
+}
 }  // namespace rtp_llm

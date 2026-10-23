@@ -703,7 +703,27 @@ void NormalEngine::loop() {
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
-    while (running_) {
+    // A rank must not leave while a peer still executes a TP/DP/EP step.
+    // Stop votes use WORLD at the same loop boundary on every rank, outside
+    // model CUDA Graphs. Keep stopped schedulers participating in empty/fake
+    // rounds until every rank has completed RPC drain and requested stop.
+    // A barrier only in stop() is insufficient: peers may still be inside
+    // the next forward collective and would never enter that barrier.
+    torch::Tensor stop_vote;
+    if (parallelism_config.world_size > 1) {
+        stop_vote = torch::empty({1}, torch::TensorOptions().dtype(torch::kInt32).device(getTorchCudaDevice()));
+    }
+    while (true) {
+        bool all_stopping = !running_.load();
+        if (stop_vote.defined()) {
+            stop_vote.fill_(all_stopping ? 1 : 0);
+            all_stopping = execAllReduce({stop_vote, ReduceOp::Min, false, ParallelMode::DP_AND_TP, {}})
+                               .buffer.item<int>() == 1;
+        }
+        if (all_stopping) {
+            RTP_LLM_LOG_INFO("NormalEngine coordinated stop: all ranks acknowledged at step boundary");
+            break;
+        }
         auto status = step();
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());

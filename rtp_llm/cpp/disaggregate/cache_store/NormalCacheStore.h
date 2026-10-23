@@ -8,6 +8,8 @@
 #include "autil/ThreadPool.h"
 
 #include <memory>
+#include <mutex>
+#include <atomic>
 
 namespace rtp_llm {
 
@@ -17,6 +19,8 @@ private:
 
 public:
     ~NormalCacheStore();
+    // Idempotent quiescence, independent of shared ownership after RPC drain.
+    void stop();
 
 public:
     static std::shared_ptr<NormalCacheStore> createNormalCacheStore(const CacheStoreInitParams& params);
@@ -79,7 +83,8 @@ private:
     const std::shared_ptr<RequestBlockBufferStore>& getRequestBlockBufferStore() const;
 
 private:
-    bool                                                                             thread_pool_close_{false};
+    std::once_flag                                                                   stop_once_;
+    std::atomic<bool>                                                                thread_pool_close_{false};
     int                                                                              device_id_{-1};
     CacheStoreInitParams                                                             params_;
     std::shared_ptr<MemoryUtil>                                                      memory_util_;

@@ -10,6 +10,7 @@ class RemoteRpcServer: public LocalRpcServer {
 public:
     RemoteRpcServer() {}
     virtual ~RemoteRpcServer() {}
+    void stop() override;
     grpc::Status init(const EngineInitParams&                                maga_init_params,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             mm_process_engine);
@@ -28,6 +29,7 @@ protected:
     RemoteServerResource        resource_;
     std::atomic<size_t>         loading_cache_requests_{0};
     std::shared_ptr<CacheStore> cache_store_;
+    std::once_flag cache_store_stop_once_;
 };
 
 }  // namespace rtp_llm

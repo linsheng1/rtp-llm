@@ -6,6 +6,19 @@ using namespace std;
 
 namespace rtp_llm {
 
+void RemoteRpcServer::stop() {
+    std::call_once(cache_store_stop_once_, [this]() {
+        LocalRpcServer::stop();
+        // CacheManager/context aliases can keep this store alive after engine
+        // stop. Its RPC and reporting threads must not outlive KMonitor.
+        if (resource_.cache_store) { resource_.cache_store->stop(); }
+        cache_store_.reset();
+        resource_.cache_store.reset();
+        RTP_LLM_LOG_INFO("RemoteRpcServer CacheStore quiesced before monitor shutdown");
+    });
+}
+
+
 grpc::Status RemoteRpcServer::init(const EngineInitParams&                                maga_init_params,
                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                                    py::object                                             mm_process_engine) {

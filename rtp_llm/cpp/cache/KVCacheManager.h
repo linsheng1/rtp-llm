@@ -134,6 +134,10 @@ public:
     // succeeded; the transfer outcome is reported through mem_response.code.
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
 
+    bool captureCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end, bool decode_finished = true) const {
+        return coordinator_manager_ && coordinator_manager_->captureCompletedDecode(resource, computed_end, decode_finished);
+    }
+
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;
     }

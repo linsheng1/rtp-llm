@@ -144,3 +144,20 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+# CPU-only lifecycle regression: never allocates a CUDA device or model weights.
+cc_test(
+    name = "logits_processor_factory_shutdown_test",
+    srcs = ["LogitsProcessorFactoryShutdownTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/engine_base/grammar:grammar_cpp_lib",
+        "//rtp_llm/cpp/models:logits_processor",
+        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+        "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+        "@havenask//aios/kmonitor:kmonitor_client_cpp",
+        "@xgrammar",
+    ] + torch_deps(),
+)

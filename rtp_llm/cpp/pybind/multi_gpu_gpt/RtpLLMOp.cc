@@ -8,6 +8,7 @@
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/resource_quota.h>
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -521,6 +522,9 @@ void RtpLLMOp::stop() {
             pybind11::gil_scoped_release release;
             telemetry::TelemetryRuntime::shutdown();
         }
+        // Engine, request and HTTP workers above are already stopped. Release the
+        // process-wide grammar reporter before KMonitor invalidates its raw monitor.
+        LogitsProcessorFactory::shutdown();
         stopKmonitorFactory();
     }
 }

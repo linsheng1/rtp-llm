@@ -22,6 +22,10 @@ public:
                      const std::string&             tree_decode_config,
                      kmonitor::MetricsReporterPtr   metrics_reporter = nullptr);
 
+    // Call after engine/RPC workers stop, before shutting down KMonitor.
+    // The process-wide grammar backend owns a MetricsReporter and compiler threads.
+    static void shutdown();
+
     static ErrorResult<std::vector<BaseLogitsProcessorPtr>>
     createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,
                            int32_t                        init_batch_size,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <unordered_map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -9,6 +10,16 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
+// Opt-in D-to-P completion staging. Immutable FULL payloads are shared between
+// successive snapshots; rolling state/SWA is replaced at each valid boundary.
+// This is request-owned CPU memory, never a remote location or publication.
+struct DecodeCompletionSnapshot {
+    size_t computed_end{0};
+    CacheKeysType keys;
+    std::vector<std::vector<std::string>> tags;
+    using Payload = std::shared_ptr<std::vector<unsigned char>>;
+    std::vector<std::unordered_map<std::string, Payload>> payloads;
+};
 class BatchKVCacheResource {
 public:
     BatchKVCacheResource() {}
@@ -18,6 +29,7 @@ public:
     }
 
     void resetBatchSize(size_t batch_size) {
+        if (batch_size != batch_resource.size()) decode_completion_snapshot_.reset();
         batch_resource.resize(batch_size);
         cache_keys_initialized_ = false;
     }
@@ -91,6 +103,7 @@ public:
     }
 
     void clearBlocks() {
+        decode_completion_snapshot_.reset();
         resizeBlocks(0, 0);
     }
 
@@ -175,6 +188,7 @@ public:
     }
 
     void swap(BatchKVCacheResource& other) noexcept {
+        decode_completion_snapshot_.swap(other.decode_completion_snapshot_);
         batch_resource.swap(other.batch_resource);
         std::swap(cache_keys_initialized_, other.cache_keys_initialized_);
     }
@@ -233,7 +247,12 @@ public:
         cacheResource(batch_id).swapBlocks(group_tag, rhs, lhs);
     }
 
+    // Scheduler serializes callbacks for a request; cancellation/free clears it.
+    std::shared_ptr<DecodeCompletionSnapshot>& decodeCompletionSnapshot() const {
+        return decode_completion_snapshot_;
+    }
 private:
+    mutable std::shared_ptr<DecodeCompletionSnapshot> decode_completion_snapshot_;
     std::vector<KVCacheResource> batch_resource;  // [batch_size]
     bool                         cache_keys_initialized_{false};
 };

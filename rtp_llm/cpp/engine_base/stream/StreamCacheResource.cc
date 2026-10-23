@@ -1,3 +1,4 @@
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -121,6 +122,15 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               stream_->streamId(),
                               total_blocks,
                               tierName(target_tier));
+            const bool lookup_only = autil::EnvUtil::getEnv("RTP_DTOP_BENCH_READ_ONLY_REQUESTS", false)
+                                     && !stream_->generateConfig()->enable_device_cache;
+            if (!lookup_only && autil::EnvUtil::getEnv("RTP_DTOP_FILE_CP2", false)
+                && resource_context_.role_type == RoleType::DECODE
+                && stream_->completeTokenIdsPtr()->seqLength() > 0) {
+                (void)resource_context_.cache_manager->captureCompletedDecode(
+                    *batch_kv_cache_resource_,
+                    static_cast<size_t>(stream_->completeTokenIdsPtr()->seqLength() - 1), true);
+            }
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier};
                 size_t     resident_prefix_length = 0;
@@ -543,6 +553,8 @@ Tier StreamCacheResource::storeTarget() const {
     if (!reuseCache()) {
         return Tier::NONE;
     }
+    if (autil::EnvUtil::getEnv("RTP_DTOP_BENCH_READ_ONLY_REQUESTS", false)
+        && !stream_->generateConfig()->enable_device_cache) { return Tier::NONE; }
     if (enableDeviceCache()) {
         return Tier::DEVICE;
     }

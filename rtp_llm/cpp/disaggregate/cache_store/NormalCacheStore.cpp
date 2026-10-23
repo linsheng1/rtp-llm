@@ -17,17 +17,36 @@ constexpr int    kDevicePinRetryBackoffMs         = 1000;
 
 }  // namespace
 
-NormalCacheStore::~NormalCacheStore() {
-    if (thread_pool_) {
-        thread_pool_close_ = true;
-        thread_pool_->stop();
-        thread_pool_.reset();
-    }
+NormalCacheStore::~NormalCacheStore() { stop(); }
 
-    request_block_buffer_store_->stop();
-    messager_.reset();
-    request_block_buffer_store_.reset();
-    RTP_LLM_LOG_INFO("destory cache store done");
+void NormalCacheStore::stop() {
+    std::call_once(stop_once_, [this]() {
+        thread_pool_close_ = true;
+        if (thread_pool_) {
+            thread_pool_->stop();
+            thread_pool_.reset();
+        }
+        if (request_block_buffer_store_) { request_block_buffer_store_->stop(); }
+        messager_.reset();
+        request_block_buffer_store_.reset();
+        // Release captured reporters while KMonitor is still alive. Never drop
+        // callback/lease owners while holding their registry mutexes.
+        decltype(store_tasks_) stores;
+        decltype(remote_store_tasks_) remote_stores;
+        {
+            std::unique_lock<std::shared_mutex> lock(store_tasks_mutex_);
+            stores.swap(store_tasks_);
+        }
+        {
+            std::unique_lock<std::shared_mutex> lock(remote_store_tasks_mutex_);
+            remote_stores.swap(remote_store_tasks_);
+        }
+        stores.clear();
+        remote_stores.clear();
+        metrics_reporter_.reset();
+        params_.metrics_reporter.reset();
+        RTP_LLM_LOG_INFO("NormalCacheStore explicit stop: workers, transport and reporters released");
+    });
 }
 
 std::shared_ptr<NormalCacheStore> NormalCacheStore::createNormalCacheStore(const CacheStoreInitParams& params) {

@@ -1339,6 +1339,22 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
         return;
     }
 
+    // Opt-in completion snapshot: GPU forward/sampler has completed before host
+    // token commit; retain a local snapshot before resource rotation. No remote IO.
+    // The newly sampled final token has no KV. Default/off paths stay unchanged.
+    if (autil::EnvUtil::getEnv("RTP_DTOP_FILE_CP2", false)
+        // Match StreamCacheResource::storeTarget's private lookup-only contract.
+        // A consumer may load existing checkpoints without publishing new ones.
+        && !(autil::EnvUtil::getEnv("RTP_DTOP_BENCH_READ_ONLY_REQUESTS", false)
+             && !generateConfig()->enable_device_cache)
+        && !useStreamAsyncReserveTokens() && num_new_tokens == 1 && currentBatchSize() == 1
+        && resourceContext().role_type == RoleType::DECODE && stream_cache_resource_->reuseCache()) {
+        const size_t computed_end = static_cast<size_t>(seqLength() - 1);
+        if (computed_end > static_cast<size_t>(std::max(512, inputLength())) && computed_end % 128 == 0) {
+            resourceContext().cache_manager->captureCompletedDecode(kvCache(), computed_end, false);
+        }
+    }
+
     // TODO(xinfei.sxf) fix this (update_queue)
     updateOutput(update_info);
 

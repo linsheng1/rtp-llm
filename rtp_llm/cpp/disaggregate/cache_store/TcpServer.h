@@ -3,6 +3,8 @@
 #include "aios/network/anet/transport.h"
 #include "aios/network/arpc/arpc/ANetRPCServer.h"
 
+namespace anet { class KMonitorANetMetricReporter; }
+
 namespace rtp_llm {
 
 class TcpServer {
@@ -22,6 +24,9 @@ private:
     void stop();
 
 private:
+    // The transport owns and explicitly joins its ANet reporting loop.
+    // RPC stats may retain the separate request reporter after server Close().
+    std::shared_ptr<anet::KMonitorANetMetricReporter> transport_metrics_;
     std::unique_ptr<anet::Transport>       rpc_server_transport_;
     std::shared_ptr<arpc::ANetRPCServer>   rpc_server_;
     std::shared_ptr<autil::ThreadPoolBase> rpc_worker_threadpool_;

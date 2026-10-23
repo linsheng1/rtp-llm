@@ -20,6 +20,8 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
+class BatchKVCacheResource;
+
 
 struct StorageBlockHandle {
     std::string  tag;
@@ -118,6 +120,9 @@ public:
     bool write(StorageWriteTask task);
     // Must not be called from backend I/O or completion callbacks.
     void shutdown();
+
+    // Caller retains source blocks until completion capture returns.
+    virtual bool captureCompletedDecode(const BatchKVCacheResource&, size_t, bool = true) { return false; }
 
 protected:
     const CacheTopology&      topology() const;

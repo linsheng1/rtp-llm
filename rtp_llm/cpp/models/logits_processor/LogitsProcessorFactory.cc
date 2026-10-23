@@ -82,6 +82,15 @@ void LogitsProcessorFactory::init(const ModelConfig&           model_config,
     PrefixToCandidateTokens::instance()->reloadPrefixDictWithPrefix(model_config.ckpt_path, tree_decode_config);
 }
 
+void LogitsProcessorFactory::shutdown() {
+    // Drop the static owner while KMonitor still owns the reporter's KMonitor.
+    // XGrammarBackend destruction joins its compile pool before releasing metrics.
+    // Leaving this until C++ static destruction dereferences a monitor already freed
+    // by RtpLLMOp::stop's KMonitorFactory::Shutdown(). Safe to call more than once.
+    grammarBackend().reset();
+    RTP_LLM_LOG_INFO("LogitsProcessorFactory shutdown: grammar backend released");
+}
+
 ErrorResult<std::vector<BaseLogitsProcessorPtr>>
 LogitsProcessorFactory::createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,
                                                int32_t                        init_batch_size,

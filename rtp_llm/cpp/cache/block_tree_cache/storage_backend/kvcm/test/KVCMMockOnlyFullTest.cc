@@ -155,7 +155,7 @@ TEST(KVCMMockOnlyFullTest, CustomConfigExcludesDisabledStateAndKeepsActiveAliase
     RuntimeConfig runtime;
     runtime.model_name = "kvcm_test_model";
     BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config, config, runtime,
-        singleRankConfig(), SpeculativeExecutionConfig{}, nullptr, client));
+        singleRankConfig(), SpeculativeExecutionConfig{}, nullptr, false, nullptr, client));
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
     const kv_cache_manager::Locations locations{{{"tp0_Ffull0", "full_101"}}};
     EXPECT_CALL(*client, match(_, _, kv_cache_manager::QueryType::QT_PREFIX_MATCH,
@@ -189,7 +189,7 @@ TEST(KVCMMockOnlyFullTest, SwaPayloadMatchUsesBatchLocationsForFullPrefix) {
     EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client, shutdown()).Times(1);
     BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config, config, runtime,
-        ParallelismConfig{}, SpeculativeExecutionConfig{}, nullptr, client));
+        ParallelismConfig{}, SpeculativeExecutionConfig{}, nullptr, false, nullptr, client));
     ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(), environment.pools_by_tag,
         [&](int layer, const std::string& tag, int block) {
             return environmentBuffers(environment, layer, tag, block);
@@ -219,7 +219,7 @@ TEST(KVCMMockOnlyFullTest, BackendMatchStopsAtAMissAndPreservesReadUriPosition) 
     EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config, config, runtime,
-        ParallelismConfig{}, SpeculativeExecutionConfig{}, nullptr, client_wrapper));
+        ParallelismConfig{}, SpeculativeExecutionConfig{}, nullptr, false, nullptr, client_wrapper));
     ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(), environment.pools_by_tag,
         [&](int layer, const std::string&, int block) {
             return environment.device_pool->convertIndexToBuffer(layer, block);
@@ -250,7 +250,7 @@ TEST(KVCMMockOnlyFullTest, BackendReadPreservesLocalPrefixAndStopsAtRemoteMiss) 
     EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client, shutdown()).Times(1);
     BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config, config, runtime,
-        ParallelismConfig{}, SpeculativeExecutionConfig{}, nullptr, client));
+        ParallelismConfig{}, SpeculativeExecutionConfig{}, nullptr, false, nullptr, client));
     ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(), environment.pools_by_tag,
         [&](int layer, const std::string&, int block) {
             return environment.device_pool->convertIndexToBuffer(layer, block);
