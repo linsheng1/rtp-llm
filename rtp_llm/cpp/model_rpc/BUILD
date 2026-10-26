@@ -184,6 +184,9 @@ cc_library(
     srcs = ["ShutdownCoordinator.cc"],
     hdrs = ["ShutdownCoordinator.h"],
     copts = copts(),
-    deps = ["//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto"],
+    deps = [
+        "//rtp_llm/cpp/engine_base:loop_stop_gate",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
+    ],
     visibility = ["//visibility:public"],
 )

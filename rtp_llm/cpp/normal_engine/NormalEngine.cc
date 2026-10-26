@@ -680,14 +680,26 @@ absl::Status NormalEngine::startLoop() {
         RTP_LLM_LOG_INFO("init system prompt done");
     }
     RTP_LLM_LOG_INFO("start normal engine loop");
+    loop_stop_gate_.start();
     running_     = true;
     loop_thread_ = autil::Thread::createThread(std::bind(&NormalEngine::loop, this), "normal_engine_loop");
     return absl::OkStatus();
 }
 
+LoopStopGate::State NormalEngine::fenceLoopStop(uint64_t target) {
+    // Wake an idle TP root so it can finish its current input broadcast.
+    // The shutdown coordinator invokes this only after group request drain.
+    if (!loop_fencing_.exchange(true)) {
+        RTP_LLM_LOG_INFO("shutdown loop fence requested at target step %lu", target);
+        THROW_IF_STATUS_ERROR(scheduler_->stop());
+    }
+    return loop_stop_gate_.fence(target);
+}
+
 absl::Status NormalEngine::stop() {
     RTP_LLM_LOG_INFO("stop normal engine");
     running_ = false;
+    loop_stop_gate_.stop();
     RETURN_IF_STATUS_ERROR(scheduler_->stop());
     if (loop_thread_) {
         loop_thread_->join();
@@ -705,13 +717,15 @@ void NormalEngine::loop() {
     RTP_LLM_LOG_INFO("loop begin");
     c10::InferenceMode inference_guard(true);
     setCurrentThreadDevice(getDeviceId());
-    while (running_) {
+    while (running_ && loop_stop_gate_.enter()) {
         auto status = step();
+        loop_stop_gate_.complete();
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("step running error: %s", status.ToString().c_str());
             THROW_IF_STATUS_ERROR(trySaveStepError());
         }
     }
+    RTP_LLM_LOG_INFO("normal engine loop exited at completed boundary %lu", loop_stop_gate_.state().step);
 }
 
 absl::Status NormalEngine::trySaveStepError() const {

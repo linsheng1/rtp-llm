@@ -13,6 +13,7 @@ using namespace std::chrono_literals;
 class ShutdownCoordinatorTest: public ::testing::Test {
 protected:
     struct Peer: RpcService::Service {
+        LoopStopGate gate;
         std::atomic<bool>                    draining{true};
         std::atomic<size_t>                  onflight{0};
         std::atomic<bool>                    fail_first_release{false};
@@ -71,6 +72,97 @@ protected:
     std::array<Peer, 4>      peers_;
     std::vector<std::string> addresses_;
 };
+
+TEST(LoopStopGateTest, EnteredStepMustCompleteBeforeItCanPark) {
+    LoopStopGate gate;
+    gate.start();
+    ASSERT_TRUE(gate.enter());
+    auto state = gate.fence(0);
+    EXPECT_EQ(state.step, 1);
+    EXPECT_FALSE(state.parked);
+    gate.complete();
+    EXPECT_TRUE(gate.state().parked);
+    auto waiting = std::async(std::launch::async, [&] { return gate.enter(); });
+    EXPECT_EQ(waiting.wait_for(20ms), std::future_status::timeout);
+    gate.stop();
+    EXPECT_FALSE(waiting.get());
+}
+
+TEST(LoopStopGateTest, HigherFenceResumesLaggingLoopAndNeverMovesBackward) {
+    LoopStopGate gate;
+    gate.start();
+    EXPECT_TRUE(gate.fence(0).parked);
+    auto waiting = std::async(std::launch::async, [&] { return gate.enter(); });
+    EXPECT_EQ(waiting.wait_for(20ms), std::future_status::timeout);
+    gate.fence(2);
+    EXPECT_TRUE(waiting.get());
+    gate.complete();
+    EXPECT_TRUE(gate.enter());
+    EXPECT_FALSE(gate.fence(0).parked);
+    gate.complete();
+    EXPECT_EQ(gate.state().step, 2);
+    EXPECT_TRUE(gate.state().parked);
+    gate.stop();
+}
+
+TEST_F(ShutdownCoordinatorTest, DrainedRequestsDoNotMeanSameModelLoopBoundary) {
+    for (size_t i = 0; i < peers_.size(); ++i) {
+        peers_[i].gate.start();
+        // Model a TP root one completed step ahead of its peers.
+        if (i == 0) { ASSERT_TRUE(peers_[i].gate.enter()); peers_[i].gate.complete(); }
+        peers_[i].coordinator = std::make_unique<ShutdownCoordinator>(
+            addresses_, i,
+            [this, i] { return ShutdownCoordinator::State{peers_[i].draining.load(), peers_[i].onflight.load()}; },
+            [this, i] { peers_[i].draining = true; },
+            [this, i](bool fence, uint64_t target) { return fence ? peers_[i].gate.fence(target) : peers_[i].gate.state(); });
+    }
+    auto deadline = std::chrono::system_clock::now() + 3s;
+    auto stopping = std::async(std::launch::async, [&] { return peers_[0].coordinator->wait(deadline); });
+    EXPECT_EQ(stopping.wait_for(60ms), std::future_status::timeout)
+        << "all requests are drained but lagging loops have not caught up";
+    for (size_t i = 1; i < peers_.size(); ++i) {
+        ASSERT_TRUE(peers_[i].gate.enter());
+        peers_[i].gate.complete();
+    }
+    EXPECT_TRUE(stopping.get());
+    for (auto& peer : peers_) {
+        EXPECT_TRUE(peer.gate.state().parked);
+        EXPECT_EQ(peer.gate.state().step, 1);
+    }
+    peers_[0].server->Shutdown();
+    EXPECT_TRUE(peers_[3].coordinator->wait(deadline)) << "same-step certificate survives observer exit";
+    for (auto& peer : peers_) { peer.gate.stop(); }
+}
+
+
+TEST_F(ShutdownCoordinatorTest, ConcurrentStopsCloseRpcOnlyAfterSameStepCertificate) {
+    for (size_t i = 0; i < peers_.size(); ++i) {
+        peers_[i].gate.start();
+        peers_[i].coordinator = std::make_unique<ShutdownCoordinator>(
+            addresses_, i,
+            [this, i] { return ShutdownCoordinator::State{peers_[i].draining.load(), peers_[i].onflight.load()}; },
+            [this, i] { peers_[i].draining = true; },
+            [this, i](bool fence, uint64_t target) { return fence ? peers_[i].gate.fence(target) : peers_[i].gate.state(); });
+    }
+    const auto deadline = std::chrono::system_clock::now() + 3s;
+    std::vector<std::future<bool>> stopping;
+    for (size_t i = 0; i < peers_.size(); ++i) {
+        stopping.emplace_back(std::async(std::launch::async, [this, i, deadline] {
+            const bool ok = peers_[i].coordinator->wait(deadline);
+            peers_[i].server->Shutdown(std::chrono::system_clock::now());
+            return ok;
+        }));
+    }
+    for (auto& result : stopping) { EXPECT_TRUE(result.get()); }
+    for (auto& peer : peers_) { peer.gate.stop(); }
+}
+
+TEST_F(ShutdownCoordinatorTest, FenceIsRejectedBeforeAllRequestsDrain) {
+    auto request = statusRequest();
+    request.set_fence_engine(true);
+    ShutdownResponsePB response;
+    EXPECT_EQ(peers_[0].coordinator->handle(request, &response).error_code(), grpc::StatusCode::FAILED_PRECONDITION);
+}
 
 TEST_F(ShutdownCoordinatorTest, IdleRanksWaitForStaggeredBusyRank) {
     peers_[1].draining = false;

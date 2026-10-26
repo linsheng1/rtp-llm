@@ -859,6 +859,9 @@ message ShutdownRequestPB {
     repeated string drained_instances = 2;
     bool begin_shutdown = 3;
     int64 deadline_unix_ms = 4;
+    bool fence_engine = 5;
+    uint64 engine_step = 6;
+    repeated string parked_instances = 7;
 }
 
 message ShutdownResponsePB {
@@ -867,6 +870,10 @@ message ShutdownResponsePB {
     string instance_id = 3;
     repeated string drained_instances = 4;
     int64 deadline_unix_ms = 5;
+    bool engine_fence_supported = 6;
+    uint64 engine_step = 7;
+    bool engine_parked = 8;
+    repeated string parked_instances = 9;
 }
 
 message FunctionRequestPB {
