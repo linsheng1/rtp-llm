@@ -66,6 +66,7 @@ cc_library(
     hdrs = [
         "ClientFactory.h",
         "PackedSsdTransferClient.h",
+        "CoalescedPaceWriteClient.h",
         "ClientWrapper.h",
         "KVCMConfig.h",
     ],

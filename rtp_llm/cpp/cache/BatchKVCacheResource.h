@@ -10,16 +10,6 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
-// Opt-in D-to-P completion staging. Immutable FULL payloads are shared between
-// successive snapshots; rolling state/SWA is replaced at each valid boundary.
-// This is request-owned CPU memory, never a remote location or publication.
-struct DecodeCompletionSnapshot {
-    size_t computed_end{0};
-    CacheKeysType keys;
-    std::vector<std::vector<std::string>> tags;
-    using Payload = std::shared_ptr<std::vector<unsigned char>>;
-    std::vector<std::unordered_map<std::string, Payload>> payloads;
-};
 class BatchKVCacheResource {
 public:
     BatchKVCacheResource() {}
@@ -29,7 +19,8 @@ public:
     }
 
     void resetBatchSize(size_t batch_size) {
-        if (batch_size != batch_resource.size()) decode_completion_snapshot_.reset();
+        if (batch_size != batch_resource.size())
+            decode_completion_submitted_ = false;
         batch_resource.resize(batch_size);
         cache_keys_initialized_ = false;
     }
@@ -103,7 +94,7 @@ public:
     }
 
     void clearBlocks() {
-        decode_completion_snapshot_.reset();
+        decode_completion_submitted_ = false;
         resizeBlocks(0, 0);
     }
 
@@ -188,7 +179,7 @@ public:
     }
 
     void swap(BatchKVCacheResource& other) noexcept {
-        decode_completion_snapshot_.swap(other.decode_completion_snapshot_);
+        std::swap(decode_completion_submitted_, other.decode_completion_submitted_);
         batch_resource.swap(other.batch_resource);
         std::swap(cache_keys_initialized_, other.cache_keys_initialized_);
     }
@@ -247,12 +238,14 @@ public:
         cacheResource(batch_id).swapBlocks(group_tag, rhs, lhs);
     }
 
-    // Scheduler serializes callbacks for a request; cancellation/free clears it.
-    std::shared_ptr<DecodeCompletionSnapshot>& decodeCompletionSnapshot() const {
-        return decode_completion_snapshot_;
+    // Scheduler-owned idempotency only. Payloads stay in their native GPU pools;
+    // StorageBackend owns the retained references after EOS admission.
+    bool& decodeCompletionSubmitted() const {
+        return decode_completion_submitted_;
     }
+
 private:
-    mutable std::shared_ptr<DecodeCompletionSnapshot> decode_completion_snapshot_;
+    mutable bool                 decode_completion_submitted_{false};
     std::vector<KVCacheResource> batch_resource;  // [batch_size]
     bool                         cache_keys_initialized_{false};
 };

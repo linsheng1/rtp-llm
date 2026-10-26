@@ -1,60 +1,87 @@
-// Included inside KVCMStorageBackend::Impl. Opt-in experiment only:
-// D publishes complete canonical P checkpoints after FINISHED. Real PACE
-// uses the native registered pools; cross-layout snapshots use CPU staging.
+// EOS-only native GPU publication. No early payload copy or CPU snapshot.
+// Metadata and payload transfer reuse the Prefill StorageBackend pipeline.
+struct CompletionAccounting {
+    std::mutex mutex;
+    size_t     bytes{0}, jobs{0};
+};
+struct CompletionLease {
+    std::shared_ptr<CompletionAccounting> accounting;
+    size_t                                bytes;
+    CompletionLease(std::shared_ptr<CompletionAccounting> state, size_t n): accounting(std::move(state)), bytes(n) {}
+    ~CompletionLease() {
+        std::lock_guard<std::mutex> guard(accounting->mutex);
+        accounting->bytes -= bytes;
+        --accounting->jobs;
+    }
+};
+
 bool configureFileCp2(StorageBackend::BufferResolver resolver) {
-    file_resolver_ = resolver;
-    file_pace_ = autil::EnvUtil::getEnv("RTP_DTOP_PACE", false);
-    file_cp2_ = file_pace_ || autil::EnvUtil::getEnv("RTP_DTOP_FILE_CP2", false);
+    file_resolver_             = resolver;
+    file_pace_                 = autil::EnvUtil::getEnv("RTP_DTOP_PACE", false);
+    file_cp2_                  = file_pace_ || autil::EnvUtil::getEnv("RTP_DTOP_FILE_CP2", false);
     std::string backend_config = kv_cache_config_.kvcm_model_sdk_config;
-    backend_config.erase(std::remove_if(backend_config.begin(), backend_config.end(),
-                                       [](unsigned char c) { return std::isspace(c); }), backend_config.end());
-    const bool packed_ssd=autil::EnvUtil::getEnv("RTP_DTOP_PACE_SSD_PACKED_IO", false);
-    if (packed_ssd && (!file_pace_ || gdr_enabled_ || backend_config!="[{\"type\":\"pace_ssd\"}]"
-                       || kv_cache_config_.kvcm_read_backend_type!=9)) {
+    backend_config.erase(
+        std::remove_if(backend_config.begin(), backend_config.end(), [](unsigned char c) { return std::isspace(c); }),
+        backend_config.end());
+    const bool packed_ssd = autil::EnvUtil::getEnv("RTP_DTOP_PACE_SSD_PACKED_IO", false);
+    if (packed_ssd
+        && (!file_pace_ || gdr_enabled_ || backend_config != "[{\"type\":\"pace_ssd\"}]"
+            || kv_cache_config_.kvcm_read_backend_type != 9)) {
         RTP_LLM_LOG_ERROR("explicit SSD compatibility requires backend9/pace_ssd and CPU staging, GDR disabled");
         return false;
     }
     if (!file_cp2_) {
         return true;
     }
+    const int gpu_mib  = autil::EnvUtil::getEnv("RTP_DTOP_GPU_PENDING_MIB", 4096);
+    const int gpu_jobs = autil::EnvUtil::getEnv("RTP_DTOP_GPU_PENDING_JOBS", 2);
+    if (gpu_mib < 1 || gpu_mib > 16384 || gpu_jobs < 1 || gpu_jobs > 64)
+        return false;
     const int requested_tp = autil::EnvUtil::getEnv("RTP_DTOP_FILE_TARGET_P_TP", 2);
     if (!file_pace_ || (requested_tp != 2 && requested_tp != 4)
         || parallelism_config_.prefill_cp_config.prefill_cp_size != requested_tp) {
-        RTP_LLM_LOG_ERROR("DTOP native candidate requires matching PACE CP2 or CP4 target (sharded or replicated)");
+        RTP_LLM_LOG_ERROR("DTOP native candidate requires matching PACE CP2 or CP4 target");
         return false;
     }
-    file_decode_ = parallelism_config_.role_type == RoleType::DECODE;
-    const bool prefill = parallelism_config_.role_type == RoleType::PREFILL;
-    const auto& cp = parallelism_config_.prefill_cp_config;
-    file_target_cp_ = cp.prefill_cp_size;
-    file_target_tp_ = autil::EnvUtil::getEnv("RTP_DTOP_FILE_TARGET_P_TP",
-                                            prefill ? static_cast<int>(parallelism_config_.tp_size) : file_target_cp_);
-    file_shards_ = cp.kv_cache_sharded ? file_target_cp_ : 1;
+    file_decode_         = parallelism_config_.role_type == RoleType::DECODE;
+    const bool  prefill  = parallelism_config_.role_type == RoleType::PREFILL;
+    const auto& cp       = parallelism_config_.prefill_cp_config;
+    file_target_cp_      = cp.prefill_cp_size;
+    file_target_tp_      = autil::EnvUtil::getEnv("RTP_DTOP_FILE_TARGET_P_TP",
+                                             prefill ? static_cast<int>(parallelism_config_.tp_size) : file_target_cp_);
+    file_shards_         = cp.kv_cache_sharded ? file_target_cp_ : 1;
     file_capture_blocks_ = autil::EnvUtil::getEnv("RTP_DTOP_FILE_CAPTURE_BLOCKS", file_shards_);
-    if ((!file_decode_ && !prefill) || cache_config_.seq_size_per_block != 128
-        || !cache_config_.mtp_sub_configs.empty() || sp_config_.type != SP_TYPE_NONE
+    if ((!file_decode_ && !prefill) || cache_config_.seq_size_per_block != 128 || !cache_config_.mtp_sub_configs.empty()
+        || sp_config_.type != SP_TYPE_NONE
         || !((file_target_tp_ == 2 && (cp.prefill_cp_size == 1 || cp.prefill_cp_size == 2))
              || (file_target_tp_ == 4 && (cp.prefill_cp_size == 1 || cp.prefill_cp_size == 4)))
-        || (file_capture_blocks_ != 1 && file_capture_blocks_ != file_shards_ && !(file_shards_ == 1 && file_capture_blocks_ == file_target_cp_))
-        || !kv_cache_config_.kvcm_client_config.empty()
-        || kv_cache_config_.kvcm_instance_id_salt.empty()
+        || (file_capture_blocks_ != 1 && file_capture_blocks_ != file_shards_
+            && !(file_shards_ == 1 && file_capture_blocks_ == file_target_cp_))
+        || !kv_cache_config_.kvcm_client_config.empty() || kv_cache_config_.kvcm_instance_id_salt.empty()
         || kv_cache_config_.kvcm_instance_group.rfind("linshuo_decode_remote_", 0) != 0
-        || (file_pace_ ? backend_config != (packed_ssd ? "[{\"type\":\"pace_ssd\"}]" : "[{\"type\":\"pace\"}]") : kv_cache_config_.kvcm_model_sdk_config.find("\"file\"") == std::string::npos)
-        || (file_decode_ && !((file_target_tp_ == 2
-                              && ((parallelism_config_.tp_size == 1 && parallelism_config_.dp_size == 2)
-                                  || (parallelism_config_.tp_size == 2 && parallelism_config_.dp_size == 1)))
-                              || (file_target_tp_ == 4 && parallelism_config_.tp_size == 1
-                                  && parallelism_config_.dp_size == 4 && parallelism_config_.ep_size == 4)))
+        || (file_pace_ ? backend_config != (packed_ssd ? "[{\"type\":\"pace_ssd\"}]" : "[{\"type\":\"pace\"}]") :
+                         kv_cache_config_.kvcm_model_sdk_config.find("\"file\"") == std::string::npos)
+        || (file_decode_
+            && !((file_target_tp_ == 2 && (parallelism_config_.tp_size == 1 && parallelism_config_.dp_size == 2))
+                 || (file_target_tp_ == 4 && parallelism_config_.tp_size == 1 && parallelism_config_.dp_size == 4
+                     && parallelism_config_.ep_size == 4)))
         || (prefill && (parallelism_config_.tp_size != file_target_tp_ || parallelism_config_.dp_size != 1))) {
         RTP_LLM_LOG_ERROR("DTOP_FILE rejects unsupported role/layout/configuration");
         return false;
     }
-    RTP_LLM_LOG_INFO("DTOP_FILE layout target_cp=%d target_tp=%d shards=%d capture_blocks=%d visible_tokens=%d dp=%ld role=%d",
-                     file_target_cp_, file_target_tp_, file_shards_, file_capture_blocks_,
-                     128 * std::max(file_shards_, file_capture_blocks_), parallelism_config_.dp_size,
-                     static_cast<int>(parallelism_config_.role_type));
+    RTP_LLM_LOG_INFO(
+        "DTOP_FILE layout target_cp=%d target_tp=%d shards=%d capture_blocks=%d visible_tokens=%d dp=%ld role=%d",
+        file_target_cp_,
+        file_target_tp_,
+        file_shards_,
+        file_capture_blocks_,
+        128 * std::max(file_shards_, file_capture_blocks_),
+        parallelism_config_.dp_size,
+        static_cast<int>(parallelism_config_.role_type));
     RTP_LLM_LOG_INFO("DTOP_TRANSPORT backend=%s end_only=1 target_cp=%d target_tp=%d",
-                     file_pace_ ? "pace" : "file", file_target_cp_, file_target_tp_);
+                     file_pace_ ? "pace" : "file",
+                     file_target_cp_,
+                     file_target_tp_);
     file_resolver_ = std::move(resolver);
     return true;
 }
@@ -66,26 +93,29 @@ size_t fileWireBytes(const std::string& tag) const {
     const auto& group = cache_config_.topology().group(tag);
     if (group.policy.group_type == CacheGroupType::FULL) {
         RTP_LLM_CHECK_WITH_INFO(group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN,
-                                "DTOP_FILE requires FULL page RR, tag=%s", tag.c_str());
+                                "DTOP_FILE requires FULL page RR, tag=%s",
+                                tag.c_str());
         return cache_config_.blockSizeBytesForGroup(tag);
     }
     RTP_LLM_CHECK_WITH_INFO(group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK
-                               && group.seqSizePerBlock() == 128 * file_shards_,
-                            "DTOP_FILE requires matching canonical state/SWA span, tag=%s", tag.c_str());
+                                && group.seqSizePerBlock() == 128 * file_shards_,
+                            "DTOP_FILE requires matching canonical state/SWA span, tag=%s",
+                            tag.c_str());
     size_t bytes = 0;
     for (const int layer : cache_config_.layerIdsForGroup(tag)) {
         const auto& physical = cache_config_.physicalGroupForLayer(layer, tag);
-        RTP_LLM_CHECK_WITH_INFO(physical.kvScaleStrideBytes() == 0,
-                                "DTOP_FILE requires packed state/SWA, tag=%s", tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(
+            physical.kvScaleStrideBytes() == 0, "DTOP_FILE requires packed state/SWA, tag=%s", tag.c_str());
         size_t payload = physical.kvBlockStrideBytes();
         if (group.policy.cp_slice == CpBlockSliceMode::PAYLOAD_BYTES) {
             payload = group.spec->k_block_payload_bytes();
         } else {
             RTP_LLM_CHECK_WITH_INFO(group.policy.cp_slice == CpBlockSliceMode::EQUAL_BYTES,
-                                    "DTOP_FILE unsupported state slice, tag=%s", tag.c_str());
+                                    "DTOP_FILE unsupported state slice, tag=%s",
+                                    tag.c_str());
         }
-        RTP_LLM_CHECK_WITH_INFO(payload > 0 && payload % file_shards_ == 0,
-                                "DTOP_FILE invalid state payload, tag=%s", tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(
+            payload > 0 && payload % file_shards_ == 0, "DTOP_FILE invalid state payload, tag=%s", tag.c_str());
         bytes += payload / file_shards_;
     }
     return bytes;
@@ -95,249 +125,284 @@ std::string fileTag(const std::string& tag, int peer) const {
     return file_decode_ ? tag + "#cp" + std::to_string(peer) : tag;
 }
 
-void logFileRead(const std::string& tag, const std::vector<int32_t>& blocks,
+void logFileRead(const std::string&                 tag,
+                 const std::vector<int32_t>&        blocks,
                  const kv_cache_manager::UriStrVec& uris) const {
-    if (file_pace_ && !autil::EnvUtil::getEnv("RTP_DTOP_PAYLOAD_AUDIT", false)) { return; }
-    if (!file_cp2_ && !autil::EnvUtil::getEnv("RTP_DTOP_FILE_AUDIT_BASELINE_P", false)) { return; }
-    const auto diagnostic_started_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (file_pace_ && !autil::EnvUtil::getEnv("RTP_DTOP_PAYLOAD_AUDIT", false)) {
+        return;
+    }
+    if (!file_cp2_ && !autil::EnvUtil::getEnv("RTP_DTOP_FILE_AUDIT_BASELINE_P", false)) {
+        return;
+    }
+    const auto                  diagnostic_started_us = autil::TimeUtility::currentTimeInMicroSeconds();
     std::lock_guard<std::mutex> verification_lock(file_mutex_);
     for (size_t index = 0; index < blocks.size(); ++index) {
         // Each actual SDK Load still runs. Only the extra D2H diagnostic is
         // skipped for immutable private URIs already verified by this P rank.
-        if (autil::EnvUtil::getEnv("RTP_DTOP_FILE_VERIFY_ONCE", false)
-            && file_verified_uris_.count(uris.at(index))) { continue; }
-        size_t bytes = 0;
+        if (autil::EnvUtil::getEnv("RTP_DTOP_FILE_VERIFY_ONCE", false) && file_verified_uris_.count(uris.at(index))) {
+            continue;
+        }
+        size_t   bytes    = 0;
         uint64_t checksum = 14695981039346656037ULL;
         for (const int layer : cache_config_.layerIdsForGroup(tag)) {
             for (const auto& part : file_resolver_(layer, tag, blocks[index])) {
                 RTP_LLM_CHECK_WITH_INFO(part.is_cuda && part.addr && part.size_bytes > 0
-                                           && part.size_bytes <= 32 * 1024 * 1024,
+                                            && part.size_bytes <= 32 * 1024 * 1024,
                                         "DTOP_FILE invalid read destination");
                 std::vector<unsigned char> host(part.size_bytes);
                 check_cuda_value(cudaMemcpy(host.data(), part.addr, part.size_bytes, cudaMemcpyDeviceToHost));
-                for (const auto byte : host) { checksum ^= byte; checksum *= 1099511628211ULL; }
+                for (const auto byte : host) {
+                    checksum ^= byte;
+                    checksum *= 1099511628211ULL;
+                }
                 bytes += part.size_bytes;
             }
         }
         RTP_LLM_CHECK_WITH_INFO(bytes == fileWireBytes(tag), "DTOP_FILE destination byte mismatch");
         file_verified_uris_.insert(uris.at(index));
         RTP_LLM_LOG_INFO("DTOP_FILE restored tag=%s rank=%ld bytes=%zu fnv64=%lu uri=%s",
-                         tag.c_str(), parallelism_config_.tp_rank, bytes, checksum, uris.at(index).c_str());
+                         tag.c_str(),
+                         parallelism_config_.tp_rank,
+                         bytes,
+                         checksum,
+                         uris.at(index).c_str());
     }
     RTP_LLM_LOG_INFO("DTOP_FILE read_diagnostic_us=%ld tag=%s blocks=%zu",
-        autil::TimeUtility::currentTimeInMicroSeconds() - diagnostic_started_us, tag.c_str(), blocks.size());
+                     autil::TimeUtility::currentTimeInMicroSeconds() - diagnostic_started_us,
+                     tag.c_str(),
+                     blocks.size());
 }
 
-// Called synchronously before the scheduler frees any source block. The
-// narrow experiment accepts only an exact completed CP boundary; it never
-// labels a final partial state as an earlier complete checkpoint.
-void logPrefillFileWrite(const std::string& tag, const std::vector<int32_t>& blocks,
-                 const kv_cache_manager::UriStrVec& uris) const {
-    if (file_pace_ && !autil::EnvUtil::getEnv("RTP_DTOP_PAYLOAD_AUDIT", false)) { return; }
-    if (!file_cp2_ && !autil::EnvUtil::getEnv("RTP_DTOP_FILE_AUDIT_BASELINE_P", false)) { return; }
-    const auto diagnostic_started_us = autil::TimeUtility::currentTimeInMicroSeconds();
+// Optional source audit for the existing Prefill write path.
+void logPrefillFileWrite(const std::string&                 tag,
+                         const std::vector<int32_t>&        blocks,
+                         const kv_cache_manager::UriStrVec& uris) const {
+    if (file_pace_ && !autil::EnvUtil::getEnv("RTP_DTOP_PAYLOAD_AUDIT", false)) {
+        return;
+    }
+    if (!file_cp2_ && !autil::EnvUtil::getEnv("RTP_DTOP_FILE_AUDIT_BASELINE_P", false)) {
+        return;
+    }
+    const auto                  diagnostic_started_us = autil::TimeUtility::currentTimeInMicroSeconds();
     std::lock_guard<std::mutex> verification_lock(file_mutex_);
     for (size_t index = 0; index < blocks.size(); ++index) {
-        // Each actual SDK Load still runs. Only the extra D2H diagnostic is
-        // skipped for immutable private URIs already verified by this P rank.
-        size_t bytes = 0;
+        // This diagnostic does not replace the SDK write.
+        size_t   bytes    = 0;
         uint64_t checksum = 14695981039346656037ULL;
         for (const int layer : cache_config_.layerIdsForGroup(tag)) {
             for (const auto& part : file_resolver_(layer, tag, blocks[index])) {
                 RTP_LLM_CHECK_WITH_INFO(part.is_cuda && part.addr && part.size_bytes > 0
-                                           && part.size_bytes <= 32 * 1024 * 1024,
+                                            && part.size_bytes <= 32 * 1024 * 1024,
                                         "DTOP_FILE invalid read destination");
                 std::vector<unsigned char> host(part.size_bytes);
                 check_cuda_value(cudaMemcpy(host.data(), part.addr, part.size_bytes, cudaMemcpyDeviceToHost));
-                for (const auto byte : host) { checksum ^= byte; checksum *= 1099511628211ULL; }
+                for (const auto byte : host) {
+                    checksum ^= byte;
+                    checksum *= 1099511628211ULL;
+                }
                 bytes += part.size_bytes;
             }
         }
         RTP_LLM_CHECK_WITH_INFO(bytes == fileWireBytes(tag), "DTOP_FILE destination byte mismatch");
         RTP_LLM_LOG_INFO("PREFILL_FILE source tag=%s rank=%ld bytes=%zu fnv64=%lu uri=%s",
-                         tag.c_str(), parallelism_config_.tp_rank, bytes, checksum, uris.at(index).c_str());
+                         tag.c_str(),
+                         parallelism_config_.tp_rank,
+                         bytes,
+                         checksum,
+                         uris.at(index).c_str());
     }
     RTP_LLM_LOG_INFO("DTOP_FILE read_diagnostic_us=%ld tag=%s blocks=%zu",
-        autil::TimeUtility::currentTimeInMicroSeconds() - diagnostic_started_us, tag.c_str(), blocks.size());
+                     autil::TimeUtility::currentTimeInMicroSeconds() - diagnostic_started_us,
+                     tag.c_str(),
+                     blocks.size());
 }
 
-// Called synchronously before the scheduler frees any source block. The
-// narrow experiment accepts only an exact completed CP boundary; it never
-// labels a final partial state as an earlier complete checkpoint.
-bool captureCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end, bool decode_finished) {
-    if (!file_cp2_ || !file_decode_ || parallelism_config_.tp_rank != 0) { return false; }
-    std::lock_guard<std::mutex> lock(file_mutex_);
-    if (!autil::EnvUtil::getEnv("RTP_DTOP_DECODE_PUBLISH", true)) { return true; }
-    RTP_LLM_CHECK_WITH_INFO(file_quarantined_snapshots_.empty(), "DTOP prior CPU transfer completion unknown");
-    const size_t visible_tokens = 128 * std::max(file_shards_, file_capture_blocks_);
-    try {
-        const int max_end = autil::EnvUtil::getEnv("RTP_DTOP_FILE_MAX_COMPUTED_TOKENS", 2048);
-        RTP_LLM_CHECK_WITH_INFO(max_end >= 1024 && max_end <= 16384 && max_end % visible_tokens == 0
-                                  && resource.batchSize() == 1 && computed_end <= static_cast<size_t>(max_end),
-                                "DTOP_FILE invalid staging bounds end=%zu", computed_end);
-        const auto& groups = group_policy_->groups();
-        const auto& full_keys = resource.cacheKeys(0);
-        CPSlotMapper mapper(0, file_shards_, 128);
-        auto& pending = resource.decodeCompletionSnapshot();
-        if (!decode_finished) {
-            if (computed_end <= 512 || computed_end % visible_tokens != 0) { return true; }
-            RTP_LLM_CHECK_WITH_INFO(full_keys.size() == computed_end / 128, "DTOP_FILE snapshot key mismatch");
-            auto next = std::make_shared<DecodeCompletionSnapshot>();
-            next->computed_end = computed_end;
-            next->keys = mapper.canonicalCacheKeys(full_keys);
-            next->tags.resize(next->keys.size());
-            next->payloads.resize(next->keys.size());
-            const bool append = pending && pending->keys.size() <= next->keys.size()
-                && std::equal(pending->keys.begin(), pending->keys.end(), next->keys.begin());
-            setCudaDevice();
-            check_cuda_value(cudaDeviceSynchronize());
-            size_t total_bytes = 0, copied_bytes = 0;
-            for (size_t key = 0; key < next->keys.size(); ++key) {
-                for (const auto& [id, group] : groups) {
-                    (void)id;
-                    const auto& blocks = resource.blocks(0, group.tag);
-                    const size_t index = group.is_full ? file_shards_ * key : key;
-                    if (index >= blocks.size() || isNullBlockIdx(blocks[index])) { continue; }
-                    if (group.is_full) {
-                        RTP_LLM_CHECK_WITH_INFO(index + file_shards_ - 1 < blocks.size()
-                            && !isNullBlockIdx(blocks[index + file_shards_ - 1]), "DTOP_FILE incomplete FULL snapshot");
-                    }
-                    next->tags[key].push_back(group.tag);
-                    for (const auto& [spec, info] : group_policy_->spec_info_map()) {
-                        if (info.group_id != id) { continue; }
-                        // FULL pages are immutable; only newly computed pages need D2H.
-                        DecodeCompletionSnapshot::Payload payload;
-                        if (group.is_full && append && key < pending->payloads.size()) {
-                            const auto old = pending->payloads[key].find(spec);
-                            if (old != pending->payloads[key].end()) { payload = old->second; }
-                        }
-                        if (!payload) {
-                            const size_t physical = group.is_full ? index + (file_shards_ > 1 ? info.tp_rank : 0) : key;
-                            RTP_LLM_CHECK_WITH_INFO(info.tp_rank >= 0 && info.tp_rank < file_target_tp_
-                                && physical < blocks.size() && !isNullBlockIdx(blocks[physical]), "DTOP_FILE bad snapshot source");
-                            payload = std::make_shared<std::vector<unsigned char>>();
-                            for (const int layer : cache_config_.layerIdsForGroup(info.tag)) {
-                                auto parts = mapper.sliceBlockForPeer(cache_config_, info.tag,
-                                    file_resolver_(layer, info.tag, blocks[physical]), info.tp_rank);
-                                for (const auto& part : parts) {
-                                    RTP_LLM_CHECK_WITH_INFO(part.is_cuda && part.addr && part.size_bytes > 0
-                                        && part.size_bytes <= 32 * 1024 * 1024, "DTOP_FILE invalid snapshot part");
-                                    const size_t offset = payload->size();
-                                    RTP_LLM_CHECK_WITH_INFO(total_bytes + offset + part.size_bytes <= 512 * 1024 * 1024,
-                                                            "DTOP_FILE per-request staging bound exceeded");
-                                    payload->resize(offset + part.size_bytes);
-                                    check_cuda_value(cudaMemcpy(payload->data() + offset, part.addr, part.size_bytes,
-                                                                cudaMemcpyDeviceToHost));
-                                    copied_bytes += part.size_bytes;
-                                }
-                            }
-                        }
-                        RTP_LLM_CHECK_WITH_INFO(payload->size() == group.block_size_bytes, "DTOP_FILE snapshot wire size");
-                        total_bytes += payload->size();
-                        RTP_LLM_CHECK_WITH_INFO(total_bytes <= 512 * 1024 * 1024, "DTOP_FILE per-request staging bound exceeded");
-                        next->payloads[key].emplace(spec, std::move(payload));
-                    }
-                }
-            }
-            RTP_LLM_CHECK_WITH_INFO(!next->tags.empty() && next->tags.back().size() == groups.size(),
-                                    "DTOP_FILE snapshot lacks state/SWA");
-            pending = std::move(next);
-            RTP_LLM_LOG_INFO("DTOP_FILE staged_only computed_end=%zu keys=%zu host_bytes=%zu copied_bytes=%zu remote_calls=0",
-                             computed_end, pending->keys.size(), total_bytes, copied_bytes);
-            return true;
-        }
-        // Only StreamCacheResource's FINISHED/error-free release path enters here.
-        // Take ownership before starting IO; a repeat callback cannot publish twice.
-        auto snapshot = std::move(pending);
-        if (!snapshot) {
-            RTP_LLM_LOG_INFO("DTOP_FILE completion_no_checkpoint computed_end=%zu remote_calls=0", computed_end);
-            return true;
-        }
-        RTP_LLM_CHECK_WITH_INFO(snapshot->computed_end <= computed_end
-            && computed_end - snapshot->computed_end < visible_tokens, "DTOP_FILE stale completion snapshot");
-        const auto canonical = mapper.canonicalCacheKeys(full_keys);
-        RTP_LLM_CHECK_WITH_INFO(snapshot->keys.size() <= canonical.size()
-            && std::equal(snapshot->keys.begin(), snapshot->keys.end(), canonical.begin()), "DTOP_FILE completion prefix changed");
-        StorageRequest request;
-        request.keys = std::make_shared<const CacheKeysType>(snapshot->keys);
-        request.handles.resize(snapshot->keys.size());
-        for (size_t key = 0; key < snapshot->keys.size(); ++key) {
-            // getNeedWriteGroups only uses non-null handles as a presence mask.
-            // No GPU address or recycled block index is used by publication.
-            for (const auto& tag : snapshot->tags[key]) { request.handles[key].push_back({tag, 0}); }
-        }
-        std::vector<std::string> names;
-        RTP_LLM_CHECK_WITH_INFO(group_policy_->getNeedWriteGroups(request, request.keys->size(), names),
-                                "DTOP_FILE invalid completion group mask");
-        RTP_LLM_LOG_INFO("DTOP_FILE completion_upload_begin computed_end=%zu checkpoint_end=%zu",
-                         computed_end, snapshot->computed_end);
-        const auto write_started_us = autil::TimeUtility::currentTimeInMicroSeconds();
-        setCudaDevice();
-        check_cuda_value(cudaDeviceSynchronize());
-        const auto trace = nextTraceId("dtop_file_write", write_trace_sequence_);
-        auto [success, location] = client_wrapper_->getWriteLocation(
-            "", trace, *request.keys, {}, names, 120, kv_cache_config_.kvcm_min_replica_count);
-        RTP_LLM_CHECK_WITH_INFO(success, "DTOP_FILE StartWrite failed");
-        bool finish_attempted = false;
-        file_quarantined_snapshots_.push_back(snapshot);
-        const kv_cache_manager::Locations empty;
-        try {
-            const auto indices = unmaskedKeyIndices(location.block_mask, request.keys->size());
-            RTP_LLM_CHECK_WITH_INFO(indices.size() == location.locations.size(), "DTOP_FILE write mask mismatch");
-            size_t transferred = 0;
-            for (size_t index = 0; index < indices.size(); ++index) {
-                const size_t key = indices[index];
-                for (auto& unit : location.locations[index]) {
-                    const auto& info = group_policy_->spec_info_map().at(unit.spec_name);
-                    const auto& group = groups.at(info.group_id);
-                    auto payload = snapshot->payloads.at(key).at(unit.spec_name);
-                    kv_cache_manager::BlockBuffers buffers(1);
-                    buffers[0].iovs.push_back({kv_cache_manager::MemoryType::CPU,
-                                               payload->data(), payload->size(), false});
-                    const size_t bytes = payload->size();
-                    uint64_t checksum = 14695981039346656037ULL;
-                    const bool audit_payload = !file_pace_ || autil::EnvUtil::getEnv("RTP_DTOP_PAYLOAD_AUDIT", false);
-                    if (audit_payload) {
-                        for (const auto byte : *payload) { checksum ^= byte; checksum *= 1099511628211ULL; }
-                    }
-                    RTP_LLM_CHECK_WITH_INFO(bytes == group.block_size_bytes, "DTOP_FILE wire byte mismatch");
-                    auto [saved, actual] = client_wrapper_->saveKvCachesForTag(
-                        fileTag(info.tag, info.tp_rank), {unit.uri}, buffers);
-                    RTP_LLM_CHECK_WITH_INFO(saved && (actual.empty() || actual.size() == 1), "DTOP_FILE payload save failed");
-                    if (!actual.empty() && !actual[0].empty()) { unit.uri = actual[0]; }
-                    transferred += bytes;
-                    if (audit_payload) RTP_LLM_LOG_INFO("DTOP_FILE source key=%ld spec=%s bytes=%zu fnv64=%lu uri=%s computed_end=%zu",
-                                     (*request.keys)[key], unit.spec_name.c_str(), bytes, checksum, unit.uri.c_str(), snapshot->computed_end);
-                }
-            }
-            file_quarantined_snapshots_.clear();
-            finish_attempted = true;
-            RTP_LLM_CHECK_WITH_INFO(client_wrapper_->finishWrite(
-                "", nextTraceId("dtop_file_finish", finish_write_trace_sequence_), location.write_session_id,
-                static_cast<kv_cache_manager::BlockMaskOffset>(location.locations.size()), location.locations),
-                "DTOP_FILE FinishWrite failed/ambiguous");
-            RTP_LLM_LOG_INFO("DTOP_FILE committed computed_end=%zu canonical_keys=%zu new_locations=%zu bytes=%zu dp_rank=%ld",
-                             snapshot->computed_end, request.keys->size(), location.locations.size(), transferred, parallelism_config_.dp_rank);
-            RTP_LLM_LOG_INFO("DTOP_FILE write_duration_us=%ld computed_end=%zu bytes=%zu",
-                             autil::TimeUtility::currentTimeInMicroSeconds() - write_started_us, snapshot->computed_end, transferred);
-        } catch (...) {
-            // A lost commit ACK is ambiguous. Never follow a commit attempt
-            // with an abort which could revoke a successful publication.
-            if (!finish_attempted) {
-                try { client_wrapper_->finishWrite("", nextTraceId("dtop_file_abort", finish_write_trace_sequence_),
-                                                   location.write_session_id, kv_cache_manager::BlockMaskOffset{0}, empty); }
-                catch (...) { RTP_LLM_LOG_WARNING("DTOP_FILE abort failed"); }
-            }
-            throw;
-        }
-    } catch (const std::exception& error) {
-        resource.decodeCompletionSnapshot().reset();
-        RTP_LLM_LOG_ERROR("DTOP_FILE capture failed (no success claimed): %s", error.what());
-    } catch (...) {
-        resource.decodeCompletionSnapshot().reset();
-        RTP_LLM_LOG_ERROR("DTOP_FILE capture failed (no success claimed): unknown exception");
+// Select completed native checkpoints, not the final mutable slot. In
+// particular, floor(E/unit) is only a candidate: all FULL pages and every
+// required terminal STATE/SWA page must still be present at that exact key.
+StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end) {
+    StorageRequest request;
+    if (!file_cp2_ || !file_decode_ || parallelism_config_.tp_rank != 0
+        || !autil::EnvUtil::getEnv("RTP_DTOP_DECODE_PUBLISH", true) || resource.decodeCompletionSubmitted())
+        return request;
+    if (resource.batchSize() != 1 || computed_end == 0)
+        return request;
+    const size_t base           = cache_config_.seq_size_per_block;
+    const size_t canonical_unit = base * file_shards_;
+    const size_t completed_full = computed_end / base;
+    const auto&  source_keys    = resource.cacheKeys(0);
+    if (source_keys.size() < completed_full) {
+        RTP_LLM_LOG_WARNING("DTOP_GPU incomplete key vector computed=%zu keys=%zu", computed_end, source_keys.size());
+        return request;
     }
-    // This experiment must never also publish the legacy TP1/base-128 tree
-    // representation. Returning true means handled, not a successful commit.
-    return true;
+    // State/SWA slots must denote the same token boundary as the P key.
+    size_t unit = canonical_unit;
+    for (const auto& entry : group_policy_->groups()) {
+        const auto& group = topology_->group(entry.second.tag);
+        if (!entry.second.is_full)
+            unit = std::lcm(unit, group.seqSizePerBlock());
+    }
+    CPSlotMapper mapper(0, file_shards_, static_cast<int>(base));
+    size_t       end = computed_end / unit * unit;
+    for (; end > 0; end -= unit) {
+        const size_t count = end / canonical_unit;
+        bool         ready = true;
+        for (const auto& entry : group_policy_->groups()) {
+            const auto& spec   = entry.second;
+            const auto& group  = topology_->group(spec.tag);
+            const auto& blocks = resource.blocks(0, spec.tag);
+            if (spec.is_full) {
+                for (size_t i = 0; i < end / base; ++i)
+                    if (i >= blocks.size() || isNullBlockIdx(blocks[i])) {
+                        ready = false;
+                        break;
+                    }
+            } else {
+                const size_t required = group.reuseBlockCount(count);
+                for (size_t key = count - std::min(count, required); key < count; ++key) {
+                    const size_t tokens = (key + 1) * canonical_unit;
+                    if (tokens % group.seqSizePerBlock()) {
+                        ready = false;
+                        break;
+                    }
+                    const size_t index = tokens / group.seqSizePerBlock() - 1;
+                    if (index >= blocks.size() || isNullBlockIdx(blocks[index])) {
+                        ready = false;
+                        break;
+                    }
+                }
+            }
+            if (!ready)
+                break;
+        }
+        if (ready)
+            break;
+    }
+    if (end == 0) {
+        RTP_LLM_LOG_INFO("DTOP_GPU no_complete_checkpoint computed=%zu", computed_end);
+        return request;
+    }
+    CacheKeysType complete_keys(source_keys.begin(), source_keys.begin() + end / base);
+    request.keys = std::make_shared<const CacheKeysType>(mapper.canonicalCacheKeys(complete_keys));
+    request.handles.resize(request.keys->size());
+    request.decode_completion                            = true;
+    request.computed_tokens                              = computed_end;
+    request.published_tokens                             = end;
+    size_t                                         bytes = 0;
+    std::set<std::pair<std::string, BlockIdxType>> unique;
+    for (size_t key = 0; key < request.keys->size(); ++key) {
+        for (const auto& entry : group_policy_->groups()) {
+            const auto& spec  = entry.second;
+            const auto& group = topology_->group(spec.tag);
+            if (!spec.is_full && request.keys->size() - key > group.reuseBlockCount(request.keys->size()))
+                continue;
+            const auto&        blocks = resource.blocks(0, spec.tag);
+            StorageBlockHandle handle;
+            handle.tag = spec.tag;
+            if (spec.is_full) {
+                for (int peer = 0; peer < file_target_tp_; ++peer)
+                    handle.peer_blocks.push_back(blocks.at(file_shards_ * key + (file_shards_ > 1 ? peer : 0)));
+                handle.block = handle.peer_blocks.front();
+            } else {
+                handle.block = blocks.at((key + 1) * canonical_unit / group.seqSizePerBlock() - 1);
+            }
+            auto charge = [&](BlockIdxType block) {
+                if (unique.emplace(spec.tag, block).second)
+                    bytes += cache_config_.blockSizeBytesForGroup(spec.tag);
+            };
+            charge(handle.block);
+            for (auto peer : handle.peer_blocks)
+                charge(peer);
+            request.handles[key].push_back(std::move(handle));
+        }
+    }
+    const size_t limit = static_cast<size_t>(autil::EnvUtil::getEnv("RTP_DTOP_GPU_PENDING_MIB", 4096)) * 1024 * 1024;
+    const size_t jobs  = autil::EnvUtil::getEnv("RTP_DTOP_GPU_PENDING_JOBS", 2);
+    {
+        std::lock_guard<std::mutex> guard(completion_accounting_->mutex);
+        if (bytes > limit || completion_accounting_->bytes > limit - bytes || completion_accounting_->jobs >= jobs) {
+            RTP_LLM_LOG_WARNING("DTOP_GPU admission=rejected retained_bytes=%zu pending_bytes=%zu pending_jobs=%zu",
+                                bytes,
+                                completion_accounting_->bytes,
+                                completion_accounting_->jobs);
+            return {};
+        }
+        auto lease = std::make_shared<CompletionLease>(completion_accounting_, bytes);
+        completion_accounting_->bytes += bytes;
+        ++completion_accounting_->jobs;
+        request.completion_admission = std::move(lease);
+    }
+    // One fence at successful EOS. No decode-step fence or CPU capture. The
+    // task cannot outlive source ownership until prepareWrite has pinned it.
+    setCudaDevice();
+    check_cuda_value(cudaDeviceSynchronize());
+    RTP_LLM_LOG_INFO(
+        "DTOP_GPU retained_plan computed=%zu published=%zu tail=%zu pages=%zu bytes=%zu CPU_snapshot_bytes=0",
+        computed_end,
+        end,
+        computed_end - end,
+        unique.size(),
+        bytes);
+    return request;
+}
+
+// The P transaction builds identical spec/tag batches and commits actual URIs
+// with the same masks and FinishWrite rules. Only the source projection differs:
+// D owns all P peers' FULL pages and the unsliced native STATE/SWA page locally.
+std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<FunctionRequestPB>& requests) {
+    setCudaDevice();
+    struct Batch {
+        std::vector<std::string>       tags;
+        std::vector<int32_t>           blocks;
+        kv_cache_manager::UriStrVec    uris;
+        kv_cache_manager::BlockBuffers buffers;
+    };
+    std::vector<Batch> batches(requests.size());
+    CPSlotMapper       mapper(0, file_shards_, cache_config_.seq_size_per_block);
+    // Validate and resolve every source before submitting any SDK operation.
+    for (size_t peer = 0; peer < requests.size(); ++peer) {
+        const auto& remote = requests[peer].remote_request();
+        auto&       batch  = batches[peer];
+        for (int i = 0; i < remote.block_ids_size(); ++i) {
+            const auto& tag   = remote.group_tags(i);
+            const int   block = remote.block_ids(i);
+            batch.tags.push_back(fileTag(tag, peer));
+            batch.blocks.push_back(block);
+            batch.uris.push_back(remote.uris(i));
+            batch.buffers.emplace_back();
+            size_t bytes = 0;
+            for (int layer : cache_config_.layerIdsForGroup(tag)) {
+                const auto parts =
+                    mapper.sliceBlockForPeer(cache_config_, tag, file_resolver_(layer, tag, block), peer);
+                for (const auto& part : parts) {
+                    RTP_LLM_CHECK_WITH_INFO(part.is_cuda && part.addr && part.size_bytes, "invalid EOS GPU source");
+                    batch.buffers.back().iovs.push_back(
+                        {kv_cache_manager::MemoryType::GPU, part.addr, part.size_bytes, false});
+                    bytes += part.size_bytes;
+                }
+            }
+            RTP_LLM_CHECK_WITH_INFO(bytes == fileWireBytes(tag), "EOS source wire size mismatch tag=%s", tag.c_str());
+        }
+    }
+    std::vector<FunctionResponsePB> responses(requests.size());
+    try {
+        for (size_t peer = 0; peer < batches.size(); ++peer) {
+            auto&      b        = batches[peer];
+            auto&      response = *responses[peer].mutable_remote_response();
+            const auto result =
+                executeTagTransfers(REMOTE_OPERATION_WRITE, b.tags, b.blocks, b.uris, b.buffers, response);
+            if (result == TransferResult::TIMEOUT)
+                throw StorageOperationTimeout("EOS SDK transfer timeout");
+            if (result != TransferResult::SUCCESS)
+                throw StorageOperationCompletionUnknown("EOS SDK failure cannot prove DMA completion");
+            response.set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
+        }
+    } catch (const StorageOperationCompletionUnknown&) {
+        throw;
+    } catch (const std::exception& error) {
+        throw StorageOperationCompletionUnknown(error.what());
+    } catch (...) {
+        throw StorageOperationCompletionUnknown("EOS SDK completion unknown");
+    }
+    return responses;
 }

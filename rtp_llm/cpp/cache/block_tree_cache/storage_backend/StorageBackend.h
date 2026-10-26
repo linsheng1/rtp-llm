@@ -26,6 +26,9 @@ class BatchKVCacheResource;
 struct StorageBlockHandle {
     std::string  tag;
     BlockIdxType block{NULL_BLOCK_IDX};
+    // Optional same-pool sources for an EOS cross-layout write. Every unique
+    // page is pinned by prepareWrite, including peers other than the first.
+    std::vector<BlockIdxType> peer_blocks;
 };
 
 struct StorageBackendMatchMeta {
@@ -60,6 +63,11 @@ struct StorageRequest {
     // Match requests expose the complete key sequence. Keys before this
     // boundary are already available from Device/Host/Disk.
     size_t local_matched_blocks_num{0};
+    // Internal EOS route; no RPC/API extension. The admission lease follows
+    // task lifetime, including completion-unknown quarantine.
+    bool                  decode_completion{false};
+    size_t                computed_tokens{0}, published_tokens{0};
+    std::shared_ptr<void> completion_admission;
 
     bool empty() const {
         for (const auto& key_handles : handles) {
@@ -121,7 +129,7 @@ public:
     // Must not be called from backend I/O or completion callbacks.
     void shutdown();
 
-    // Caller retains source blocks until completion capture returns.
+    // Called only at successful EOS, before source request references are freed.
     virtual bool captureCompletedDecode(const BatchKVCacheResource&, size_t, bool = true) { return false; }
 
 protected:

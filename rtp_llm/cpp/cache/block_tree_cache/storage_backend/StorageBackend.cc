@@ -261,15 +261,26 @@ std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepar
     state->request = std::move(request);
     RTP_LLM_CHECK(initialized_);
 
+    size_t pin_capacity = 0;
+    for (const auto& row : state->request.handles)
+        for (const auto& handle : row)
+            pin_capacity += 1 + handle.peer_blocks.size();
+    state->pins.reserve(pin_capacity);
     std::unordered_set<BlockKey, BlockKeyHash> pinned;
     for (const auto& key_handles : state->request.handles) {
         for (const StorageBlockHandle& handle : key_handles) {
             const auto&    pool = devicePool(handle.tag);
-            const BlockKey key{pool.get(), handle.block};
-            if (pinned.insert(key).second) {
-                pool->incRef(handle.block);
-                state->pins.push_back({pool, handle.block});
-            }
+            auto           pin  = [&](BlockIdxType block) {
+                const BlockKey key{pool.get(), block};
+                if (pinned.insert(key).second) {
+                    pool->incRef(block);
+                    // Capacity was reserved before acquiring any page reference.
+                    state->pins.push_back({pool, block});
+                }
+            };
+            pin(handle.block);
+            for (const auto peer : handle.peer_blocks)
+                pin(peer);
         }
     }
     return state;
@@ -294,6 +305,10 @@ void StorageBackend::validateRequest(const StorageRequest& request, bool allow_n
                                     "storage request has null block for tag=%s at key=%zu",
                                     handle.tag.c_str(),
                                     key_index);
+            RTP_LLM_CHECK_WITH_INFO(handle.peer_blocks.empty() || request.decode_completion,
+                                    "peer source pages require an EOS write");
+            for (const auto peer : handle.peer_blocks)
+                RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(peer), "null EOS peer source page");
         }
     }
 }

@@ -206,3 +206,16 @@ cc_test_wrapper(
     }),
     deps = kvcm_backend_test_deps,
 )
+
+cc_binary(
+    name = "coalesced_pace_write_test_bin",
+    testonly = True,
+    srcs = ["CoalescedPaceWriteClientTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:client",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+        "@havenask//aios/alog:alog",
+    ],
+)
