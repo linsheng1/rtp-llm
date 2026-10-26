@@ -4,7 +4,8 @@ Status: **review-only port**, based on the upstream
 `feature/dsv41-dev-main-202161013` snapshot
 `a06c91abea437bf85cd5bc6634b0e142093ebe2e`, copied unchanged into the fork.
 Changes live on a separate branch; neither upstream nor the fork baseline has
-been merged or modified. ARM64/GPU regression on this new base is still pending.
+been merged or modified. ARM64 native regression on this base passed;
+full-wheel and model acceptance conditions are recorded below. The PR remains Draft.
 This implementation
 retains native GPU pages after successful Decode completion. It does **not**
 implement SDK/Consumer GPU registration or establish GDR support.
@@ -78,24 +79,90 @@ These guards are inherited experimental constraints, not a general deployment AP
 
 ### This release-branch port
 
-- The standalone coalescer test compiled locally with C++17,
-  `-Wall -Wextra -Werror`, the real public KVCM API headers and a mock transfer
-  delegate. All 79 CPU assertions passed. CUDA and the SDK shared library were
-  not loaded; this is not an RDMA or model test.
-- Source/BUILD syntax and conflict-marker checks are separate from compilation
-  and runtime acceptance. The release branch's HostCacheState compatibility
-  shim, stage metrics and quarantine reason API are preserved.
-- The native GPU failure test now checks permanent FROZEN ownership and continued
-  EOS admission charging after unknown completion, rather than expecting SDK
-  drain to make these pages reusable.
-- A remote preflight timed out and the jumpbox ControlMaster socket is absent.
-  Full ARM64 compilation, native GPU tests and real-model regression on this
-  release base have **not** run. They remain required before merge.
+Code under test: `badca4c96d70c0639afbb05ea66c1be9c87c4f0f`;
+feature implementation `8b9ee641`. Documentation-only updates after that
+commit do not change the tested implementation.
 
-Required regression includes `native_dtop_completion_test`,
-`storage_backend_test`, `client_wrapper_test`, `kvcm_config_test` and a fresh-P
-real-model restore for DRAM/direct SSD × sharded/replicated CP. Check target
-names and CUDA/remote-cache build options in the environment before running.
+| Layer | Result | Boundary |
+| --- | --- | --- |
+| Standalone C++17 coalescer | 79 assertions; ASan/UBSan passed | Public API headers + mock SDK; CPU only. |
+| Fresh ARM64 native build | Passed | Exact release-port tracked source; no old library substitution. |
+| `native_dtop_completion` | 28/28 | Real GPU pages + mock SDK, CP2/CP4 sharded/replicated. |
+| `client_wrapper` | 22/22 | No skips. |
+| `kvcm_config` | 9/9 | No skips. |
+| `kvcm_local` | 15/15 | Test-only baseline corrections below; no skips. |
+| `storage_backend` | 36/36 | No skips. |
+| GPU coalescer | 132 assertions | Real GPU allocations + mock delegate. |
+| Full ARM64 wheel and two-host loader | Passed with dependency supplement | Stock public target still lacks DeepGEMM. |
+| Real-model DRAM/SSD × CP layouts | **Failed overall: first DRAM/sharded functional cases passed, shutdown crashed; other three paths not run** | Conditional runtime dependency fix described below. |
+
+The first KVCMLocal run's three failures reproduced on the exact upstream
+`a06c91abe` baseline. The test-only correction uses the observed failed-init
+shutdown contract, checks unchanged quarantine generation/task/block counters
+after a metrics snapshot consumes its samples, and scopes the CUDA death test
+to GTest's threadsafe re-execution mode. It still requires a real SIGABRT for
+the abort-threshold case. The adjacent invalid-topology expectation remains
+zero. Original failed attempts were preserved; these fixes do not change
+production behavior.
+
+The stock public complete-wheel target fails dependency analysis because its
+CUDA13 lock omits `@pip_cuda13_arm_torch//deep_gemm`; the requirements explicitly
+expect an internal overlay. The test environment supplies a separate, pinned
+DeepGEMM repository: `2.8.2+ad62a90.cu132`, SHA256
+`2e0e352bd2a07be8f6e3eb42edac0b57b423e8ddaaaffff1057ecb11438d20f9`.
+This is **not** an official internal overlay or a stock-public-build pass.
+Product wheel SHA256:
+`9f65dc24a0f4f169dca7ace9d986faf6b30355aa603b4f302e697f7a388ab3a5`.
+
+The first real P startup also reproduced the locked FA4 `4.0.0b21` / Quack
+`0.6.5` missing `quack.activation.sub_packed_f32x2` error. The loaded package
+paths and versions were verified. The independent second test runtime uses
+[upstream FlashAttention #2787](https://github.com/Dao-AILab/flash-attention/pull/2787)
+(commit `145b1010051dbfd4bdc41a0ae55d495b08d7a458`), replacing three call sites
+with the CuTe primitive and removing obsolete imports. Both hosts' 1112
+installed RTP files remain identical to the product wheel. Two SM100 BF16
+forward cases passed an FP32 SDPA reference (max absolute errors 0.00927 and
+0.00905). No shared runtime was changed. This dependency fix is an explicit
+acceptance condition, not a change silently included in the RTP PR.
+
+The real model test used CP4 P, DP4 D, and a separate RDMA-staging DRAM
+Provider, with 36 GiB/card KV pools and local-hot caching enabled. Four independent
+7680-token inputs produced actual outputs of 513/530/641/777 tokens. Their
+computed endpoints were 8192/8209/8320/8456; the complete sharded checkpoint was
+8192 in all four cases (tails 0/17/128/264). After restarting P, local reuse was
+zero and remote reuse was 8192; hot-local reuse was 8192 and bypass reuse zero.
+All four cold/hot/bypass continuations matched for all eight actual tokens.
+These 512 additional KV positions include the first P-sampled output token
+whose KV had not yet been computed by P; do not call all 512 pure D-sampled tokens.
+
+**The run failed shutdown acceptance.** D rank 2 stopped its engine and destroyed
+the model while peers were still executing `NormalEngine::step()`. It then
+SIGSEGVed after BackendManager shutdown. Peers timed out in DeepGEMM grid sync
+and SIGABRTed. The D service root returned zero, but native logs and nonzero
+reaped helper exits expose the failure. During subsequent failure cleanup P
+exceeded the 600-second shutdown bound and required an identity-checked SIGKILL
+of its own private PID namespace; that is not a separate isolated P-only normal
+shutdown reproduction. All test model/Consumer/Provider processes and the private
+CPU weight keeper were subsequently released.
+
+`NormalEngine.cc` is byte-identical to the release baseline. The older
+experimental branch's per-step collective stop-vote workaround was not ported.
+The observed ordering is a strong investigation lead, not a symbolized root cause
+for the first SIGSEGV or proof of EOS-publication causality. No B-disabled model
+counterfactual was run. No scheduling workaround was added to force acceptance.
+DRAM/replicated and both explicit-SSD model configurations were not started after
+this blocker; native CP/layout coverage does not qualify those real model paths.
+
+Official release dependency-overlay CI remains required before merge. This
+port does not establish GDR or maximum stable capacity/performance results.
+Native tests use a mock SDK; real-model token comparisons do not establish
+full-logit equivalence. Optional read fingerprints add diagnostic D2H, and the
+new EOS path does not emit a paired source fingerprint for every actual SDK
+write. Therefore no complete source/restore byte-fingerprint match is claimed.
+Active model cancellation and real-SDK error injection are not covered by the
+normal-EOF matrix; native failure/ownership tests do not replace those runs.
+Explicit SSD tests exclude automatic DRAM-to-SSD tiering and do not force MR
+cache eviction or establish physical SSD reads on every restore.
 
 ### Historical evidence from the original experimental branch
 
