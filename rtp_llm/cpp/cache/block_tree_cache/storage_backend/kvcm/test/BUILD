@@ -186,3 +186,40 @@ cc_test_wrapper(
         "@local_config_cuda//cuda:cudart",
     ],
 )
+
+cc_test_wrapper(
+    name = "native_dtop_completion_test",
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = [
+        "NativeDtopCompletionTest.cc",
+        "KVCMMockTestBase.h",
+        "MockKVCMClient.h",
+    ],
+    copts = ["-fno-access-control"] + copts(),
+    tags = [
+        "L20_CU13",
+        "exclusive-if-local",
+    ],
+    target_compatible_with = select({
+        "//:using_remote_kv_cache": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = kvcm_backend_test_deps,
+)
+
+cc_binary(
+    name = "coalesced_pace_write_test_bin",
+    testonly = True,
+    srcs = ["CoalescedPaceWriteClientTest.cc"],
+    copts = copts(),
+    target_compatible_with = select({
+        "//:using_remote_kv_cache": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:client",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+        "@havenask//aios/alog:alog",
+    ],
+)
