@@ -22,6 +22,10 @@ public:
                      const std::string&             tree_decode_config,
                      kmonitor::MetricsReporterPtr   metrics_reporter = nullptr);
 
+    // Call after engine/dispatcher drain, before KMonitorFactory::Shutdown().
+    // The process-wide grammar backend owns a MetricsReporter/KMonitor lease.
+    static void shutdown();
+
     static ErrorResult<std::vector<BaseLogitsProcessorPtr>>
     createLogitsProcessors(std::shared_ptr<GenerateInput> generate_input,
                            int32_t                        init_batch_size,

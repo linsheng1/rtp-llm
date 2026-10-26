@@ -176,7 +176,10 @@ grpc::Status DecodeRpcServer::init(const EngineInitParams&                      
                 return ShutdownCoordinator::State{
                     draining_, onflight_requests_.load() + onflight_load_cache_requests_.load() + external_onflight_()};
             },
-            [this] { beginShutdown(); });
+            [this] { beginShutdown(); },
+            [this](bool fence, uint64_t target) {
+                return fence ? engine_->fenceLoopStop(target) : engine_->loopStopState();
+            });
     } else if (requires_group_drain_) {
         RTP_LLM_LOG_WARNING("missing complete shutdown group; graceful shutdown will wait until its deadline");
     }

@@ -20,10 +20,14 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
+class BatchKVCacheResource;
 
 struct StorageBlockHandle {
     std::string  tag;
     BlockIdxType block{NULL_BLOCK_IDX};
+    // Optional same-pool sources for an EOS cross-layout write. Every unique
+    // page is pinned by prepareWrite, including peers other than the first.
+    std::vector<BlockIdxType> peer_blocks;
 };
 
 struct StorageBackendMatchMeta {
@@ -73,6 +77,11 @@ struct StorageRequest {
     // Match requests expose the complete key sequence. Keys before this
     // boundary are already available from Device/Host/Disk.
     size_t local_matched_blocks_num{0};
+    // Internal EOS route; no RPC/API extension. The admission lease follows
+    // task lifetime, including completion-unknown quarantine.
+    bool                  decode_completion{false};
+    size_t                computed_tokens{0}, published_tokens{0};
+    std::shared_ptr<void> completion_admission;
 
     bool empty() const {
         for (const auto& key_handles : handles) {
@@ -134,6 +143,11 @@ public:
     // Must not be called from backend I/O or completion callbacks.
     void shutdown();
 
+    // Called only at successful EOS, before source request references are freed.
+    virtual bool captureCompletedDecode(const BatchKVCacheResource&, size_t, bool = true) {
+        return false;
+    }
+
 protected:
     const CacheTopology&      topology() const;
     const DeviceBlockPoolPtr& devicePool(const std::string& tag) const;
@@ -187,6 +201,9 @@ private:
     size_t   quarantined_task_count_{0};
     size_t   quarantined_block_count_{0};
     uint64_t quarantine_generation_{0};
+    // Keep optional EOS admission charged while FROZEN pages are unavailable.
+    // No more publications can be admitted after backend shutdown.
+    std::vector<std::shared_ptr<void>> quarantined_completion_admissions_;
 
     friend class LoadAsyncContext;
 };

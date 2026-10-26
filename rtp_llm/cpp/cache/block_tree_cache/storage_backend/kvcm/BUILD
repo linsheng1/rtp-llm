@@ -13,11 +13,13 @@ config_setting(
 cc_library(
     name = "kvcm_storage_backend",
     srcs = ["KVCMStorageBackend.cc"],
-    hdrs = ["KVCMStorageBackend.h"],
+    hdrs = ["KVCMStorageBackend.h", "DtopCompletionBridge.inc"],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
         ":client",
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:cp_slot_mapper",
         ":group_policy",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/metrics:metrics",
@@ -63,6 +65,8 @@ cc_library(
     ],
     hdrs = [
         "ClientFactory.h",
+        "PackedSsdTransferClient.h",
+        "CoalescedPaceWriteClient.h",
         "ClientWrapper.h",
         "KVCMConfig.h",
     ],
@@ -71,6 +75,10 @@ cc_library(
     deps = [
         ":config",
         ":subscriber",
+        "@havenask//aios/autil:env_util",
+        "@havenask//aios/autil:json",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
         "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client",
         "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_headers",
         "//rtp_llm/cpp/cache:storage_3fs",

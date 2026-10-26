@@ -9,11 +9,54 @@
 #include <thread>
 #include <random>
 #include <chrono>
+#include <unistd.h>
+#include <tuple>
+#include "autil/EnvUtil.h"
 
 namespace rtp_llm {
 namespace kvcm {
 
 namespace {
+
+// PACE has a finite Consumer task ring. A block may carry many layer IOVs;
+// bounding only bytes or block count does not bound the number of tasks.
+struct SdkRange {
+    size_t begin, end, bytes, iovs;
+};
+bool boundedSdkRanges(const kv_cache_manager::UriStrVec&    uris,
+                      const kv_cache_manager::BlockBuffers& buffers,
+                      std::vector<SdkRange>&                ranges) {
+    constexpr size_t max_bytes = 64 * 1024 * 1024, max_blocks = 256, max_iovs = 1024;
+    if (uris.size() != buffers.size()) {
+        return false;
+    }
+    for (size_t begin = 0; begin < buffers.size();) {
+        size_t end = begin, bytes = 0, iovs = 0;
+        while (end < buffers.size()) {
+            size_t     next_bytes = 0;
+            const auto next_iovs  = buffers[end].iovs.size();
+            if (next_iovs > max_iovs) {
+                return false;
+            }
+            for (const auto& iov : buffers[end].iovs) {
+                if (iov.size > max_bytes - next_bytes) {
+                    return false;
+                }
+                next_bytes += iov.size;
+            }
+            if (end > begin
+                && (end - begin >= max_blocks || next_bytes > max_bytes - bytes || next_iovs > max_iovs - iovs)) {
+                break;
+            }
+            bytes += next_bytes;
+            iovs += next_iovs;
+            ++end;
+        }
+        ranges.push_back({begin, end, bytes, iovs});
+        begin = end;
+    }
+    return true;
+}
 
 class ReinitPolicy {
 public:
@@ -425,8 +468,43 @@ ClientWrapper::getCacheLocationsByBackend(const std::string& unique_id, const st
                                           const std::vector<std::string>& location_spec_names,
                                           kv_cache_manager::StorageType backend_type) {
     CHECK_INIT2(unique_id);
-    CALL_CLIENT2(GetCacheLocationsByBackend, trace_id, keys, tokens, block_mask, location_spec_names,
-                 backend_type, kv_cache_manager::BackendSelectStrategy::LSS_WEIGHTED_RANDOM);
+    auto [ec, locations] =
+        client->GetCacheLocationsByBackend(trace_id,
+                                           keys,
+                                           tokens,
+                                           block_mask,
+                                           location_spec_names,
+                                           backend_type,
+                                           kv_cache_manager::BackendSelectStrategy::LSS_WEIGHTED_RANDOM);
+    if (!checkError(ec)) {
+        RTP_LLM_LOG_WARNING("GetCacheLocationsByBackend failed, ec [%d]", ec);
+        return {false, {}};
+    }
+    // Backend results are positional. Older managers can return locations for
+    // masked keys; clear those slots without shifting the remaining key indices.
+    if (!keys.empty() && locations.size() != keys.size()) {
+        RTP_LLM_LOG_WARNING("KVCM backend response has %zu slots for %zu keys", locations.size(), keys.size());
+        return {false, {}};
+    }
+    if (const auto* offset = std::get_if<kv_cache_manager::BlockMaskOffset>(&block_mask)) {
+        if (*offset > locations.size()) {
+            return {false, {}};
+        }
+        for (size_t i = 0; i < *offset; ++i) {
+            locations[i].clear();
+        }
+    } else {
+        const auto& mask = std::get<kv_cache_manager::BlockMaskVector>(block_mask);
+        if (!mask.empty() && mask.size() != locations.size()) {
+            return {false, {}};
+        }
+        for (size_t i = 0; i < mask.size(); ++i) {
+            if (mask[i]) {
+                locations[i].clear();
+            }
+        }
+    }
+    return {true, std::move(locations)};
 }
 
 std::pair<bool, kv_cache_manager::HostCacheState>
@@ -566,7 +644,54 @@ kv_cache_manager::ClientErrorCode ClientWrapper::loadKvCachesForTagWithStatus(
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS;
     }
-    auto ec = transfer_clients_[slot->second]->LoadKvCaches(uri_str_vec, block_buffers, trace_info);
+    const auto io_started = std::chrono::steady_clock::now();
+    auto       ec         = kv_cache_manager::ClientErrorCode::ER_OK;
+    if (!autil::EnvUtil::getEnv("RTP_KVCM_BOUNDED_SDK_BATCH", false)) {
+        ec = transfer_clients_[slot->second]->LoadKvCaches(uri_str_vec, block_buffers, trace_info);
+    } else {
+        std::vector<SdkRange> ranges;
+        if (!boundedSdkRanges(uri_str_vec, block_buffers, ranges)) {
+            RTP_LLM_LOG_ERROR("KVCM bounded SDK rejects malformed or oversized block geometry");
+            return kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS;
+        }
+        for (const auto& range : ranges) {
+            kv_cache_manager::UriStrVec uris(uri_str_vec.begin() + range.begin, uri_str_vec.begin() + range.end);
+            // Shallow pointer descriptors; caller pins own all payloads for the whole operation.
+            kv_cache_manager::BlockBuffers buffers(block_buffers.begin() + range.begin,
+                                                   block_buffers.begin() + range.end);
+            const auto                     began = std::chrono::steady_clock::now();
+            ec = transfer_clients_[slot->second]->LoadKvCaches(uris, buffers, trace_info);
+            const auto us =
+                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
+            RTP_LLM_LOG_INFO("KV_SDK_CHUNK op=read pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
+                             static_cast<int>(getpid()),
+                             tag.c_str(),
+                             uris.size(),
+                             range.iovs,
+                             range.bytes,
+                             static_cast<long>(us),
+                             static_cast<int>(ec));
+            if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
+                break;
+            }
+            std::copy(buffers.begin(), buffers.end(), block_buffers.begin() + range.begin);
+        }
+    }
+    const auto io_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - io_started).count();
+    size_t io_bytes = 0;
+    for (const auto& block : block_buffers) {
+        for (const auto& iov : block.iovs) {
+            io_bytes += iov.size;
+        }
+    }
+    RTP_LLM_LOG_INFO("KV_IO op=read pid=%d tag=%s blocks=%zu bytes=%zu duration_us=%ld ec=%d",
+                     static_cast<int>(getpid()),
+                     tag.c_str(),
+                     uri_str_vec.size(),
+                     io_bytes,
+                     static_cast<long>(io_us),
+                     static_cast<int>(ec));
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
         RTP_LLM_LOG_ERROR("kvcm client loadKvCaches fail, ec [%d]", ec);
     }
@@ -597,7 +722,64 @@ ClientWrapper::saveKvCachesForTagWithStatus(
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return {kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS, {}};
     }
-    auto [ec, result] = transfer_clients_[slot->second]->SaveKvCaches(uri_str_vec, block_buffers, trace_info);
+    const auto                  io_started = std::chrono::steady_clock::now();
+    auto                        ec         = kv_cache_manager::ClientErrorCode::ER_OK;
+    kv_cache_manager::UriStrVec result;
+    if (!autil::EnvUtil::getEnv("RTP_KVCM_BOUNDED_SDK_BATCH", false)) {
+        std::tie(ec, result) = transfer_clients_[slot->second]->SaveKvCaches(uri_str_vec, block_buffers, trace_info);
+    } else {
+        std::vector<SdkRange> ranges;
+        if (!boundedSdkRanges(uri_str_vec, block_buffers, ranges)) {
+            RTP_LLM_LOG_ERROR("KVCM bounded SDK rejects malformed or oversized block geometry");
+            return {kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS, {}};
+        }
+        for (const auto& range : ranges) {
+            kv_cache_manager::UriStrVec uris(uri_str_vec.begin() + range.begin, uri_str_vec.begin() + range.end);
+            // Shallow pointer descriptors; caller pins own all payloads for the whole operation.
+            kv_cache_manager::BlockBuffers buffers(block_buffers.begin() + range.begin,
+                                                   block_buffers.begin() + range.end);
+            const auto                     began = std::chrono::steady_clock::now();
+            auto saved = transfer_clients_[slot->second]->SaveKvCaches(uris, buffers, trace_info);
+            ec         = saved.first;
+            const auto us =
+                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
+            RTP_LLM_LOG_INFO("KV_SDK_CHUNK op=write pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
+                             static_cast<int>(getpid()),
+                             tag.c_str(),
+                             uris.size(),
+                             range.iovs,
+                             range.bytes,
+                             static_cast<long>(us),
+                             static_cast<int>(ec));
+            if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
+                break;
+            }
+            if (!saved.second.empty() && saved.second.size() != uris.size()) {
+                ec = kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS;
+                break;
+            }
+            const auto& actual = saved.second.empty() ? uris : saved.second;
+            result.insert(result.end(), actual.begin(), actual.end());
+        }
+        if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
+            result.clear();
+        }
+    }
+    const auto io_us =
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - io_started).count();
+    size_t io_bytes = 0;
+    for (const auto& block : block_buffers) {
+        for (const auto& iov : block.iovs) {
+            io_bytes += iov.size;
+        }
+    }
+    RTP_LLM_LOG_INFO("KV_IO op=write pid=%d tag=%s blocks=%zu bytes=%zu duration_us=%ld ec=%d",
+                     static_cast<int>(getpid()),
+                     tag.c_str(),
+                     uri_str_vec.size(),
+                     io_bytes,
+                     static_cast<long>(io_us),
+                     static_cast<int>(ec));
     if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
         RTP_LLM_LOG_ERROR("kvcm client saveKvCaches fail, ec [%d]", ec);
     }

@@ -386,6 +386,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         int64_t                      http_port = maga_init_params.server_config.attr("http_port").cast<int64_t>();
         int64_t model_rpc_port                 = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
         auto    role_type                      = maga_init_params.pd_sep_config.role_type;
+
         // NOTE: ip/ip段可自定义为所需范围。
         server_address = "0.0.0.0:" + std::to_string(model_rpc_port);
         // trace telemetry runtime: init once role/rank are known; only
@@ -429,6 +430,7 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         if (!grpc_status.ok()) {
             RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
         }
+        model_rpc_service_->configurePrefillShutdown(maga_init_params);
 
         // NOTE: ip/ip段可自定义为所需范围。
         std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));

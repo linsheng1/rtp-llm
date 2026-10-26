@@ -1465,6 +1465,19 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     // 即使 moveToNext() 还未被调度器轮询，这里也能拿到与事件一致的"已完成"判断。
     bool is_done = generate_status_->checkFinished();
 
+    // Protect the final native checkpoint only AFTER successful EOS and before
+    // any final block remapping. The backend prepares pinned GPU handles and
+    // queues the existing Prefill writer; no decode-progress CPU snapshots.
+    if (is_done && hasEventWithoutLock(StreamEvents::GenerateDone) && !hasEventWithoutLock(StreamEvents::Error)
+        && !hasErrorWithoutLock() && resourceContext().cache_manager && !useStreamAsyncReserveTokens()
+        && num_new_tokens == 1 && currentBatchSize() == 1 && autil::EnvUtil::getEnv("RTP_DTOP_FILE_CP2", false)
+        && resourceContext().role_type == RoleType::DECODE && stream_cache_resource_->reuseCache()
+        && !(autil::EnvUtil::getEnv("RTP_DTOP_BENCH_READ_ONLY_REQUESTS", false)
+             && !generateConfig()->enable_device_cache)
+        && seqLength() > 0) {
+        resourceContext().cache_manager->captureCompletedDecode(kvCache(), seqLength() - 1, true);
+    }
+
     if (!is_done || stream_cache_resource_->reuseCache()) {
         // kv cache blocks must be updated if REUSE_CACHE is on, even the stream is done
         auto update_res = updateKvCacheBlocks(update_info.src_batch_indices);

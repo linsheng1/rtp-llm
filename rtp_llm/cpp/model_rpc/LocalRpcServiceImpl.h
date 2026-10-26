@@ -1,6 +1,8 @@
 #pragma once
 
 #include <memory>
+#include <atomic>
+#include "rtp_llm/cpp/model_rpc/ShutdownCoordinator.h"
 #include <algorithm>
 #include <functional>
 #include <chrono>
@@ -169,11 +171,33 @@ public:
         external_onflight_       = std::move(count);
     }
 
+    void configurePrefillShutdown(const EngineInitParams& params) {
+        if (params.pd_sep_config.role_type != RoleType::PREFILL || params.parallelism_config.world_size <= 1) {
+            return;
+        }
+        const auto& peers = params.runtime_config.shutdown_worker_grpc_addrs;
+        if (peers.size() != size_t(params.parallelism_config.world_size)) {
+            return;
+        }
+        shutdown_coordinator_ = std::make_unique<ShutdownCoordinator>(
+            peers, params.parallelism_config.world_rank,
+            [this] { return ShutdownCoordinator::State{draining_.load(), onflightRequestNum() + external_onflight_()}; },
+            [this] { beginShutdown(); },
+            [this](bool fence, uint64_t target) {
+                auto engine = getEngine();
+                return fence ? engine->fenceLoopStop(target) : engine->loopStopState();
+            });
+    }
+
     virtual void beginShutdown() {
+        draining_ = true;
         external_begin_shutdown_();
     }
 
     virtual bool waitForDrain(std::chrono::system_clock::time_point deadline) {
+        if (shutdown_coordinator_) {
+            return shutdown_coordinator_->wait(deadline);
+        }
         while (onflightRequestNum() + external_onflight_()) {
             if (std::chrono::system_clock::now() >= deadline) {
                 return false;
@@ -193,10 +217,15 @@ public:
     ::grpc::Status ExecuteFunction(::grpc::ServerContext*     context,
                                    const ::FunctionRequestPB* request,
                                    ::FunctionResponsePB*      response) override {
+        if (request->has_shutdown_request() && shutdown_coordinator_) {
+            return shutdown_coordinator_->handle(request->shutdown_request(), response->mutable_shutdown_response());
+        }
         return local_server_->ExecuteFunction(context, request, response);
     }
 
 protected:
+    std::atomic<bool> draining_{false};
+    std::unique_ptr<ShutdownCoordinator> shutdown_coordinator_;
     std::function<void()>           external_begin_shutdown_ = [] {};
     std::function<size_t()>         external_onflight_       = [] { return size_t(0); };
     std::shared_ptr<LocalRpcServer> local_server_;

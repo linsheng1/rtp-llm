@@ -64,6 +64,12 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "loop_stop_gate",
+    hdrs = ["LoopStopGate.h"],
+    visibility = ["//visibility:public"],
+)
+
 # Main engine base class
 cc_library(
     name = "engine_base",
@@ -76,6 +82,7 @@ cc_library(
         "EngineBase.cc",
     ],
     deps = [
+        ":loop_stop_gate",
         ":executor",
         ":profiler",
         ":worker_status_info",

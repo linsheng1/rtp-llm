@@ -36,6 +36,9 @@ public:
                                              preRunMode                            mode) override;
     absl::Status                      stop() override;
 
+    LoopStopGate::State loopStopState() const override { return loop_stop_gate_.state(); }
+    LoopStopGate::State fenceLoopStop(uint64_t target) override;
+
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;
     absl::Status step();
     absl::Status startLoop();
@@ -82,6 +85,8 @@ private:
     bool isDSpark() override;
 
 private:
+    std::atomic<bool>                             loop_fencing_{false};
+    LoopStopGate                                  loop_stop_gate_;
     autil::ThreadPtr                              loop_thread_;
     std::atomic<bool>                             running_{false};
     std::unique_ptr<Executor>                     executor_;

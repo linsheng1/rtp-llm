@@ -889,6 +889,16 @@ void CoordinatorCacheManager::free(const FreeInfo& free_info) {
     kv_cache_resource->clearBlocks();
 }
 
+bool CoordinatorCacheManager::captureCompletedDecode(const BatchKVCacheResource& resource,
+                                                     size_t                      computed_end,
+                                                     bool                        decode_finished) const {
+    if (!block_tree_cache_) {
+        return false;
+    }
+    const auto backend = block_tree_cache_->storageBackend();
+    return backend && backend->captureCompletedDecode(resource, computed_end, decode_finished);
+}
+
 void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length) {
     resident_prefix_length  = 0;
     auto& kv_cache_resource = insert_info.batch_kv_cache_resource;

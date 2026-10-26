@@ -19,12 +19,14 @@ std::string instanceId() {
 ShutdownCoordinator::ShutdownCoordinator(std::vector<std::string> addresses,
                                          size_t                   rank,
                                          std::function<State()>   state,
-                                         std::function<void()>    begin_shutdown):
+                                         std::function<void()>    begin_shutdown,
+                                         std::function<LoopStopGate::State(bool, uint64_t)> fence_engine):
     addresses_(std::move(addresses)),
     rank_(rank),
     state_(std::move(state)),
     instance_id_(instanceId()),
-    begin_shutdown_(std::move(begin_shutdown)) {
+    begin_shutdown_(std::move(begin_shutdown)),
+    fence_engine_(std::move(fence_engine)) {
     if (addresses_.empty() || rank_ >= addresses_.size()) {
         throw std::invalid_argument("invalid shutdown group membership");
     }
@@ -74,6 +76,30 @@ grpc::Status ShutdownCoordinator::handle(const ShutdownRequestPB& request, Shutd
         && !acceptRelease({request.drained_instances().begin(), request.drained_instances().end()})) {
         return {grpc::StatusCode::FAILED_PRECONDITION, "stale or premature shutdown release"};
     }
+    if (request.fence_engine() || request.parked_instances_size()) {
+        // A fence cannot cancel active work or precede group request drain.
+        if (!fence_engine_ || releasedInstances().empty()) {
+            return {grpc::StatusCode::FAILED_PRECONDITION, "engine fence requires supported, drained group"};
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (parked_instances_.empty()) {
+            fence_engine_(true, request.engine_step());
+        }
+    }
+    if (request.parked_instances_size()
+        && !acceptParked({request.parked_instances().begin(), request.parked_instances().end()}, request.engine_step())) {
+        return {grpc::StatusCode::FAILED_PRECONDITION, "stale or premature engine fence certificate"};
+    }
+    if (fence_engine_) {
+        const auto loop = fence_engine_(false, 0);
+        response->set_engine_fence_supported(loop.supported);
+        response->set_engine_step(loop.step);
+        response->set_engine_parked(loop.parked);
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& instance : parked_instances_) {
+            response->add_parked_instances(instance);
+        }
+    }
     const auto state = state_();
     response->set_draining(state.draining);
     response->set_onflight(state.onflight);
@@ -107,6 +133,15 @@ grpc::Status ShutdownCoordinator::call(size_t                   rank,
 }
 
 bool ShutdownCoordinator::wait(Deadline deadline) {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // A previously accepted same-step certificate remains sufficient when
+        // an observer has already closed its RPC server. Do not spend the
+        // deadline trying to rediscover a peer that shut down successfully.
+        if (!parked_instances_.empty()) {
+            return true;
+        }
+    }
     ShutdownRequestPB request;
     request.set_group_id(group_id_);
     request.set_begin_shutdown(true);
@@ -149,6 +184,14 @@ bool ShutdownCoordinator::wait(Deadline deadline) {
             }
             std::vector<bool> delivered(addresses_.size(), false);
             do {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    // Another rank may already have completed phase two while
+                    // this waiter was still acknowledging request drain.
+                    if (!parked_instances_.empty()) {
+                        return true;
+                    }
+                }
                 deadline = effectiveDeadline(deadline);
                 request.set_deadline_unix_ms(
                     std::chrono::duration_cast<std::chrono::milliseconds>(deadline.time_since_epoch()).count());
@@ -170,10 +213,96 @@ bool ShutdownCoordinator::wait(Deadline deadline) {
             } while (std::chrono::system_clock::now() < deadline);
             // Even if a peer exits before acknowledging delivery, the
             // certificate proves there are no user requests left to interrupt.
-            return true;
+            return fence_engine_ ? waitForEngineFence(deadline) : true;
         }
         std::this_thread::sleep_until(
             std::min(deadline, std::chrono::system_clock::now() + std::chrono::milliseconds(20)));
+    }
+    return false;
+}
+
+bool ShutdownCoordinator::acceptParked(const std::vector<std::string>& instances, uint64_t step) {
+    if (!fence_engine_ || instances != releasedInstances()) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto loop = fence_engine_(false, 0);
+    if (!loop.supported || !loop.parked || loop.step != step) {
+        return false;
+    }
+    if (!parked_instances_.empty() && (parked_instances_ != instances || parked_step_ != step)) {
+        return false;
+    }
+    parked_instances_ = instances;
+    parked_step_ = step;
+    return true;
+}
+
+bool ShutdownCoordinator::waitForEngineFence(Deadline deadline) {
+    if (rank_ != 0) {
+        // One publisher avoids a race where simultaneous observers close an
+        // RPC server while another observer is still delivering certificates.
+        // Followers acknowledge through handle(), then may stop immediately.
+        while (std::chrono::system_clock::now() < (deadline = effectiveDeadline(deadline))) {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                if (!parked_instances_.empty()) {
+                    return true;
+                }
+            }
+            std::this_thread::sleep_until(std::min(deadline, std::chrono::system_clock::now() + std::chrono::milliseconds(10)));
+        }
+        return false;
+    }
+    ShutdownRequestPB request;
+    request.set_group_id(group_id_);
+    request.set_fence_engine(true);
+    uint64_t target = fence_engine_(false, 0).step;
+    while (std::chrono::system_clock::now() < (deadline = effectiveDeadline(deadline))) {
+        request.set_engine_step(target);
+        const auto instances = releasedInstances();
+        for (const auto& id : instances) { request.add_drained_instances(id); }
+        bool all_parked = true;
+        uint64_t observed = target;
+        for (size_t i = 0; i < addresses_.size(); ++i) {
+            ShutdownResponsePB response;
+            if (!call(i, request, &response, deadline).ok() || !response.engine_fence_supported()) {
+                all_parked = false;
+                continue;
+            }
+            if (response.parked_instances_size()
+                && acceptParked({response.parked_instances().begin(), response.parked_instances().end()}, response.engine_step())) {
+                target = response.engine_step();
+                all_parked = true;
+                break;
+            }
+            observed = std::max(observed, response.engine_step());
+            all_parked = all_parked && response.engine_parked() && response.engine_step() == target;
+        }
+        request.clear_drained_instances();
+        if (all_parked && acceptParked(instances, target)) {
+            // Publish an incarnation-bound same-step certificate before any RPC
+            // server closes. Surviving peers relay it if an observer exits.
+            request.set_engine_step(target);
+            for (const auto& id : instances) { request.add_parked_instances(id); }
+            std::vector<bool> delivered(addresses_.size(), false);
+            do {
+                for (size_t i = 0; i < addresses_.size(); ++i) {
+                    if (!delivered[i]) {
+                        ShutdownResponsePB response;
+                        delivered[i] = call(i, request, &response, deadline).ok();
+                    }
+                }
+                if (std::all_of(delivered.begin(), delivered.end(), [](bool done) { return done; })) {
+                    return true;
+                }
+                std::this_thread::sleep_until(std::min(deadline, std::chrono::system_clock::now() + std::chrono::milliseconds(10)));
+            } while (std::chrono::system_clock::now() < deadline);
+            // A missing ACK is not proof that the lagging rank knows the fence.
+            return false;
+        }
+        target = observed;
+        std::this_thread::sleep_until(std::min(deadline, std::chrono::system_clock::now() + std::chrono::milliseconds(10)));
     }
     return false;
 }
