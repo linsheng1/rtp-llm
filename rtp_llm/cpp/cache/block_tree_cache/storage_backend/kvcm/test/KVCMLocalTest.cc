@@ -160,6 +160,8 @@ TEST(KVCMLocalTest, InitRejectsInvalidQuarantineAbortRatio) {
     auto            environment    = makeBackendEnvironment("kvcm_storage_backend_invalid_quarantine_ratio");
     auto            client_wrapper = std::make_shared<MockClientWrapper>();
     EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).Times(0);
+    // StorageBackend::init unwinds the implementation even when validation
+    // fails before SDK registration. The cleanup must remain idempotent.
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment, singleRankConfig(), client_wrapper);
     EXPECT_FALSE(initSingleRank(*backend.backend, environment));
@@ -559,6 +561,12 @@ TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {
     EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
 
+    uint64_t quarantine_generation;
+    {
+        std::lock_guard<std::mutex> lock(backend.backend->quarantine_mutex_);
+        quarantine_generation = backend.backend->quarantine_generation_;
+    }
+
     ScopedReferencedBlocks healthy_blocks(environment.device_pool, 1);
     auto                   healthy_request =
         makeStorageRequest(environment, /*keys=*/{202}, /*local_matched_blocks=*/0, /*block_ids=*/healthy_blocks.get());
@@ -587,6 +595,13 @@ TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_count_metric), 1);
     EXPECT_DOUBLE_EQ(snapshotGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
+    // Healthy I/O must not change the quarantine generation or state.
+    {
+        std::lock_guard<std::mutex> lock(backend.backend->quarantine_mutex_);
+        EXPECT_EQ(backend.backend->quarantine_generation_, quarantine_generation);
+        EXPECT_EQ(backend.backend->quarantined_task_count_, 1u);
+        EXPECT_EQ(backend.backend->quarantined_block_count_, 1u);
+    }
 
     backend.backend->shutdown();
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
@@ -598,8 +613,16 @@ TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {
 }
 
 TEST(KVCMLocalTest, RankZeroAbortsWhenQuarantinedBlocksExceedConfiguredRatio) {
-    // CUDA needs a fresh process rather than the default fork-only death-test child.
-    ::testing::FLAGS_gtest_death_test_style = "threadsafe";
+    // Earlier cases initialize CUDA. Forking that runtime cannot initialize a
+    // new GPU pool; exec a fresh test process so the assertion reaches the
+    // quarantine capacity guard rather than failing in cudaGetDevice.
+    struct RestoreDeathTestStyle {
+        std::string prior = ::testing::GTEST_FLAG(death_test_style);
+        ~RestoreDeathTestStyle() {
+            ::testing::GTEST_FLAG(death_test_style) = prior;
+        }
+    } restore_death_test_style;
+    ::testing::GTEST_FLAG(death_test_style) = "threadsafe";
     ASSERT_EXIT(
         ([]() {
             (void)dup2(STDERR_FILENO, STDOUT_FILENO);
