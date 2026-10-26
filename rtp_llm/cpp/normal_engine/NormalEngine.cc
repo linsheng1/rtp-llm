@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/engine_base/EngineBase.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
+#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
@@ -694,6 +695,7 @@ absl::Status NormalEngine::stop() {
     }
     // Join the async dispatch runner and release the dispatcher-owned worker pool.
     executor_.reset();
+    LogitsProcessorFactory::shutdown();
     resource_context_.cache_manager->stopMetricsReporter();
     return absl::OkStatus();
 }
