@@ -4,6 +4,11 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMStorageBackend.h"
 
 #include <algorithm>
+#include <cstring>
+#include <map>
+#include <numeric>
+#include <set>
+#include <tuple>
 #include <atomic>
 #include <cstdlib>
 #include <cstdint>
@@ -29,6 +34,7 @@
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
@@ -286,6 +292,21 @@ public:
     }
 
     void read(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) {
+        struct OperationTimer {
+            int64_t     begin = autil::TimeUtility::currentTimeInMicroSeconds();
+            const char* op;
+            int         role;
+            ~OperationTimer() {
+                RTP_LLM_LOG_INFO("KV_OPERATION op=%s role=%d begin_us=%ld end_us=%ld duration_us=%ld",
+                                 op,
+                                 role,
+                                 begin,
+                                 autil::TimeUtility::currentTimeInMicroSeconds(),
+                                 autil::TimeUtility::currentTimeInMicroSeconds() - begin);
+            }
+        } operation_timer{
+            autil::TimeUtility::currentTimeInMicroSeconds(), "read", static_cast<int>(parallelism_config_.role_type)};
+
         RTP_LLM_CHECK_WITH_INFO(parallelism_config_.tp_rank == 0,
                                 "KVCM metadata read must run on tp rank 0, got %ld",
                                 parallelism_config_.tp_rank);
@@ -335,9 +356,27 @@ public:
     }
 
     void write(const StorageRequest& request) {
+        struct OperationTimer {
+            int64_t     begin = autil::TimeUtility::currentTimeInMicroSeconds();
+            const char* op;
+            int         role;
+            ~OperationTimer() {
+                RTP_LLM_LOG_INFO("KV_OPERATION op=%s role=%d begin_us=%ld end_us=%ld duration_us=%ld",
+                                 op,
+                                 role,
+                                 begin,
+                                 autil::TimeUtility::currentTimeInMicroSeconds(),
+                                 autil::TimeUtility::currentTimeInMicroSeconds() - begin);
+            }
+        } operation_timer{
+            autil::TimeUtility::currentTimeInMicroSeconds(), "write", static_cast<int>(parallelism_config_.role_type)};
+
         // Attributed experiment: only the completed D checkpoint publishes.
         // Local tree reuse remains native and is never suppressed here.
-        if (file_cp2_ && (file_decode_ || !autil::EnvUtil::getEnv("RTP_DTOP_BENCH_PREFILL_PUBLISH", false))) { return; }
+        if (file_cp2_ && !request.decode_completion
+            && (file_decode_ || !autil::EnvUtil::getEnv("RTP_DTOP_BENCH_PREFILL_PUBLISH", false))) {
+            return;
+        }
         RTP_LLM_CHECK_WITH_INFO(parallelism_config_.tp_rank == 0,
                                 "KVCM metadata write must run on tp rank 0, got %ld",
                                 parallelism_config_.tp_rank);
@@ -350,6 +389,8 @@ public:
         std::vector<std::string> location_spec_group_names;
         RTP_LLM_CHECK_WITH_INFO(group_policy_->getNeedWriteGroups(request, valid_keys_size, location_spec_group_names),
                                 "KVCM write group selection failed");
+        const auto        write_started_us  = autil::TimeUtility::currentTimeInMicroSeconds();
+        size_t            transferred_bytes = 0;
         const std::string trace_id     = nextTraceId("write", write_trace_sequence_);
         auto [success, write_location] = client_wrapper_->getWriteLocation(
             "", trace_id, keys, /*tokens=*/{}, location_spec_group_names, /*write_timeout_seconds=*/600,
@@ -358,7 +399,8 @@ public:
         static const kv_cache_manager::Locations empty_locations;
         bool                                     finish_attempted = false;
         try {
-            std::vector<FunctionRequestPB> requests(static_cast<size_t>(parallelism_config_.tp_size));
+            std::vector<FunctionRequestPB> requests(
+                static_cast<size_t>(request.decode_completion ? file_target_tp_ : parallelism_config_.tp_size));
             ActualUriGather                actual_uri_gather(requests.size());
             initializeRequests(requests, REMOTE_OPERATION_WRITE, trace_id);
             const auto key_indices = unmaskedKeyIndices(write_location.block_mask, valid_keys_size);
@@ -397,16 +439,21 @@ public:
                                             "KVCM write has no source handle for key=%zu tag=%s",
                                             key_idx,
                                             info->second.tag.c_str());
+                    transferred_bytes += group_policy_->groups().at(info->second.group_id).block_size_bytes;
                     const size_t rank   = static_cast<size_t>(info->second.tp_rank);
                     auto*        remote = requests.at(rank).mutable_remote_request();
                     remote->add_group_tags(info->second.tag);
-                    remote->add_block_ids(handle->block);
+                    remote->add_block_ids(request.decode_completion && !handle->peer_blocks.empty() ?
+                                              handle->peer_blocks.at(rank) :
+                                              handle->block);
                     remote->add_uris(location_spec.uri);
                     actual_uri_gather[rank].push_back(&location_spec);
                 }
             }
 
-            const auto responses      = dispatchRequests(requests, kv_cache_config_.kvcm_put_broadcast_timeout);
+            const auto responses      = request.decode_completion ?
+                                            transferCompletedDecode(requests) :
+                                            dispatchRequests(requests, kv_cache_config_.kvcm_put_broadcast_timeout);
             bool       has_actual_uri = false;
             for (size_t rank = 0; rank < responses.size(); ++rank) {
                 const auto& actual_uris = responses[rank].remote_response().actual_uris();
@@ -430,6 +477,23 @@ public:
                                              write_location.locations.size(),
                                              actual_locations),
                 "KVCM FinishWrite failed");
+            if (request.decode_completion) {
+                RTP_LLM_LOG_INFO(
+                    "DTOP_FILE committed computed_end=%zu canonical_keys=%zu new_locations=%zu bytes=%zu dp_rank=%ld",
+                    request.published_tokens,
+                    request.keys->size(),
+                    write_location.locations.size(),
+                    transferred_bytes,
+                    parallelism_config_.dp_rank);
+                RTP_LLM_LOG_INFO("DTOP_GPU commit actual_computed_end=%zu published=%zu tail=%zu CPU_snapshot_bytes=0",
+                                 request.computed_tokens,
+                                 request.published_tokens,
+                                 request.computed_tokens - request.published_tokens);
+                RTP_LLM_LOG_INFO("DTOP_FILE write_duration_us=%ld computed_end=%zu bytes=%zu",
+                                 autil::TimeUtility::currentTimeInMicroSeconds() - write_started_us,
+                                 request.published_tokens,
+                                 transferred_bytes);
+            }
         } catch (...) {
             if (!finish_attempted) {
                 try {
@@ -493,6 +557,7 @@ public:
         if (client_wrapper_) {
             client_wrapper_->shutdown();
         }
+        // Base StorageBackend releases quarantined GPU pins after SDK drain.
     }
 
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DtopCompletionBridge.inc"
@@ -1081,9 +1146,8 @@ private:
     bool file_cp2_{false}, file_pace_{false}, file_decode_{false};
     StorageBackend::BufferResolver file_resolver_;
     mutable std::mutex file_mutex_;
+    std::shared_ptr<CompletionAccounting> completion_accounting_ = std::make_shared<CompletionAccounting>();
     mutable std::unordered_set<std::string> file_verified_uris_;
-    // Unknown completion retains CPU source buffers until SDK shutdown drains.
-    std::vector<std::shared_ptr<DecodeCompletionSnapshot>> file_quarantined_snapshots_;
     CacheConfig                          cache_config_;
     KVCacheConfig                        kv_cache_config_;
     RuntimeConfig                        runtime_config_;
@@ -1174,6 +1238,23 @@ bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, Remote
 
 namespace rtp_llm {
 bool KVCMStorageBackend::captureCompletedDecode(const BatchKVCacheResource& resource, size_t end, bool finished) {
-    return impl_->captureCompletedDecode(resource, end, finished);
+    // A progress callback is intentionally a no-op: no GPU query, pin or copy.
+    if (!finished)
+        return true;
+    try {
+        auto request = impl_->planCompletedDecode(resource, end);
+        if (request.empty())
+            return true;
+        auto       task     = prepareWrite(std::move(request));
+        const bool admitted = write(std::move(task));
+        if (admitted)
+            resource.decodeCompletionSubmitted() = true;
+        RTP_LLM_LOG_INFO("DTOP_GPU EOS_queued=%d computed_end=%zu", static_cast<int>(admitted), end);
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_ERROR("DTOP_GPU EOS admission failed; no publication claimed: %s", error.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("DTOP_GPU EOS admission failed; unknown error");
+    }
+    return true;
 }
 }  // namespace rtp_llm

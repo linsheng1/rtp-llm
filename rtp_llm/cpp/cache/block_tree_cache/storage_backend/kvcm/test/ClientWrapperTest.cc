@@ -1,5 +1,6 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
+#include "autil/EnvUtil.h"
 
 #include <array>
 #include <atomic>
@@ -905,6 +906,102 @@ TEST(ClientWrapperTest, ServiceInstanceFailureReRegistersAndRoutesTheNextRequest
     EXPECT_TRUE(routed);
     wrapper.shutdown();
     EXPECT_EQ(*destruction_count, 1);
+}
+
+TEST(ClientWrapperTest, BoundedSdkChunksPreserveUrisAndDestinationBytes) {
+    using namespace kv_cache_manager;
+    autil::EnvGuard            guard("RTP_KVCM_BOUNDED_SDK_BATCH", "1");
+    std::vector<unsigned char> data(250 * 19), destination(data.size(), 0);
+    for (size_t i = 0; i < data.size(); ++i)
+        data[i] = static_cast<unsigned char>(i * 31 + 7);
+    RegistSpan          span{data.data(), data.size()};
+    InitObservation     observation;
+    MockTransferClient* mock = nullptr;
+    auto                client =
+        initializeClient(false, "bounded", span, observation, std::make_shared<int>(0), nullptr, nullptr, &mock);
+    ASSERT_NE(client, nullptr);
+    ASSERT_NE(mock, nullptr);
+    UriStrVec    uris;
+    BlockBuffers source, target;
+    for (size_t i = 0; i < 250; ++i) {
+        uris.push_back("uri" + std::to_string(i));
+        source.emplace_back();
+        target.emplace_back();
+        for (size_t j = 0; j < 19; ++j) {
+            source.back().iovs.push_back({MemoryType::CPU, data.data() + i * 19 + j, 1, false});
+            target.back().iovs.push_back({MemoryType::CPU, destination.data() + i * 19 + j, 1, false});
+        }
+    }
+    size_t saved = 0, loaded = 0;
+    EXPECT_CALL(*mock, SaveKvCaches(_, _, _))
+        .Times(5)
+        .WillRepeatedly(Invoke([&](const auto& u, const auto& b, const auto&) {
+            EXPECT_LE(u.size() * 19, 1024u);
+            UriStrVec actual;
+            for (size_t i = 0; i < u.size(); ++i) {
+                EXPECT_EQ(u[i], uris[saved + i]);
+                EXPECT_EQ(b[i].iovs.size(), 19u);
+                for (size_t j = 0; j < 19; ++j)
+                    EXPECT_EQ(b[i].iovs[j].base, source[saved + i].iovs[j].base);
+                actual.push_back("actual_" + u[i]);
+            }
+            saved += u.size();
+            return std::make_pair(ClientErrorCode::ER_OK, actual);
+        }));
+    auto written = client->saveKvCachesForTagWithStatus("default", uris, source);
+    ASSERT_EQ(written.first, ClientErrorCode::ER_OK);
+    ASSERT_EQ(saved, 250u);
+    ASSERT_EQ(written.second.size(), 250u);
+    EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).Times(5).WillRepeatedly(Invoke([&](const auto& u, auto& b, const auto&) {
+        EXPECT_LE(u.size() * 19, 1024u);
+        for (size_t i = 0; i < u.size(); ++i) {
+            EXPECT_EQ(u[i], "actual_" + uris[loaded + i]);
+            for (size_t j = 0; j < 19; ++j)
+                *static_cast<unsigned char*>(b[i].iovs[j].base) = data[(loaded + i) * 19 + j];
+        }
+        loaded += u.size();
+        return ClientErrorCode::ER_OK;
+    }));
+    ASSERT_EQ(client->loadKvCachesForTagWithStatus("default", written.second, target), ClientErrorCode::ER_OK);
+    EXPECT_EQ(loaded, 250u);
+    EXPECT_EQ(data, destination);
+    client->shutdown();
+}
+TEST(ClientWrapperTest, BoundedSdkStopsOnFailureAndRejectsUnsafeGeometry) {
+    using namespace kv_cache_manager;
+    autil::EnvGuard     guard("RTP_KVCM_BOUNDED_SDK_BATCH", "1");
+    unsigned char       byte = 7;
+    RegistSpan          span{&byte, 1};
+    InitObservation     observation;
+    MockTransferClient* mock   = nullptr;
+    auto                client = initializeClient(
+        false, "bounded_failure", span, observation, std::make_shared<int>(0), nullptr, nullptr, &mock);
+    ASSERT_NE(client, nullptr);
+    UriStrVec    uris(120, "uri");
+    BlockBuffers buffers(120);
+    for (auto& b : buffers)
+        for (int j = 0; j < 19; ++j)
+            b.iovs.push_back({MemoryType::CPU, &byte, 1, false});
+    {
+        ::testing::InSequence ordered;
+        EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).WillOnce(Return(std::make_pair(ClientErrorCode::ER_OK, UriStrVec{})));
+        EXPECT_CALL(*mock, SaveKvCaches(_, _, _))
+            .WillOnce(Return(std::make_pair(ClientErrorCode::ER_INVALID_PARAMS, UriStrVec{})));
+    }
+    auto result = client->saveKvCachesForTagWithStatus("default", uris, buffers);
+    EXPECT_EQ(result.first, ClientErrorCode::ER_INVALID_PARAMS);
+    EXPECT_TRUE(result.second.empty());
+    ::testing::Mock::VerifyAndClearExpectations(mock);
+    EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).Times(0);
+    EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).Times(0);
+    EXPECT_EQ(client->saveKvCachesForTagWithStatus("default", UriStrVec{"one"}, buffers).first,
+              ClientErrorCode::ER_INVALID_PARAMS);
+    BlockBuffers unsafe(1);
+    for (int j = 0; j < 1025; ++j)
+        unsafe[0].iovs.push_back({MemoryType::CPU, &byte, 1, false});
+    EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", UriStrVec{"one"}, unsafe),
+              ClientErrorCode::ER_INVALID_PARAMS);
+    client->shutdown();
 }
 
 }  // namespace
