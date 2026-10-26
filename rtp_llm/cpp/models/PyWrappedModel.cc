@@ -186,6 +186,12 @@ bool PyWrappedModel::updateEplbConfig(const EPLBConfig& config) {
 
 PyWrappedModel::~PyWrappedModel() {
     try {
+        // Attention metadata retained by the Python model can outlive this
+        // wrapper. Drain and detach its writer before the metrics factory stops,
+        // even when those Python aliases still own the writer itself.
+        if (cache_store_async_writer_) {
+            cache_store_async_writer_->shutdown();
+        }
         py::gil_scoped_acquire gil;
         held_attn_pyobj_   = py::object();
         py_forward_method_ = py::object();
