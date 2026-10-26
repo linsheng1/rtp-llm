@@ -18,6 +18,8 @@ public:
     }
 
     void resetBatchSize(size_t batch_size) {
+        if (batch_size != batch_resource.size())
+            decode_completion_submitted_ = false;
         batch_resource.resize(batch_size);
         cache_keys_initialized_ = false;
     }
@@ -91,6 +93,7 @@ public:
     }
 
     void clearBlocks() {
+        decode_completion_submitted_ = false;
         resizeBlocks(0, 0);
     }
 
@@ -175,6 +178,7 @@ public:
     }
 
     void swap(BatchKVCacheResource& other) noexcept {
+        std::swap(decode_completion_submitted_, other.decode_completion_submitted_);
         batch_resource.swap(other.batch_resource);
         std::swap(cache_keys_initialized_, other.cache_keys_initialized_);
     }
@@ -233,7 +237,14 @@ public:
         cacheResource(batch_id).swapBlocks(group_tag, rhs, lhs);
     }
 
+    // Scheduler-owned idempotency only. Payloads stay in their native GPU pools;
+    // StorageBackend owns the retained references after EOS admission.
+    bool& decodeCompletionSubmitted() const {
+        return decode_completion_submitted_;
+    }
+
 private:
+    mutable bool                 decode_completion_submitted_{false};
     std::vector<KVCacheResource> batch_resource;  // [batch_size]
     bool                         cache_keys_initialized_{false};
 };
