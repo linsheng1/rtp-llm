@@ -77,11 +77,11 @@ These guards are inherited experimental constraints, not a general deployment AP
 
 ## Validation and limits
 
-### This release-branch port
+### Initial release-port attempt (historical)
 
 Code under test: `badca4c96d70c0639afbb05ea66c1be9c87c4f0f`;
-feature implementation `8b9ee641`. Documentation-only updates after that
-commit do not change the tested implementation.
+feature implementation `8b9ee641`. The historical documentation-only update `565ca78` did not change that
+initial tested implementation. Subsequent source fixes are qualified separately below.
 
 | Layer | Result | Boundary |
 | --- | --- | --- |
@@ -145,11 +145,12 @@ of its own private PID namespace; that is not a separate isolated P-only normal
 shutdown reproduction. All test model/Consumer/Provider processes and the private
 CPU weight keeper were subsequently released.
 
-`NormalEngine.cc` is byte-identical to the release baseline. The older
+In that initial attempt, `NormalEngine.cc` was byte-identical to the release baseline. The older
 experimental branch's per-step collective stop-vote workaround was not ported.
 The observed ordering is a strong investigation lead, not a symbolized root cause
-for the first SIGSEGV or proof of EOS-publication causality. No B-disabled model
-counterfactual was run. No scheduling workaround was added to force acceptance.
+for the first SIGSEGV or proof of EOS-publication causality. At that point no B-disabled model
+counterfactual had been run. The follow-up below supplies that evidence and adds
+an explicit shutdown-only RPC fence.
 DRAM/replicated and both explicit-SSD model configurations were not started after
 this blocker; native CP/layout coverage does not qualify those real model paths.
 
@@ -163,6 +164,67 @@ Active model cancellation and real-SDK error injection are not covered by the
 normal-EOF matrix; native failure/ownership tests do not replace those runs.
 Explicit SSD tests exclude automatic DRAM-to-SSD tiering and do not force MR
 cache eviction or establish physical SSD reads on every restore.
+
+### Shutdown follow-up on the same release baseline
+
+The B-disabled, idle DP4 Decode counterfactual also reproduced the first
+SIGSEGV. GDB and symbolization identify the KMonitor deleter in
+`MetricsReporter.cpp:78`: the process-wide grammar backend outlived
+`KMonitorFactory::Shutdown()`. Its metrics reporter then dereferenced a deleted
+KMonitor. The relevant baseline grammar/factory/metrics sources match a06;
+a complete pure-a06 model counterfactual was not run.
+
+The first fix released the grammar backend before the factory and coordinated
+engine-loop exit over RPC. A subsequent real DRAM/sharded run completed its
+cache data comparisons and same-step loop fence, but the first P still aborted
+in the ANet metrics thread. Its root returned zero while rank 0 exited by
+SIGABRT. Python attention metadata retained an async writer, whose allocator
+and active-store references kept the transport/reporting threads alive.
+
+The candidate now also explicitly shuts down the writer at native model
+teardown, joins submitted tasks, makes late completion callbacks terminal, and
+releases both the allocator and its aliasing configuration pointer. Python
+aliases may survive, but cannot reopen the closed writer. Source-page leases
+owned by outstanding underlying store callbacks keep their existing lifetime
+contract.
+
+The loop fence tracks completed/in-flight iterations on the CPU; shutdown RPCs
+advance lagging ranks to a common completed boundary and distribute an
+incarnation-bound certificate before peers close their RPC servers. There is
+no per-step GPU collective stop vote. CPU mutex/counter work is added to the
+normal loop; its isolated real-model performance impact is not measured here.
+
+Candidate source overlay SHA256:
+`e94d84cdae3108e5cf89e21e0731ce26a6d7b6705f9f658a951d749bd69e8407`;
+complete wheel SHA256:
+`61861e2a6b4b479ca5e2c20a64168026121085f3a1be522b757b306694c41518`.
+Fresh native results: 12 shutdown/loop coordinator + 3 real grammar/KMonitor
+ownership + 52 async-writer cases, all passed with zero skips. The initial
+110 EOS/backend cases and earlier 8 dispatcher-stop cases remain separately
+versioned evidence. The candidate product sources were committed as `29b6b66` (owner teardown) and
+`6bedc63` (same-step shutdown fence), byte-identical to the tested overlay.
+The four-path real-model matrix passed:
+
+| Backend | CP layout | Published endpoints (four histories) | Data and full lifecycle |
+| --- | --- | --- | --- |
+| DRAM | sharded | 8192, 8192, 8192, 8192 | Passed |
+| DRAM | replicated | 8192, 8192, 8320, 8448 | Passed |
+| SSD | sharded | 8192, 8192, 8192, 8192 | Passed |
+| SSD | replicated | 8192, 8192, 8320, 8448 | Passed |
+
+All 16 histories passed new-P cold/local-hot/bypass exact token comparisons;
+followups permit natural EOS and compare all actual outputs up to eight tokens.
+All 48 native rank exits were independently observed as exit code 0, with equal
+completed-step boundaries within each incarnation. No SIGSEGV/SIGABRT, forced
+termination or surviving own model/Consumer/Provider process was accepted.
+Original token outputs and checksums were copied to the local evidence bundle.
+The private CPU model-table keeper was released after the final audit.
+
+These are functional and normal-shutdown results under the dependency and
+explicit-SSD conditions above. Active cancellation, real-SDK error injection,
+GDR, physical SSD-read enforcement, automatic-tier CRC, capacity and performance
+are outside this follow-up. Official release-overlay CI remains required; the
+PR stays Draft for human review and has not been merged.
 
 ### Historical evidence from the original experimental branch
 
