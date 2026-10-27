@@ -9,6 +9,13 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "physical_decode_origins",
+    hdrs = ["PhysicalDecodeOrigins.h"],
+    deps = [":decode_cache_origin"],
+    visibility = ["//visibility:public"],
+)
+
 
 
 # KVCache utilities - simple inline functions, no external dependencies

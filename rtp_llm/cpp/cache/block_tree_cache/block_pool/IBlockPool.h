@@ -12,6 +12,7 @@
 
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/PhysicalDecodeOrigins.h"
 
 namespace rtp_llm {
 
@@ -76,6 +77,13 @@ public:
 
     bool validBlock(BlockIdxType block) const;
     bool isAllocated(BlockIdxType block) const;
+
+    // Optional source metadata bound to the exact physical allocation. All
+    // operations use mutex_; callers never hold a raw pointer into this table.
+    bool enableDecodeOriginTracking();
+    uint64_t decodeOriginIncarnation(BlockIdxType block) const;
+    PhysicalDecodeOrigins::Origin decodeOrigin(BlockIdxType block) const;
+    bool bindDecodeOrigin(BlockIdxType block, uint64_t expected_incarnation, PhysicalDecodeOrigins::Origin origin);
 
     size_t totalBlocksNum() const;
     size_t freeBlocksNum() const;
@@ -146,6 +154,10 @@ protected:
     void     updateActiveBlocksNumNoLock(BlockIdxType block, bool was_active);
     void     updateAvailableBlocksNumNoLock(BlockIdxType block, bool was_available);
     void     freeAllocatedBlockNoLock(BlockIdxType block);
+    void beginDecodeOriginIncarnationNoLock(BlockIdxType block) {
+        if (decode_origins_)
+            decode_origins_->beginAllocation(block);
+    }
 
     mutable std::mutex mutex_;
 
@@ -171,6 +183,7 @@ private:
     bool                                                      initialized_{false};
     std::function<void()>                                     capacity_change_callback_;
     std::vector<uint8_t>                                      allocated_;
+    std::unique_ptr<PhysicalDecodeOrigins>                    decode_origins_;
     std::vector<uint32_t>                                     tree_refcounts_;
     std::array<std::vector<uint32_t>, kBlockTreeRefTypeCount> tree_refcounts_by_type_;
     std::array<size_t, kBlockTreeRefTypeCount>                tree_referenced_block_counts_{};

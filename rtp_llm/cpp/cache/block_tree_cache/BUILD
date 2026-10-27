@@ -29,6 +29,7 @@ cc_library(
         "//rtp_llm/cpp/cache:memory_layout_strategy",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:physical_decode_origins",
     ] + torch_deps() + select({
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
