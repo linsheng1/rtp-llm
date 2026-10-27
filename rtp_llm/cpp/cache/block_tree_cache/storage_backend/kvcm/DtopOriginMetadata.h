@@ -6,7 +6,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "kv_cache_manager/common.h"
+#include "kvcm_client/common.h"
 #include "rtp_llm/cpp/utils/DecodeCacheOrigin.h"
 
 namespace rtp_llm::kvcm {
@@ -15,6 +15,28 @@ struct DtopOriginMetadata {
     kv_cache_manager::Locations    locations;
     std::vector<DecodeCacheOrigin> origins;
 };
+
+// Call with the *required* spec/rank view after ordinary cache-shape checks.
+// Unknown/legacy/mixed source affects attribution only, not cache usability.
+template<typename Location>
+std::optional<DecodeCacheOrigin> readDtopOriginMetadata(const Location& location, size_t key, size_t canonical_unit) {
+    const auto max_end = static_cast<uint64_t>(std::numeric_limits<int64_t>::max());
+    if (location.empty() || canonical_unit == 0 || key >= max_end / canonical_unit)
+        return std::nullopt;
+    const auto                           begin = static_cast<int64_t>(key * canonical_unit);
+    const auto                           end   = static_cast<int64_t>((key + 1) * canonical_unit);
+    std::optional<DecodeCacheOrigin>     agreed;
+    std::unordered_set<std::string_view> seen;
+    for (const auto& spec : location) {
+        if (spec.spec_name.empty() || !seen.emplace(spec.spec_name).second)
+            return std::nullopt;
+        auto source = decodeCacheOriginFromUri(spec.uri);
+        if (!source || source->begin != begin || source->end != end || (agreed && !(*agreed == *source)))
+            return std::nullopt;
+        agreed = std::move(source);
+    }
+    return agreed;
+}
 
 // CPU control metadata only. The SDK payload transfer has already completed;
 // do not alter its authoritative addresses, key order, spec set or payload.

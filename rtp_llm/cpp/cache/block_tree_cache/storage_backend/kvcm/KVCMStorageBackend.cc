@@ -164,6 +164,17 @@ public:
             }
             group_block_size_bytes.emplace(group.tag, fileWireBytes(group.tag));
         }
+        if (decode_publication_enabled_ && parallelism_config_.role_type == RoleType::PREFILL
+            && parallelism_config_.tp_rank == 0) {
+            std::unordered_set<const DeviceBlockPool*> enabled;
+            for (const auto& group : groups) {
+                if (!group.policy.enable_prefix_reuse)
+                    continue;
+                const auto& pool = pool_resolver(group.tag);
+                if (pool && enabled.insert(pool.get()).second && !pool->enableDecodeOriginTracking())
+                    RTP_LLM_LOG_WARNING("KVCM physical source tracking unavailable; cache data remains usable");
+            }
+        }
         if (other_group_tags.empty()) {
             group_policy_ = std::make_unique<kvcm::FullLayerGroupPolicy>(
                 topology, buffer_resolver, full_group_tags, other_group_tags, std::move(group_block_size_bytes));
@@ -469,8 +480,43 @@ public:
         const auto&                    spec_info = group_policy_->spec_info_map();
         const std::string              trace_id  = nextTraceId("read", read_trace_sequence_);
         initializeRequests(requests, REMOTE_OPERATION_READ, trace_id);
+        struct OriginBinding {
+            size_t key;
+            DeviceBlockPoolPtr pool;
+            BlockIdxType block;
+            uint64_t incarnation;
+            std::string tag;
+            PhysicalDecodeOrigins::Origin origin;
+        };
+        std::vector<OriginBinding> origin_bindings;
+        const bool track_origins = decode_publication_enabled_ && parallelism_config_.role_type == RoleType::PREFILL;
+        bool collect_bindings = track_origins;
+        size_t validated_source_keys = 0;
+        if (collect_bindings) {
+            try {
+                size_t count = 0;
+                for (const auto& row : locations_view)
+                    count += row.size();
+                origin_bindings.reserve(count);
+            } catch (const std::bad_alloc&) {
+                collect_bindings = false;
+            }
+        }
         for (size_t location_idx = 0; location_idx < locations_view.size(); ++location_idx) {
             const size_t key_idx = request.local_matched_blocks_num + location_idx;
+            PhysicalDecodeOrigins::Origin origin;
+            if (collect_bindings) {
+                try {
+                    auto source = kvcm::readDtopOriginMetadata(
+                        locations_view[location_idx], key_idx, topology_->groups().front().cacheKeyTokenStride());
+                    if (source) {
+                        origin = std::make_shared<const DecodeCacheOrigin>(std::move(*source));
+                        ++validated_source_keys;
+                    }
+                } catch (const std::bad_alloc&) {
+                    // Unknown provenance never rejects an otherwise valid load.
+                }
+            }
             for (const auto& location_spec : locations_view[location_idx]) {
                 const auto        info = spec_info.find(location_spec.spec_name);
                 const std::string spec_name(location_spec.spec_name);
@@ -484,9 +530,60 @@ public:
                 remote->add_group_tags(info->second.tag);
                 remote->add_block_ids(handle->block);
                 remote->add_uris(std::string(location_spec.uri));
+                if (track_origins && info->second.tp_rank == parallelism_config_.tp_rank) {
+                    const auto& pool = pools_by_tag_.at(info->second.tag);
+                    const auto incarnation = pool->decodeOriginIncarnation(handle->block);
+                    // A destination overwrite must not retain its previous
+                    // source, including a legacy or failed remote read. This
+                    // does not invalidate siblings sharing the physical page.
+                    pool->bindDecodeOrigin(handle->block, incarnation, info->second.tag, nullptr);
+                    if (origin && incarnation != 0) {
+                        try {
+                            origin_bindings.push_back({key_idx, pool, handle->block, incarnation,
+                                                       info->second.tag, origin});
+                        } catch (const std::bad_alloc&) {
+                            origin_bindings.clear();
+                            collect_bindings = false;
+                            origin.reset();
+                        }
+                    }
+                }
             }
         }
         (void)dispatchRequests(requests, kv_cache_config_.kvcm_get_broadcast_timeout, request.request_id);
+        // StorageBackend's task still owns the destination pins here. Publish
+        // provenance only after every required rank has completed its actual
+        // GPU read. A stale bind can never clear a newer allocation's source.
+        size_t bound_regions = 0;
+        for (size_t begin = 0; begin < origin_bindings.size();) {
+            size_t end = begin + 1;
+            while (end < origin_bindings.size() && origin_bindings[end].key == origin_bindings[begin].key)
+                ++end;
+            bool bound = true;
+            for (size_t i = begin; i < end; ++i) {
+                const auto& value = origin_bindings[i];
+                bound = value.pool->bindDecodeOrigin(value.block, value.incarnation, value.tag, value.origin) && bound;
+            }
+            if (!bound) {
+                for (size_t i = begin; i < end; ++i) {
+                    const auto& value = origin_bindings[i];
+                    value.pool->bindDecodeOrigin(value.block, value.incarnation, value.tag, nullptr);
+                }
+            } else {
+                bound_regions += end - begin;
+            }
+            begin = end;
+        }
+        if (track_origins) {
+            RtpLLMRemoteCacheOutcomeMetricsCollector source_result;
+            source_result.stage = "read_source";
+            source_result.outcome = collect_bindings && validated_source_keys == remote_blocks
+                                        ? "validated"
+                                        : "unknown_or_invalid";
+            reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(source_result);
+            RTP_LLM_LOG_INFO("DTOP_GPU read_source_bound_regions=%zu source_counts=awaiting_allocator_adoption",
+                             bound_regions);
+        }
         // A canonical CP key already covers every shard. Do not multiply this
         // logical token count by the number of TP ranks or payload groups.
         collector.remote_read_token_num =

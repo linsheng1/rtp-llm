@@ -444,6 +444,49 @@ BackendHandle makeCompletionProofBackend(const BackendEnvironment&              
                                                               client));
 }
 
+TEST(KVCMLocalTest, SuccessfulReadBindsItsRequiredSourceButLegacyOverwriteClearsIt) {
+    for (const bool known_source : {true, false}) {
+        SCOPED_TRACE(known_source);
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+        autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+        auto environment = makeBackendEnvironment("kvcm_physical_source_binding");
+        auto client = std::make_shared<MockClientWrapper>();
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        auto backend = makeCompletionProofBackend(environment, client);
+        ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+        auto source = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".4.0.8.8.9");
+        ASSERT_TRUE(source);
+        auto old_value = *source;
+        old_value.session = std::string(32, 'b');
+        const auto old = std::make_shared<const DecodeCacheOrigin>(old_value);
+        const auto generation = environment.device_pool->decodeOriginIncarnation(environment.block_id);
+        ASSERT_NE(generation, uint64_t{0});
+        ASSERT_TRUE(environment.device_pool->bindDecodeOrigin(environment.block_id, generation, "default", old));
+        const std::string canonical = "pace://allocated/1?media_type=2&node_id=1&size=32";
+        const auto uri = known_source ? *attachDecodeCacheOrigin(canonical, *source) : canonical;
+        kv_cache_manager::Locations locations{{{"tp0_Fdefault", uri}}};
+        EXPECT_CALL(*client, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
+        auto observation = match(*backend.backend, makeStorageRequest(environment));
+        ASSERT_TRUE(observation.success);
+        ASSERT_NE(observation.match_meta, nullptr);
+        EXPECT_CALL(*client, loadKvCachesForTag("default", kv_cache_manager::UriStrVec{uri}, _, _))
+            .WillOnce(Invoke([&](const auto&, const auto&, auto&, const auto&) {
+                // Previous provenance is invalid before a destination write.
+                EXPECT_FALSE(environment.device_pool->decodeOrigin(environment.block_id, "default"));
+                return true;
+            }));
+        EXPECT_TRUE(read(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta)));
+        const auto bound = environment.device_pool->decodeOrigin(environment.block_id, "default");
+        if (known_source) {
+            ASSERT_TRUE(bound);
+            EXPECT_TRUE(*bound == *source);
+        } else {
+            EXPECT_FALSE(bound);
+        }
+    }
+}
+
 template<typename Code>
 std::vector<std::pair<Code, bool>> failedCompletionCases(bool write = false) {
     std::vector<std::pair<Code, bool>> cases{{write ? Code::ER_SDKWRITE_ERROR : Code::ER_SDKREAD_ERROR, false},

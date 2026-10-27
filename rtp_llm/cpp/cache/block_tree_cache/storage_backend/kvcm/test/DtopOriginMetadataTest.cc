@@ -44,6 +44,41 @@ TEST(DtopOriginMetadataTest, MaskedExistingPrefixIsNotClaimedAsNewlyPublishedD) 
     EXPECT_EQ(result->origins[1].logicalDecodeTokens(8704), 512);
 }
 
+TEST(DtopOriginMetadataTest, ReadRequiresConsensusAcrossEveryRequiredSpecAndRank) {
+    auto result = makeDtopOriginMetadata(locations(), session, {15, 16}, 512, 8704, 8800, 7680);
+    ASSERT_TRUE(result);
+    auto source = readDtopOriginMetadata(result->locations[0], 15, 512);
+    ASSERT_TRUE(source);
+    EXPECT_TRUE(*source == result->origins[0]);
+    EXPECT_FALSE(readDtopOriginMetadata(result->locations[0], 14, 512));
+    EXPECT_FALSE(readDtopOriginMetadata(locations()[0], 15, 512));
+    auto mixed       = result->locations[0];
+    mixed.back().uri = locations()[0].back().uri;
+    EXPECT_FALSE(readDtopOriginMetadata(mixed, 15, 512));
+    mixed            = result->locations[0];
+    auto changed     = result->origins[0];
+    changed.session  = std::string(32, 'b');
+    mixed.back().uri = *attachDecodeCacheOrigin(locations()[0].back().uri, changed);
+    EXPECT_FALSE(readDtopOriginMetadata(mixed, 15, 512));
+    mixed = result->locations[0];
+    mixed.push_back(mixed.front());
+    EXPECT_FALSE(readDtopOriginMetadata(mixed, 15, 512));
+}
+
+TEST(DtopOriginMetadataTest, ReadUsesGlobalOrdinalAfterLocalPrefixAndSparsePublication) {
+    auto result = makeDtopOriginMetadata(locations(), session, {0, 16}, 512, 8704, 8800, 7680);
+    ASSERT_TRUE(result);
+    // StartWrite returned only sparse keys 0 and 16. A later request already
+    // owns the first 16 keys locally; its remote row zero is global key 16.
+    const auto& remote_row = result->locations[1];
+    EXPECT_TRUE(readDtopOriginMetadata(remote_row, 16, 512));
+    EXPECT_FALSE(readDtopOriginMetadata(remote_row, 0, 512));
+    EXPECT_FALSE(readDtopOriginMetadata(remote_row, 1, 512));
+    EXPECT_FALSE(readDtopOriginMetadata(remote_row, 16, 0));
+    EXPECT_FALSE(readDtopOriginMetadata(remote_row, std::numeric_limits<size_t>::max(), 512));
+    EXPECT_FALSE(readDtopOriginMetadata(remote_row, 16, std::numeric_limits<size_t>::max()));
+}
+
 TEST(DtopOriginMetadataTest, RejectsBadScopeMaskAndOverflowWithoutChangingInput) {
     const auto input = locations();
     EXPECT_FALSE(makeDtopOriginMetadata(input, session, {16}, 512, 8704, 8800, 7680));
