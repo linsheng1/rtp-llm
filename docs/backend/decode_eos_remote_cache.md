@@ -152,14 +152,14 @@ individual objects belong in logs/timeline, never metric labels.
 
 | Category | Required interpretation and implementation status |
 | --- | --- |
-| D new logical tokens | Confirmed publication, P restoration and actual P reuse are separate. Reliable version-bound D provenance is still pending. |
+| D new logical tokens | The accompanying Manager reports whole-session completed publication; RTP reports `rtp_llm_decode_cache_logical_tokens_qps{stage=restored,used;tier=DEVICE,HOST,DISK,REMOTE}`. See the boundaries below. Final native/model qualification is pending. |
 | KV payload bytes | `rtp_llm_remote_completed_payload_bytes_qps{mode=read,write}` counts IOV bytes of successful SDK chunks, including scale/state and actual CP copies. Unknown completion is separate. |
 | P restore latency | `rtp_llm_remote_restore_latency_bucket_qps` and `latency_sum_us_qps`, with separate checkpoint, GPU-completion and CPU-observation modes. The complete path's native and all-CP timeline qualification is pending. |
 | EOS to publication | `rtp_llm_decode_publish_eos_latency_bucket_qps` and `eos_latency_sum_us_qps`, from first real GenerateDone through confirmed FinishWrite, including delayed planning, fence and queue. |
 | Held page budget | `rtp_llm_decode_publish_pending_charge_bytes`, `pending_bytes_limit`; includes frozen pages and conservative cross-job charging. |
 | Pending jobs | Same `rtp_llm_decode_publish_` prefix: `pending_jobs`, `queued_jobs`, `running_jobs`, `quarantined_jobs`, `pending_jobs_limit`. Total includes quarantine. |
 | Oldest pending age | `rtp_llm_decode_publish_oldest_pending_age_us`, from original admission; retries do not reset it. |
-| Operation results | Publication outcomes and stage-aware lookup/read outcomes below. Actual D-origin reuse remains pending. |
+| Operation results | Publication outcomes and stage-aware lookup/read/use outcomes below. Final source-attributed model qualification remains pending. |
 
 An enabled D backend with a reporter samples state once per second, including
 idle/stuck work. P and feature-off backends create no publication sampler.
@@ -218,21 +218,56 @@ not actual use. Restoration/publication token ratios are not hit rates: one
 publication can serve multiple requests. Request hit rates use lookup requests
 as their denominator.
 
+The origin-aware Manager owns the publication count: after a marked FinishWrite
+claims its allocation exactly once, count the union of D-computed intervals only
+when every newly allocated key succeeds and the overall result is `EC_OK`.
+A partial success mask, failed CAS or aggregate error contributes zero completed
+publication tokens. This does not change existing per-location commit semantics.
+If the Manager knows that the whole commit succeeded but D loses its ACK, the
+Manager's authoritative count can increase once while D's operation outcome
+remains `completion_unknown`. No extra Manager lookup per write is required.
+
+RTP reports `restored` after all required rank transfers and physical-origin
+bindings succeed. It reports `used` after P successfully completes its first
+context update with the existing all-rank GPU completion proof. A cancelled,
+failed, forced-token or CPU-observation-only update cannot count actual use.
+Hot DEVICE/HOST/DISK reuse carries its physical source independently of remote
+restore timing, so a later independent request can increase `used` without a new
+`restored` sample. Overlapping groups and replicas count once, clipped at the
+adopted prefix; mixed-tier overlap is attributed to its coldest source.
+
+Sources follow live physical allocation incarnations and per-tag regions,
+including successful local tier transfers. Free/reallocation, writable fallback
+recomputation and asynchronous overwrite invalidate the affected assertion.
+Legacy, inconsistent or stale origins remain usable as generic cache payload
+without being labeled Decode-generated. They never acquire attribution from a
+canonical-key side map.
+
 An unmodified Manager ignores FinishWrite.locations, including submitted origin
 markers. Accurate D-origin counters require the accompanying origin-aware
 Manager contract: validate marked locations against the original instance,
 session and allocation version, then replace the complete spec URIs, origin and
 SERVING state together in the existing per-location metadata operation. Preserve
-legacy unmarked behavior and existing multi-key partial-failure semantics;
-aggregate error or unknown acknowledgement is not confirmed publication.
+legacy unmarked behavior and existing multi-key partial-failure semantics.
+The D-side acknowledgement boundary and the Manager's authoritative whole-commit
+boundary are distinct as described above.
 
 The bounded `v1` origin format and canonical URI handling have passed
-cross-repository CPU differential checks. Actual SDK DRAM/SSD payload roundtrips,
-physical page provenance retention and token accounting remain delivery gates.
-Local key maps, token lengths and request-role guesses are insufficient.
+cross-repository CPU differential checks. Private SDK DRAM/SSD payload probes
+establish only their recorded revisions and scope. Persistent source metadata
+with the real PACE Manager backend, physical-page provenance and end-to-end
+token accounting remain delivery gates.
 
 Group dashboards into publication/reuse effect, latency/transfer efficiency,
 and backlog/errors. Reuse existing TTFT and overall throughput metrics.
+For RTP QPS metrics, sum rates across the intended role/rank population; obtain
+window totals by integrating those rates rather than applying a second counter
+rate. Payload bytes per second divided by `2^20` gives MiB/s. Keep restore modes
+separate when computing bucket quantiles. Sum pending bytes/jobs across D
+processes and take the maximum oldest age; divide microseconds by `1e6` for
+seconds. The Manager publication export must use its rate registration path,
+not a per-query gauge average. Its final exported name and dashboard query are
+still part of the dependency validation.
 
 ## Delivery gates
 
