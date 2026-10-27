@@ -1726,6 +1726,10 @@ private:
 };
 
 bool initKmonitorFactory();
+// A KVCM-local payload reporter for nonroot ranks, leaving general metrics root-only.
+// Disabled returns before touching the factory; an existing reporter is reused.
+kmonitor::MetricsReporterPtr
+     remoteCachePayloadReporter(bool enabled, int64_t tp_rank, const kmonitor::MetricsReporterPtr& existing_reporter);
 void stopKmonitorFactory();
 
 void setHippoTags(kmonitor::MetricsConfig& config);

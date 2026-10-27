@@ -317,17 +317,28 @@ public:
             RTP_LLM_LOG_ERROR("create BlockTree KVCM clients failed");
             return false;
         }
-        if (decode_publication_enabled_ && metrics_reporter_) {
-            const auto reporter = metrics_reporter_;
-            client_wrapper_->setTransferObserver([reporter](bool read, size_t bytes, bool unknown) {
-                RtpLLMRemoteCachePayloadMetricsCollector collector;
-                collector.completed_payload_bytes = static_cast<int64_t>(bytes);
-                collector.completion_unknown      = unknown;
-                static const kmonitor::MetricsTags read_tags("mode", "read");
-                static const kmonitor::MetricsTags write_tags("mode", "write");
-                reporter->report<RtpLLMRemoteCachePayloadMetrics, RtpLLMRemoteCachePayloadMetricsCollector>(
-                    read ? &read_tags : &write_tags, &collector);
-            });
+        try {
+            if (const auto reporter = remoteCachePayloadReporter(
+                    decode_publication_enabled_, parallelism_config_.tp_rank, metrics_reporter_)) {
+                kmonitor::MetricsTags read_tags("mode", "read");
+                read_tags.AddTag("tp_rank", std::to_string(parallelism_config_.tp_rank));
+                read_tags.AddTag("dp_rank", std::to_string(parallelism_config_.dp_rank));
+                kmonitor::MetricsTags write_tags("mode", "write");
+                write_tags.AddTag("tp_rank", std::to_string(parallelism_config_.tp_rank));
+                write_tags.AddTag("dp_rank", std::to_string(parallelism_config_.dp_rank));
+                client_wrapper_->setTransferObserver(
+                    [reporter, read_tags, write_tags](bool read, size_t bytes, bool unknown) {
+                        RtpLLMRemoteCachePayloadMetricsCollector collector;
+                        collector.completed_payload_bytes = static_cast<int64_t>(bytes);
+                        collector.completion_unknown      = unknown;
+                        reporter->report<RtpLLMRemoteCachePayloadMetrics, RtpLLMRemoteCachePayloadMetricsCollector>(
+                            read ? &read_tags : &write_tags, &collector);
+                    });
+            }
+        } catch (const std::exception& error) {
+            // Optional telemetry allocation must not invalidate registered GPU
+            // pools or change inference/SDK outcomes.
+            RTP_LLM_LOG_WARNING("KVCM payload observer unavailable: %s", error.what());
         }
         if (completion_accounting_)
             completion_accounting_->startSampling();

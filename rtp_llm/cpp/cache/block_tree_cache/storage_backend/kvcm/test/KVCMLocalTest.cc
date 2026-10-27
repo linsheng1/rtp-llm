@@ -4,9 +4,11 @@
 #include <csignal>
 #include <cstdint>
 #include <stdexcept>
+#include <tuple>
 #include <unistd.h>
 
 #include "kmonitor/client/MetricsReporter.h"
+#include "kmonitor/client/KMonitorFactory.h"
 #include "kmonitor/client/core/MetricsData.h"
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -449,6 +451,63 @@ BackendHandle makeCompletionProofBackend(const BackendEnvironment&              
                                                               true,
                                                               nullptr,
                                                               client));
+}
+
+TEST(KVCMLocalTest, ProductionNonrootBackendInstallsPayloadObserverWithoutGeneralReporter) {
+    autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    autil::EnvGuard manual("kmonitorManuallyMode", "true");
+    for (const bool enabled : {false, true}) {
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        for (const bool sharded : {false, true}) {
+            for (int cp : {2, 4, 8}) {
+                for (int rank = 1; rank < cp; ++rank) {
+                    SCOPED_TRACE(::testing::PrintToString(std::make_tuple(enabled, sharded, cp, rank)));
+                    auto environment = makeBackendEnvironment("payload_observer_nonroot");
+                    auto client      = std::make_shared<MockClientWrapper>();
+                    EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+                    EXPECT_CALL(*client, shutdown()).WillOnce(Invoke([raw = client.get()] {
+                        raw->kvcm::ClientWrapper::shutdown();
+                    }));
+                    KVCacheConfig config;
+                    config.kvcm_server_address                  = "unused-test-address";
+                    config.kvcm_instance_id_salt                = "payload-observer";
+                    config.kvcm_model_sdk_config                = R"([{"type":"pace"}])";
+                    auto parallel                               = singleRankConfig();
+                    parallel.role_type                          = RoleType::PREFILL;
+                    parallel.tp_size                            = cp;
+                    parallel.tp_rank                            = rank;
+                    parallel.prefill_cp_config.prefill_cp_size  = cp;
+                    parallel.prefill_cp_config.kv_cache_sharded = sharded;
+                    RuntimeConfig runtime;
+                    runtime.model_name = "payload_observer_nonroot";
+                    BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config,
+                                                                               config,
+                                                                               runtime,
+                                                                               parallel,
+                                                                               SpeculativeExecutionConfig{},
+                                                                               nullptr,
+                                                                               /*gdr_enabled=*/true,
+                                                                               /*general_reporter=*/nullptr,
+                                                                               client));
+                    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+                    EXPECT_EQ(static_cast<bool>(client->transfer_observer_), enabled);
+                    if (enabled) {
+                        EXPECT_TRUE(kmonitor::KMonitorFactory::IsStarted());
+                        // Exercise the observer installed by the actual backend,
+                        // not a reporter or callback injected by this fixture.
+                        client->observeTransfer(/*read=*/true, 13 + rank, false);
+                        client->observeTransfer(/*read=*/false, 37 + rank, false);
+                        client->observeTransfer(/*read=*/false, 0, true);
+                    }
+                    backend.backend->shutdown();
+                    EXPECT_FALSE(client->transfer_observer_);
+                    if (enabled) {
+                        EXPECT_TRUE(kmonitor::KMonitorFactory::IsStarted());
+                    }
+                }
+            }
+        }
+    }
 }
 
 TEST(KVCMLocalTest, SuccessfulReadBindsItsRequiredSourceButLegacyOverwriteClearsIt) {

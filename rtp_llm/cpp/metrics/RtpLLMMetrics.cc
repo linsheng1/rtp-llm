@@ -4,6 +4,7 @@
 #include "kmonitor/client/KMonitorFactory.h"
 #include "rtp_llm/cpp/metrics/KmonParam.h"
 #include <string_view>
+#include <mutex>
 
 namespace rtp_llm {
 
@@ -1357,7 +1358,25 @@ void RtpLLMCacheStoreMetrics::report(const kmonitor::MetricsTags*              t
 #undef REPORT_QPS
 #undef REPORT_GAUGE
 
-bool initKmonitorFactory() {
+namespace {
+// The process owner stops the factory only after all backends/reporters drain.
+// Backends share it; no backend owns global factory shutdown.
+std::mutex kmonitor_factory_mutex;
+
+bool initKmonitorFactoryLocked(bool with_builtin_metrics) {
+    if (kmonitor::KMonitorFactory::GetConfig()->inited()) {
+        // Init overwrites the global config, including tags/sinks. Reuse an
+        // already configured factory, even if it has not been started yet.
+        if (with_builtin_metrics && !kmonitor::KMonitorFactory::GetKMonitorMap()->count("buildinmetric")) {
+            KmonParam param;
+            param.init();
+            kmonitor::KMonitorFactory::registerBuildInMetrics(nullptr, param.kmonitorMetricsPrefix);
+        }
+        if (!kmonitor::KMonitorFactory::IsStarted()) {
+            kmonitor::KMonitorFactory::Start();
+        }
+        return kmonitor::KMonitorFactory::IsStarted();
+    }
     KmonParam param;
     param.init();
     if (!param.kmonitorMetricsReporterCacheLimit.empty()) {
@@ -1397,16 +1416,52 @@ bool initKmonitorFactory() {
         return false;
     }
 
-    // registerBuildInMetrics to refresh sg_buildin_kmonitor for KMonitorWorker::Start
-    kmonitor::KMonitorFactory::registerBuildInMetrics(nullptr, param.kmonitorMetricsPrefix);
-    RTP_LLM_LOG_INFO("KMonitorFactory::registerBuildInMetrics() finished");
+    if (with_builtin_metrics) {
+        kmonitor::KMonitorFactory::registerBuildInMetrics(nullptr, param.kmonitorMetricsPrefix);
+        RTP_LLM_LOG_INFO("KMonitorFactory::registerBuildInMetrics() finished");
+    }
 
     kmonitor::KMonitorFactory::Start();
     RTP_LLM_LOG_INFO("KMonitorFactory::Start() finished");
-    return true;
+    return kmonitor::KMonitorFactory::IsStarted();
+}
+}  // namespace
+
+bool initKmonitorFactory() {
+    std::lock_guard<std::mutex> lock(kmonitor_factory_mutex);
+    return initKmonitorFactoryLocked(/*with_builtin_metrics=*/true);
+}
+
+kmonitor::MetricsReporterPtr
+remoteCachePayloadReporter(bool enabled, int64_t tp_rank, const kmonitor::MetricsReporterPtr& existing_reporter) {
+    // In particular, GetConfig/GetWorker instantiate a factory: do not call
+    // them (or construct tags/reporters) when the feature is disabled.
+    if (!enabled) {
+        return nullptr;
+    }
+    if (existing_reporter) {
+        return existing_reporter;
+    }
+    if (tp_rank <= 0) {
+        return nullptr;
+    }
+    try {
+        std::lock_guard<std::mutex> lock(kmonitor_factory_mutex);
+        if (!initKmonitorFactoryLocked(/*with_builtin_metrics=*/false)) {
+            RTP_LLM_LOG_WARNING("KVCM payload metrics factory unavailable, tp_rank=%ld", tp_rank);
+            return nullptr;
+        }
+        // This reporter is captured only by the SDK observer. Never put it in
+        // EngineInitParams or enable unrelated per-rank metrics/samplers.
+        return std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_WARNING("KVCM payload metrics unavailable, tp_rank=%ld: %s", tp_rank, error.what());
+        return nullptr;
+    }
 }
 
 void stopKmonitorFactory() {
+    std::lock_guard<std::mutex> lock(kmonitor_factory_mutex);
     kmonitor::KMonitorFactory::Shutdown();
 }
 
