@@ -881,8 +881,32 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     auto env               = FullSWAEnvironment::create(options);
     ASSERT_NE(env, nullptr);
     env->insertRequestPath();
-    // An older request can still hold valid GPU blocks after the cache is demoted.
+    // Normal maintenance deliberately refuses to demote blocks with REQUEST
+    // references. Retain a background STORE reference instead: those original
+    // GPU pages stay valid while the cache value migrates to HOST, and can
+    // later be republished after the old cache nodes are invalidated.
+    for (size_t group = 0; group < env->groups.size(); ++group) {
+        block_tree_cache_test::referenceDeviceBlocksForTest(
+            *env->groups[group], env->request_blocks[group], BlockTreeRefType::STORE);
+    }
+    block_tree_cache_detail::ScopeRollback store_refs_guard([&] {
+        for (size_t group = 0; group < env->groups.size(); ++group) {
+            block_tree_cache_test::unreferenceDeviceBlocksForTest(
+                *env->groups[group], env->request_blocks[group], BlockTreeRefType::STORE);
+        }
+    });
+    env->releaseRequestRefs();
     env->demoteAll(Tier::DEVICE);
+    ASSERT_TRUE(env->allResourcesAtTier(Tier::HOST));
+    for (size_t group = 0; group < env->groups.size(); ++group) {
+        const auto& pools = env->groups[group]->devicePools();
+        for (const auto& blocks : env->request_blocks[group]) {
+            for (size_t member = 0; member < pools.size(); ++member) {
+                ASSERT_TRUE(pools[member]->isAllocated(blocks[member]));
+                ASSERT_FALSE(pools[member]->hasRequestRef(blocks[member]));
+            }
+        }
+    }
     auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
     env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
     auto owner                                         = env->cache->match({env->keys[0], env->keys[1]}).async_context;
@@ -974,7 +998,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     }
     releaseTargets(owner_refs);
     releaseTargets(child_refs);
-    env->releaseRequestRefs();
+    store_refs_guard.run();
     env->reclaimAll();
     env->expectFullyReclaimed();
 }
