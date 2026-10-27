@@ -26,6 +26,7 @@ using ::testing::ReturnRef;
 using ::testing::SetArgReferee;
 
 TEST(ClientFactoryGdrTest, SsdAutomaticallyRequiresGpuRegistrations) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ClientFactory factory;
     kv_cache_manager::InitParams params{};
     const std::string ssd = R"({"sdk_config":{"sdk_backend_configs":[{"type":"pace_ssd"}]}})";
