@@ -261,7 +261,6 @@ protected:
             env.cache_config.dtype = DataType::TYPE_FP16;
             env.cache_config.layer_num          = 2;
             env.cache_config.seq_size_per_block = 128;
-            env.cache_config.linear_step        = shards;
             env.cache_config.fromGroupedSpecs({test::makeMhaSpec("full", 128, DataType::TYPE_FP16, 1, 2),
                                                test::makeMhaSpec("state", 128 * shards, DataType::TYPE_FP16, 1, 2)},
                                               {{0}, {1}},
