@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/MockKVCMClient.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
+#include "kvcm_client/HostCacheStateCompat.h"
 
 namespace rtp_llm::kvcm {
 namespace {
@@ -142,6 +143,82 @@ std::shared_ptr<ClientWrapper> initializeClient(bool                            
         return nullptr;
     }
     return wrapper;
+}
+
+template<typename Match>
+Match hostStateFixture(const std::string& host, int64_t local, int64_t remote) {
+    Match result{};
+    result.host_ip_port = host;
+    result.local = local;
+    if constexpr (HasGlobalHostCacheMatch<Match>::value) {
+        result.global = remote;
+    } else {
+        result.p2p_1_fetch = 1;
+        result.p2p_1_total_match = remote;
+    }
+    return result;
+}
+
+template<typename Match>
+void expectHostState(const Match& value, const Match& expected) {
+    EXPECT_EQ(value.host_ip_port, expected.host_ip_port);
+    EXPECT_EQ(value.local, expected.local);
+    if constexpr (HasGlobalHostCacheMatch<Match>::value) {
+        EXPECT_EQ(value.global, expected.global);
+    } else {
+        EXPECT_EQ(value.p2p_1_fetch, expected.p2p_1_fetch);
+        EXPECT_EQ(value.p2p_1_total_match, expected.p2p_1_total_match);
+    }
+}
+
+// Exercise the actual ClientWrapper -> compile-time SDK adapter boundary.
+// The backend-aware SDK must request P2P's L2 backend explicitly: {} would
+// silently disable the estimate even though the metadata call succeeds.
+TEST(ClientWrapperTest, HostStatePreservesP2pSelectionAndSdkFailureWithPublicationOnAndOff) {
+    using namespace kv_cache_manager;
+    const std::vector<int64_t> keys{101, 202};
+    const std::vector<std::string> medium{"hbm"};
+    const HostCacheState expected{hostStateFixture<HostCacheMatch>("host-a:1", 2, 3),
+                                  hostStateFixture<HostCacheMatch>("host-b:2", 5, 7)};
+    for (const std::string enabled : {"0", "1"}) {
+        SCOPED_TRACE(enabled);
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled);
+        std::array<char, 32> data{};
+        RegistSpan span{data.data(), data.size()};
+        InitObservation observation;
+        MockMetaClient* meta = nullptr;
+        auto destroyed = std::make_shared<int>(0);
+        auto wrapper = initializeClient(false, "direct", span, observation, destroyed, &meta);
+        ASSERT_NE(wrapper, nullptr);
+        if constexpr (std::is_invocable_v<decltype(&MetaClient::GetHostCacheState),
+                                          MetaClient&, const std::string&, QueryType,
+                                          const std::vector<int64_t>&, const std::vector<std::string>&,
+                                          int32_t, const std::vector<StorageType>&>) {
+            EXPECT_CALL(*meta, GetHostCacheState(_, _, _, _, _)).Times(0);
+            EXPECT_CALL(*meta, GetHostCacheState("host-state", QueryType::QT_PREFIX_MATCH, keys, medium, 2,
+                                                 std::vector<StorageType>{StorageType::ST_EVENT_REPORT_L2}))
+                .WillOnce(Return(std::make_pair(ER_OK, expected)))
+                .WillOnce(Return(std::make_pair(ER_INVALID_PARAMS, expected)));
+        } else {
+            EXPECT_CALL(*meta, GetHostCacheState(_, _, _, _, _, _)).Times(0);
+            EXPECT_CALL(*meta, GetHostCacheState("host-state", QueryType::QT_PREFIX_MATCH, keys, medium, 2))
+                .WillOnce(Return(std::make_pair(ER_OK, expected)))
+                .WillOnce(Return(std::make_pair(ER_INVALID_PARAMS, expected)));
+        }
+        auto [ok, hosts] = wrapper->getHostCacheState("", "host-state", QueryType::QT_PREFIX_MATCH,
+                                                     keys, medium, 2);
+        ASSERT_TRUE(ok);
+        ASSERT_EQ(hosts.size(), expected.size());
+        for (size_t i = 0; i < hosts.size(); ++i) {
+            expectHostState(hosts[i], expected[i]);
+        }
+        auto [failed, ignored] = wrapper->getHostCacheState("", "host-state", QueryType::QT_PREFIX_MATCH,
+                                                           keys, medium, 2);
+        EXPECT_FALSE(failed);
+        EXPECT_TRUE(ignored.empty());
+        wrapper->shutdown();
+        EXPECT_EQ(*destroyed, 1);
+    }
 }
 
 // Reproduce the legacy Manager response observed on the real PACE fixture.
