@@ -650,7 +650,12 @@ TEST(KVCMLocalTest, FailureBeforeTransferStillAbortsItsUnusedAllocation) {
         allocation.block_mask       = kv_cache_manager::BlockMaskOffset{0};
         allocation.locations        = {{{"unknown-spec-before-io", "write_uri"}}};
         EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0)).WillOnce(Return(std::make_pair(true, allocation)));
-        EXPECT_CALL(*client, finishWrite(_, _, "unused-session", kv_cache_manager::BlockMaskOffset{0}, _))
+        EXPECT_CALL(*client,
+                    finishWrite(_,
+                                _,
+                                "unused-session",
+                                ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{0}}),
+                                _))
             .WillOnce(Return(true));
         EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(0);
         auto task = backend.backend->prepareWrite(makeStorageRequest(environment));
