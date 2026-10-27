@@ -52,12 +52,14 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, AtomicRemapPreservesRequestEosAn
     resource->setBatchBlocks(0, "default", blocks);
     const auto eos = DecodePublicationLifecycle::Clock::now();
     resource->decodeCompletionLifecycle().recordEos(eos);
+    ASSERT_TRUE(resource->decodeCompletionLifecycle().recordPrefillComputedEnd(3));
     EXPECT_TRUE(resource->decodeCompletionLifecycle().recordFirstBudgetSkip());
     resource->decodeCompletionSubmitted() = true;
     std::vector<TaggedBlockIdPair> mapping;
     ASSERT_TRUE(allocator_->updateKVBlock(resource, {0}, /*copy_last_block=*/false, mapping));
     EXPECT_EQ(resource->blocks(0, "default"), blocks);
     EXPECT_EQ(resource->decodeCompletionLifecycle().eosAt(), eos);
+    EXPECT_EQ(resource->decodeCompletionLifecycle().prefillComputedEnd(), 3);
     EXPECT_FALSE(resource->decodeCompletionLifecycle().recordFirstBudgetSkip());
     EXPECT_TRUE(resource->decodeCompletionSubmitted());
     allocator_->free(FreeInfo{resource, nullptr});
