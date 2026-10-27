@@ -311,15 +311,34 @@ TEST(KVCMLocalTest, PublicationSwitchPreservesLegacyHostPoolFallbackAndRequiresG
                     EXPECT_EQ(registrations.size(), 2u);
                     EXPECT_EQ(registrations.size(), tags.size());
                     bool saw_host = false;
+                    bool saw_gpu  = false;
                     for (size_t i = 0; i < tags.size(); ++i) {
                         if (tags[i] == host_tag) {
                             saw_host = true;
                             EXPECT_EQ(registrations[i].span.base, host_pool->getBaseAddress());
                             EXPECT_EQ(registrations[i].span.size, host_pool->getTotalSizeBytes());
                             EXPECT_FALSE(registrations[i].memory_registrations.has_value());
+                        } else {
+                            saw_gpu = true;
+                            const auto& gpu_pool = environment.pools_by_tag.at(tags[i]);
+                            EXPECT_EQ(registrations[i].span.base, gpu_pool->getBaseAddress());
+                            EXPECT_EQ(registrations[i].span.size, gpu_pool->getAllocationSizeBytes());
+                            EXPECT_TRUE(registrations[i].memory_registrations.has_value());
+                            if (!registrations[i].memory_registrations.has_value()) {
+                                return false;
+                            }
+                            const auto& gpu_spans = registrations[i].memory_registrations->gpu;
+                            EXPECT_EQ(gpu_spans.size(), 1u);
+                            if (gpu_spans.size() != 1u) {
+                                return false;
+                            }
+                            EXPECT_EQ(gpu_spans.front().base, gpu_pool->getBaseAddress());
+                            EXPECT_EQ(gpu_spans.front().size, gpu_pool->getAllocationSizeBytes());
+                            EXPECT_EQ(gpu_spans.front().device_id, gpu_pool->deviceIndex());
                         }
                     }
                     EXPECT_TRUE(saw_host);
+                    EXPECT_TRUE(saw_gpu);
                     return true;
                 }));
         }
