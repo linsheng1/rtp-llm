@@ -1,9 +1,10 @@
 # Decode remote-cache performance validation
 
-The common upstream baseline is `123290666d1439ebe842abf180a98c61230f2427`.
-Build and native-regression acceptance for this baseline is separate from all
-previous SSD candidate measurements. No previous wheel, native library or model
-Python overlay qualifies the new baseline.
+The delivery target is `alibaba/rtp-llm:feature/dsv41-dev-main-202161013`.
+Refresh that branch before the final source freeze. Build, correctness,
+monitoring and performance acceptance must identify the same committed source,
+complete wheel, Python models and matching transport dependencies. Previous
+wheels, native libraries or Python overlays do not qualify a new candidate.
 
 ## Feature-off compatibility
 
@@ -25,14 +26,13 @@ measurement-phase publication. Thus the comparison changes only the intended
 read policy, rather than inadvertently changing the P transport path by using
 different D-publication flags. Preparation writes remain separately reported.
 
-The new feature-boundary tests compare disabled factory error behavior against
-the SDK's own overloads and check enabled SSD validation. They are added but
-have not yet been executed on the new baseline. The existing
-`ClientFactoryGdrTest.SsdAutomaticallyRequiresGpuRegistrations` in
-`ClientWrapperTest.cc` also needs its main switch explicitly enabled; that
-shared test adjustment is coordinated with the functional owner.
+Feature-boundary tests compare disabled factory behavior against the SDK's own
+overloads, preserve the upstream non-dedicated-pool fallback when disabled,
+and check enabled SSD validation. These checks passed in an intermediate
+matching-SDK native run. Repeat the related tests on the final candidate;
+native results do not establish feature-off model performance.
 
-## New bounded read candidate (awaiting execution)
+## Bounded read candidate
 
 The supported SSD GPU factory supplies the originating device initializer.
 Reads use windows of at most four objects and 256KiB of simultaneously live
@@ -48,10 +48,40 @@ or worker-launch exception. Uncertain operations retain the whole window until
 SDK shutdown; no CPU payload fallback is introduced. Writes retain their
 single-object completion ordering.
 
-Five native tests cover count/concurrency, device selection, disjoint data and
+Native tests cover count/concurrency, device selection, disjoint data and
 trace slices, byte admission, oversized state objects, device-init failure and
-exception drain/quarantine. These tests and this new upstream-based candidate
-are not yet executed and do not inherit the historical results below.
+exception drain/quarantine. An intermediate matching-SDK snapshot passed these
+native checks. Actual same-client SDK concurrency, error completion and buffer
+lifetime still require independent runtime validation. Later telemetry and
+safety changes must pass the final source's native and runtime gates.
+
+## Fixed measurement protocol
+
+Use the 32K by actual physical batch4 point first. Declare 21 alternating pairs
+before collecting formal samples; retain all samples and every exclusion with
+its reason. Compute paired absolute and relative changes and a 100000-resample
+paired bootstrap confidence interval with seed 20261028. Report the median,
+spread and individual pair changes. Do not select favorable pairs or expand
+the sequence-length scan to resolve an uncertain result.
+
+The serial control uses the same adapter, source, wheel, client and model as
+the bounded-concurrency arm, with the delegate serialized by a private per-client
+mutex. Call it the serialized-adapter control; it is not the historical SDK
+implementation. Switch arms only after an idle barrier. Keep physical batch,
+CP layout, block size, pool/reserve budgets, graph policy and cache state fixed.
+
+Include the production reporter's callback path and actual inner SDK payload
+observer in both arms. Record reporter/exporter configuration and its limits;
+callback-only results do not establish exporter CPU overhead. Profile callback
+cost, worker creation, D2D gather/scatter and each stream/device synchronization
+separately from inner SDK time. Collect diagnostic traces separately from
+formal samples. Avoid formal timing during same-host compilation or large IO.
+
+Compare DRAM and recomputation controls under the same candidate and effective
+workload. Record actual SSD/provider reads and warm-cache state; do not call a
+page-cache read physical SSD throughput. Use private objects and namespaces,
+without flushing shared caches or changing other users' services. Report the
+remaining SSD/DRAM gap, transfer volume and the dominant residual costs.
 
 ## D publication timeline scope
 
@@ -82,11 +112,8 @@ All four source histories' restored GPU bytes matched; restoration copy
 observations were D2D, with no observed KV D2H/H2D. Those observations and the
 384 native regressions apply only to the historical candidate artifacts.
 
-For new candidates, report the paired absolute and relative differences, with
-a fixed confidence-interval method declared before collecting further samples.
 Distinguish evidence of a positive paired effect from evidence that the effect
-stably exceeds 3%. If seven pairs indicate improvement but leave its magnitude
-uncertain, extend only the same 32K by actual batch4 point using a predeclared
-total pair count; keep every accepted and rejected sample with its reason.
-Do not widen the long-sequence scan or select favorable pairs. These estimates
-remain conditional on the recorded model/Provider run and SSD cache state.
+stably exceeds 3%. The fixed 21-pair protocol above replaces adaptive extension
+for the new candidate. Estimates remain conditional on the recorded
+model/Provider run and SSD cache state. P-only read gains do not prove session
+net gains: include D publication cost and confirmed actual D-KV reuse.

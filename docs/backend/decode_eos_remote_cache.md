@@ -87,7 +87,7 @@ RPM and raw library hashes.
    device fence, then `StorageBackend::prepareWrite()` pins all source/peer pages
    before request ownership can end. There is no per-token device fence.
 5. Reuse the existing executor, StartWrite mask, tag batches, actual returned
-   URIs and FinishWrite transaction. Normal local hot-cache insertion continues.
+   URIs and FinishWrite acknowledgement. Normal local hot-cache insertion continues.
    Pins are released only when transfer completion is known.
 6. Unknown DMA completion preserves permanent FROZEN references until pool
    destruction and retains its admission charge until backend shutdown. SDK
@@ -111,6 +111,13 @@ reclamation, not a preallocated extra pool or a measured optimum. Exhaustion
 skips optional publication while preserving the response and local cache.
 Admission currently holds the full candidate checkpoint even if StartWrite later
 masks most of it; masked pages are not released early.
+
+P supplies its computed-KV exclusive end in the presence-bearing internal
+`GenerateRequestPB.prefill_kv_handoff` message, after its successful forward and
+transfer. The endpoint excludes the sampled first token. D validates the request
+identity and its successful all-rank load span before retaining that assertion
+across block remaps. Feature-off or legacy messages leave the boundary unknown;
+D input length alone cannot establish source attribution.
 
 The implementation retains upstream scheduler, CPU-TP broadcast and shutdown
 coordination. It adds explicit shutdown of the asynchronous cache-store writer
@@ -143,7 +150,7 @@ individual objects belong in logs/timeline, never metric labels.
 | --- | --- |
 | D new logical tokens | Confirmed publication, P restoration and actual P reuse are separate. Reliable version-bound D provenance is still pending. |
 | KV payload bytes | `rtp_llm_remote_completed_payload_bytes_qps{mode=read,write}` counts IOV bytes of successful SDK chunks, including scale/state and actual CP copies. Unknown completion is separate. |
-| P restore latency | `rtp_llm_remote_restore_latency_bucket_qps` and `latency_sum_us_qps`, with separate checkpoint and context-update modes. Full recovery including necessary lookup/allocation and verified tail replay is still pending. |
+| P restore latency | `rtp_llm_remote_restore_latency_bucket_qps` and `latency_sum_us_qps`, with separate checkpoint, GPU-completion and CPU-observation modes. The complete path's native and all-CP timeline qualification is pending. |
 | EOS to publication | `rtp_llm_decode_publish_eos_latency_bucket_qps` and `eos_latency_sum_us_qps`, from first real GenerateDone through confirmed FinishWrite, including delayed planning, fence and queue. |
 | Held page budget | `rtp_llm_decode_publish_pending_charge_bytes`, `pending_bytes_limit`; includes frozen pages and conservative cross-job charging. |
 | Pending jobs | Same `rtp_llm_decode_publish_` prefix: `pending_jobs`, `queued_jobs`, `running_jobs`, `quarantined_jobs`, `pending_jobs_limit`. Total includes quarantine. |
@@ -185,13 +192,21 @@ not count them again. Arena/geometry/device-initialization rejection before the
 inner SDK call produces no SDK payload event. Payload-volume uncertainty is
 separate from whether the SDK proves that caller buffers are safe to release.
 
-Restore mode `checkpoint_gpu_ready` currently measures read entry through
-successful load settlement, emitted only after P adopts a real remote restore.
-`fused_context_ready` ends at the existing successful P context-update event;
-it includes merged new-prompt computation and is not isolated tail replay or
-generic TTFT. Keep the distributions separate. These subphases do not yet
-establish the complete lookup/allocation start or an independently verified
-all-rank tail-completion boundary. Pure local hits and failed loads emit neither.
+Restore mode `checkpoint_gpu_ready` starts before cache allocation, including
+necessary lookup and page preparation, and ends at successful GPU load
+settlement. Emit it only after P adopts a real remote restore.
+`read_to_checkpoint_gpu_ready` retains the narrower backend-read subphase.
+
+`fused_context_gpu_ready` requires an explicit producer dependency through the
+existing post-model CP hidden collective (or TP1 execution) and completion of
+the consumer's existing output stream fence. Its timestamp is taken at that
+fence, before CPU worker dispatch. Emit only after the context update succeeds.
+This is an observed upper bound on readiness, including sampling/output-copy
+wait and any merged new-prompt forward; it is not isolated historical-tail cost
+or generic TTFT. No additional CUDA fence or collective is introduced.
+Unproven paths emit only `root_context_update_observed`; they must not populate
+the GPU-ready distribution. Keep these modes separate. Producer side-stream
+joins and all-rank ordering still require final runtime/timeline validation.
 
 Logical D token counts must exclude the already-computed P prefix, CP replicas
 and duplicate retries; each real repeated use counts separately. Restoration is
@@ -199,12 +214,18 @@ not actual use. Restoration/publication token ratios are not hit rates: one
 publication can serve multiple requests. Request hit rates use lookup requests
 as their denominator.
 
-A fresh-reader Manager probe found the current dependency ignores
-FinishWrite.locations, including changes to standard URI fields. An origin
-marker added to a submitted URI is therefore not a supported provenance
-contract. Version-bound persistence and SDK compatibility must be implemented
-and validated before enabling accurate D-origin counters; local maps, token
-lengths and request-role guesses are insufficient.
+An unmodified Manager ignores FinishWrite.locations, including submitted origin
+markers. Accurate D-origin counters require the accompanying origin-aware
+Manager contract: validate marked locations against the original instance,
+session and allocation version, then replace the complete spec URIs, origin and
+SERVING state together in the existing per-location metadata operation. Preserve
+legacy unmarked behavior and existing multi-key partial-failure semantics;
+aggregate error or unknown acknowledgement is not confirmed publication.
+
+The bounded `v1` origin format and canonical URI handling have passed
+cross-repository CPU differential checks. Actual SDK DRAM/SSD payload roundtrips,
+physical page provenance retention and token accounting remain delivery gates.
+Local key maps, token lengths and request-role guesses are insufficient.
 
 Group dashboards into publication/reuse effect, latency/transfer efficiency,
 and backlog/errors. Reuse existing TTFT and overall throughput metrics.
