@@ -37,6 +37,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheMatchMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheReadMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheWriteMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheSDKMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCachePayloadMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheQuarantineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMDecodePublicationMetrics);
 
@@ -988,6 +989,19 @@ void RtpLLMRemoteCacheWriteMetrics::report(const kmonitor::MetricsTags*         
     REPORT_MUTABLE_METRIC(remote_get_write_location_time_us_metric, collector->remote_get_write_location_time_us);
     REPORT_MUTABLE_METRIC(remote_write_broadcast_time_us_metric, collector->remote_write_broadcast_time_us);
     REPORT_MUTABLE_METRIC(remote_finish_write_time_us_metric, collector->remote_finish_write_time_us);
+}
+
+bool RtpLLMRemoteCachePayloadMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(completed_payload_bytes_qps_metric, "rtp_llm_remote_completed_payload_bytes_qps");
+    REGISTER_QPS_MUTABLE_METRIC(completion_unknown_qps_metric, "rtp_llm_remote_payload_completion_unknown_qps");
+    return true;
+}
+
+void RtpLLMRemoteCachePayloadMetrics::report(const kmonitor::MetricsTags* tags,
+                                            RtpLLMRemoteCachePayloadMetricsCollector* collector) {
+    REPORT_MUTABLE_METRIC(completed_payload_bytes_qps_metric, collector->completed_payload_bytes);
+    if (collector->completion_unknown)
+        completion_unknown_qps_metric->Report(tags, 1);
 }
 
 bool RtpLLMRemoteCacheSDKMetrics::init(kmonitor::MetricsGroupManager* manager) {

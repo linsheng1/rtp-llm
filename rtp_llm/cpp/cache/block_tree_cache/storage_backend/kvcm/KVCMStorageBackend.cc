@@ -298,6 +298,18 @@ public:
             RTP_LLM_LOG_ERROR("create BlockTree KVCM clients failed");
             return false;
         }
+        if (decode_publication_enabled_ && metrics_reporter_) {
+            const auto reporter = metrics_reporter_;
+            client_wrapper_->setTransferObserver([reporter](bool read, size_t bytes, bool unknown) {
+                RtpLLMRemoteCachePayloadMetricsCollector collector;
+                collector.completed_payload_bytes = static_cast<int64_t>(bytes);
+                collector.completion_unknown = unknown;
+                static const kmonitor::MetricsTags read_tags("mode", "read");
+                static const kmonitor::MetricsTags write_tags("mode", "write");
+                reporter->report<RtpLLMRemoteCachePayloadMetrics, RtpLLMRemoteCachePayloadMetricsCollector>(
+                    read ? &read_tags : &write_tags, &collector);
+            });
+        }
         if (completion_accounting_)
             completion_accounting_->startSampling();
         const auto tp_rank = parallelism_config_.tp_rank;

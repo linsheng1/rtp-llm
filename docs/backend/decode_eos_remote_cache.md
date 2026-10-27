@@ -163,6 +163,17 @@ to the `+Inf` rate give a bounded approximate P50/P95; these are not averages or
 exact quantiles. Do not combine buckets across different deployment/configuration
 populations without preserving the ordinary instance/rank tags.
 
+`rtp_llm_remote_completed_payload_bytes_qps{mode=read|write}` records the
+requested IOV payload of each SDK chunk that returned success. It includes
+scale/state and actual CP wire copies, and counts neither D2D packing nor NIC
+retransmissions. Completed earlier chunks remain counted when a later chunk
+fails. `rtp_llm_remote_payload_completion_unknown_qps` counts attempted SDK calls
+that fail or throw; their possibly transferred bytes remain unknown, rather than
+being declared zero network traffic. Geometry rejected before calling the SDK is
+not a completion-unknown I/O. Observer failures cannot change the transfer result;
+shutdown drains SDK clients before releasing the optional observer. Feature-off
+uses the upstream unobserved direct call.
+
 This telemetry does not infer D-origin token counts from a cache hit. Reliable
 D provenance and all-rank P restore including necessary checkpoint-tail replay
 require separate versioned protocol/execution validation. Existing read latency

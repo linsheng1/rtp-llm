@@ -10,6 +10,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <optional>
+#include <functional>
 #include <thread>
 #include "kvcm_client/meta_client.h"
 #include "kvcm_client/transfer_client.h"
@@ -37,6 +38,11 @@ public:
                               const std::vector<PoolRegistration>& registrations,
                               const std::vector<std::string>&      tags);
     virtual void shutdown() noexcept;
+    // Internal optional telemetry: completed logical payload per SDK chunk,
+    // or completion-unknown for an attempted failed/throwing SDK call. The
+    // observer must be thread-safe and must not reenter this wrapper.
+    using TransferObserver = std::function<void(bool is_read, size_t completed_bytes, bool completion_unknown)>;
+    void setTransferObserver(TransferObserver observer);
     // for meta client
     virtual std::pair<bool, kv_cache_manager::Locations> match(const std::string&                      unique_id,
                                                                const std::string&                      trace_id,
@@ -113,6 +119,7 @@ private:
     void                                          reinitWorkerLoop() noexcept;
     bool                                          reinitAllMetaClients();
     bool                                          waitForRetry(int sleep_time_ms);
+    void observeTransfer(bool is_read, size_t completed_bytes, bool completion_unknown) const noexcept;
 
     kv_cache_manager::InitParams init_params_;
     // InitParams carries a pointer, so retain the descriptor for every later
@@ -133,6 +140,7 @@ private:
     // Transfer I/O remains available while metadata clients are re-registering.
     // Shutdown takes this lock exclusively before destroying the pool transfer clients.
     std::shared_mutex transfer_mutex_;
+    TransferObserver transfer_observer_;
 
     // when slaver reaches 3, need reinitAllMetaClients
     std::atomic<int> grpc_error_count_{0};

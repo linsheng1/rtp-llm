@@ -283,6 +283,7 @@ void ClientWrapper::shutdown() noexcept {
         std::unique_lock<std::shared_mutex> transfer_guard(transfer_mutex_);
         transfer_clients_.clear();
         tag_to_index_.clear();
+        transfer_observer_ = {};
     }
     {
         std::unique_lock<std::shared_mutex> metadata_guard(rr_mutex_);
@@ -629,6 +630,18 @@ bool ClientWrapper::reinitAllMetaClients() {
     }
 }
 
+void ClientWrapper::setTransferObserver(TransferObserver observer) {
+    std::unique_lock lock(transfer_mutex_);
+    transfer_observer_ = std::move(observer);
+}
+
+void ClientWrapper::observeTransfer(bool is_read, size_t completed_bytes, bool completion_unknown) const noexcept {
+    if (transfer_observer_) {
+        try { transfer_observer_(is_read, completed_bytes, completion_unknown); }
+        catch (...) { RTP_LLM_LOG_ERROR("failed to report confirmed SDK payload"); }
+    }
+}
+
 bool ClientWrapper::waitForRetry(int sleep_time_ms) {
     std::unique_lock<std::mutex> lock(reinit_worker_mutex_);
     return !reinit_worker_cv_.wait_for(
@@ -675,7 +688,15 @@ kv_cache_manager::ClientErrorCode ClientWrapper::loadKvCachesForTagWithStatus(
         kv_cache_manager::BlockBuffers buffers(block_buffers.begin() + range.begin,
                                                block_buffers.begin() + range.end);
         const auto                     began = std::chrono::steady_clock::now();
-        ec = transfer_clients_[slot->second]->LoadKvCaches(uris, buffers, traceForRange(trace_info, range));
+        const auto part_trace = traceForRange(trace_info, range);
+        try {
+            ec = transfer_clients_[slot->second]->LoadKvCaches(uris, buffers, part_trace);
+        } catch (...) {
+            observeTransfer(/*is_read=*/true, 0, /*completion_unknown=*/true);
+            throw;
+        }
+        observeTransfer(/*is_read=*/true, ec == kv_cache_manager::ClientErrorCode::ER_OK ? range.bytes : 0,
+                         ec != kv_cache_manager::ClientErrorCode::ER_OK);
         const auto us =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
         RTP_LLM_LOG_INFO("KV_SDK_CHUNK op=read pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
@@ -758,8 +779,18 @@ ClientWrapper::saveKvCachesForTagWithStatus(
         kv_cache_manager::BlockBuffers buffers(block_buffers.begin() + range.begin,
                                                block_buffers.begin() + range.end);
         const auto                     began = std::chrono::steady_clock::now();
-        auto saved = transfer_clients_[slot->second]->SaveKvCaches(uris, buffers, traceForRange(trace_info, range));
+        const auto part_trace = traceForRange(trace_info, range);
+        auto saved = [&] {
+            try {
+                return transfer_clients_[slot->second]->SaveKvCaches(uris, buffers, part_trace);
+            } catch (...) {
+                observeTransfer(/*is_read=*/false, 0, /*completion_unknown=*/true);
+                throw;
+            }
+        }();
         ec         = saved.first;
+        observeTransfer(/*is_read=*/false, ec == kv_cache_manager::ClientErrorCode::ER_OK ? range.bytes : 0,
+                         ec != kv_cache_manager::ClientErrorCode::ER_OK);
         const auto us =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
         RTP_LLM_LOG_INFO("KV_SDK_CHUNK op=write pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",

@@ -1358,6 +1358,22 @@ public:
     int64_t remote_finish_write_time_us       = 0;
 };
 
+class RtpLLMRemoteCachePayloadMetricsCollector final {
+public:
+    int64_t completed_payload_bytes{0};
+    bool completion_unknown{false};
+};
+
+class RtpLLMRemoteCachePayloadMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags*, RtpLLMRemoteCachePayloadMetricsCollector*);
+    kmonitor::MutableMetric* completed_payload_bytes_qps_metric{nullptr};
+    kmonitor::MutableMetric* completion_unknown_qps_metric{nullptr};
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMRemoteCacheSDKMetricsCollector final {
 public:
     bool    remote_sdk_fail_qps     = true;
