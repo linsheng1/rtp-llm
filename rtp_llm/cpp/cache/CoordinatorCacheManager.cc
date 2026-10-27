@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include <unordered_map>
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include <iomanip>
 #include <numeric>
 #include <sstream>
@@ -339,6 +340,26 @@ bool CoordinatorCacheManager::detachSharedBlocksForRecompute(const BatchKVCacheR
                 const auto& [ids, pos] = locations[i];
                 ids->setAt(pos, new_block);
                 pool->decRef(old_block);
+            }
+        }
+    }
+    if (remoteCacheDecodePublicationEnabled()) {
+        // The allocator may keep an exclusively owned numeric block ID for
+        // recomputation. Its payload will change without a new allocation:
+        // invalidate that suffix, while preserving the proven ready prefix
+        // and the old cache/other-request pages detached above.
+        for (const auto& group : groups) {
+            const auto& tag = group->tag();
+            const auto& pool = group->blockPool();
+            const int local_reuse_length =
+                cpEffectiveSeqLenForGroup(cp_slot_mapper_, config_, tag, device_ready_reuse_length);
+            const size_t begin = local_reuse_length / group->seqSizePerBlock();
+            for (int batch = 0; batch < resource->batchSize(); ++batch) {
+                const auto& blocks = resource->blocks(batch, tag);
+                for (size_t pos = begin; pos < blocks.size(); ++pos) {
+                    if (!isNullBlockIdx(blocks[pos]))
+                        pool->bindDecodeOrigin(blocks[pos], pool->decodeOriginIncarnation(blocks[pos]), tag, nullptr);
+                }
             }
         }
     }

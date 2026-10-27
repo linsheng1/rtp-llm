@@ -5,6 +5,7 @@
 #include <memory>
 #include <set>
 #include <vector>
+#include "autil/EnvUtil.h"
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CoordinatorCacheManager.h"
@@ -40,6 +41,31 @@ class CoordinatorCacheManagerAtomicUpdateTest: public ::testing::Test {
 protected:
     std::shared_ptr<TestAllocator> allocator_;
 };
+
+TEST_F(CoordinatorCacheManagerAtomicUpdateTest, RecomputeInvalidatesOnlyItsWritablePhysicalSuffixWhenEnabled) {
+    for (const bool enabled : {false, true}) {
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        auto config = createSingleTypeTestConfig(1, 6, 4);
+        allocator_ = std::make_shared<TestAllocator>(config, AllocationType::HOST);
+        ASSERT_TRUE(allocator_->init());
+        const auto pool = allocator_->groupBlockPools().front();
+        auto resource = createBatchKVCacheResource(1, config);
+        const auto blocks = allocateRequestBlocks(pool, 3);
+        ASSERT_EQ(blocks.size(), 3u);
+        resource->mutableBlockIds(0, "default").assign(blocks);
+        ASSERT_TRUE(pool->enableDecodeOriginTracking());
+        for (size_t i = 0; i < blocks.size(); ++i) {
+            auto origin = std::make_shared<const DecodeCacheOrigin>(DecodeCacheOrigin{
+                std::string(32, 'a'), 0, static_cast<int64_t>(i * 4), static_cast<int64_t>((i + 1) * 4), 12, 13});
+            ASSERT_TRUE(pool->bindDecodeOrigin(blocks[i], pool->decodeOriginIncarnation(blocks[i]), "default", origin));
+        }
+        ASSERT_TRUE(allocator_->detachSharedBlocksForRecompute(resource, 4));
+        EXPECT_EQ(resource->blocks(0, "default"), blocks);  // exclusive allocations are retained
+        for (size_t i = 0; i < blocks.size(); ++i)
+            EXPECT_EQ(static_cast<bool>(pool->decodeOrigin(blocks[i], "default")), !enabled || i == 0);
+        allocator_->free({resource, nullptr});
+    }
+}
 
 TEST_F(CoordinatorCacheManagerAtomicUpdateTest, AtomicRemapPreservesRequestEosAndPublicationIdempotency) {
     auto config = createSingleTypeTestConfig(1, 5, 4);

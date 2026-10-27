@@ -461,6 +461,7 @@ cc_test(
     srcs = ["CoordinatorCacheManagerAtomicUpdateTest.cc"],
     copts = copts(),
     deps = [
+        "@havenask//aios/autil:env_util",
         ":block_tree_cache_allocator_test_helper",
         ":cache_config_test_utils",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
