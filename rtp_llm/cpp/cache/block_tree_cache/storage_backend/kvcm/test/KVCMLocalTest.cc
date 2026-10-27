@@ -617,12 +617,19 @@ TEST(KVCMLocalTest, CommitAckFailureIsUnknownPublicationWithoutUnknownDma) {
         auto request                 = makeStorageRequest(environment);
         request.completion_admission = accounting->tryAcquire(128, kvcm::DecodePublicationAccounting::Clock::now());
         ASSERT_TRUE(request.completion_admission);
-        auto task = backend.backend->prepareWrite(request);
+        const auto refs_before = environment.device_pool->refCount(environment.block_id);
+        auto       task        = backend.backend->prepareWrite(std::move(request));
         ASSERT_TRUE(static_cast<bool>(task));
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), refs_before + 1);
         ASSERT_TRUE(backend.backend->write(std::move(task)));
         ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
         EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
         EXPECT_EQ(accounting->snapshot().quarantined, 0u);
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), refs_before);
+        // Join the worker before inspecting ownership of its retired closure.
+        backend.backend->shutdown();
+        EXPECT_EQ(accounting->snapshot().bytes, 0u);
+        EXPECT_EQ(accounting->snapshot().jobs, 0u);
         std::lock_guard<std::mutex> lock(events_mutex);
         EXPECT_EQ(outcomes, std::vector<std::string>{"completion_unknown"});
     }
