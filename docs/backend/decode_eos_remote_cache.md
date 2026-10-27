@@ -118,6 +118,10 @@ transfer. The endpoint excludes the sampled first token. D validates the request
 identity and its successful all-rank load span before retaining that assertion
 across block remaps. Feature-off or legacy messages leave the boundary unknown;
 D input length alone cannot establish source attribution.
+If checkpoint selection or state-page backoff leaves no complete checkpoint
+beyond that explicit P boundary, skip publication before retaining pages,
+charging admission or executing the EOS device fence. An unknown boundary keeps
+the compatibility path.
 
 The implementation retains upstream scheduler, CPU-TP broadcast and shutdown
 coordination. It adds explicit shutdown of the asynchronous cache-store writer
