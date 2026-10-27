@@ -71,11 +71,13 @@ old-format remote keys across layouts; the identity change deliberately causes a
 cold miss rather than a potentially incorrect cross-layout hit.
 
 For DRAM select the existing `pace` SDK backend and read backend 3. For explicit
-SSD select `pace_ssd` and read backend 9. GPU packing is selected automatically. Backend selection is independent of Decode
-publication, so ordinary Prefill GDR does not require a second experimental PACE
-flag. The old CPU packing/coalescing implementations have been removed from this candidate.
-SDK calls are always bounded by byte, block and IOV limits; individual SSD objects
-remain intact. Trace block IDs are sliced along with each SDK batch.
+SSD select `pace_ssd` and read backend 9. With Decode publication enabled, GPU packing is selected automatically and SDK
+calls are bounded by byte, block and IOV limits; individual SSD objects remain
+intact. Trace block IDs are sliced along with each SDK batch. No additional
+packing/batching feature switch is required. With publication off, initialization,
+registration and SDK calls preserve the upstream path; Decode-only configuration
+validation and accounting are bypassed. The old CPU packing/coalescing
+implementations have been removed from this candidate.
 
 The transport configuration must select RDMA without a TCP payload fallback.
 Configure the matching Consumer's GDR read/write and external-memory flags,
@@ -93,12 +95,18 @@ independent existing configuration, not additional Decode feature flags.
 
 ### Initial resource budgets
 
-Per D rank, EOS publication charges at most **512 MiB** of GPU source pages
-across at most **4** queued/in-flight jobs. Pages are deduplicated within each
+Per D process, EOS publication defaults to **1/8 of the participating native KV
+pool capacity, capped at 4 GiB**, across at most **4** queued/in-flight jobs.
+Capacity is summed once per unique physical pool, excluding duplicate tags and
+CP wire replicas. A 4 GiB pool allows 512 MiB; a 24 GiB pool allows 3 GiB; a
+48 GiB pool is capped at 4 GiB. Pages are deduplicated within each
 job; shared pages across separate jobs are conservatively charged again.
 These are admission budgets,
-not a second preallocated KV pool. Against the present 4 GiB/rank test pool the
-byte budget is 12.5%; this is a deployment starting point, not a measured optimum.
+not a second preallocated KV pool. The fraction and cap are initial deployment
+policy, not a measured optimum or a maximum stable-pool result. Independent D
+processes each have their own limit; DP4 can therefore retain four times the
+per-process budget. Increasing this budget may delay reclamation and reduce
+available execution capacity.
 Advanced overrides are `RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB` (1–16384) and
 `RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS` (1–64), strictly parsed once at backend
 initialization. Refusal skips optional remote publication, retaining the normal
@@ -130,7 +138,7 @@ insertion and ordinary Prefill remote publication remain enabled.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH` | `0` | One opt-in switch for all supported P CP / independent D DP layouts. |
-| `RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB` | `512` | Per-D-process retained source-page charge, deduplicated per job and including quarantine; range 1–16384 MiB. |
+| `RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB` | `min(native_pool_bytes / 8, 4 GiB)` | Per-D-process retained source-page charge, deduplicated per job and including quarantine; range 1–16384 MiB. |
 | `RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS` | `4` | Per-D-process publication jobs, including quarantine; range 1–64. |
 
 Admission accounts for the entire candidate checkpoint before the metadata mask

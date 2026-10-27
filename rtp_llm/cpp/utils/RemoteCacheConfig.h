@@ -12,15 +12,20 @@ bool remoteCacheGdrEnabled();
 bool remoteCacheDecodePublicationEnabled();
 
 struct DecodePublicationLimits {
-    // Initial deployment defaults: 12.5% of the current 4 GiB/rank test pool.
-    // These cap existing pinned pages, rather than allocate another GPU pool.
+    // Configuration-only default for a 4 GiB pool. Backend initialization
+    // derives bytes from its actual unique physical pools instead.
+    // Budgets cap existing pinned pages, not another GPU allocation.
     size_t bytes = 512ULL * 1024 * 1024;
     size_t jobs = 4;
 };
 
 // Strictly parsed at backend initialization. Overrides are deployment budgets,
 // not separate feature switches. Invalid values reject initialization.
-std::optional<DecodePublicationLimits> remoteCacheDecodePublicationLimits();
+// Initial policy: at most 1/8 of the native KV pool, capped at 4 GiB per D
+// process, and four pending publications. The default argument supports config
+// inspection/tests; the backend always supplies its measured pool capacity.
+std::optional<DecodePublicationLimits>
+remoteCacheDecodePublicationLimits(size_t native_pool_bytes = 4ULL * 1024 * 1024 * 1024);
 
 // Returns 0 when the environment variable is unset. Invalid or out-of-range
 // values return nullopt so backend initialization can fail explicitly.

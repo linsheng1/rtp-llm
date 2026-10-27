@@ -122,7 +122,7 @@ public:
               StorageBackend::BufferResolver                                      buffer_resolver,
               const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver) {
         RTP_LLM_LOG_INFO("start init BlockTree KVCM storage backend");
-        if (!configureDecodePublication(buffer_resolver)) {
+        if (!configureDecodePublication(topology, buffer_resolver, pool_resolver)) {
             return false;
         }
         const auto quarantine_abort_ratio = remoteCacheQuarantineAbortRatio();

@@ -15,7 +15,10 @@ struct CompletionLease {
     }
 };
 
-bool configureDecodePublication(const StorageBackend::BufferResolver& resolver) {
+bool configureDecodePublication(
+    const CacheTopology& topology,
+    const StorageBackend::BufferResolver& resolver,
+    const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver) {
     const char* feature = std::getenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH");
     if (feature && std::string_view(feature) != "0" && std::string_view(feature) != "1") {
         RTP_LLM_LOG_ERROR("ENABLE_DECODE_PUBLISH must be 0 or 1");
@@ -79,12 +82,32 @@ bool configureDecodePublication(const StorageBackend::BufferResolver& resolver) 
                      target_prefill_cp_,
                      target_prefill_tp_);
     if (file_decode_) {
-        const auto limits = remoteCacheDecodePublicationLimits();
+        size_t native_pool_bytes = 0;
+        std::unordered_set<const DeviceBlockPool*> unique_pools;
+        for (const auto& group : topology.groups()) {
+            if (!group.policy.enable_prefix_reuse)
+                continue;
+            const auto& pool = pool_resolver(group.tag);
+            if (!pool || pool->getTotalSizeBytes() == 0) {
+                RTP_LLM_LOG_ERROR("Decode publication has no native pool for tag=%s", group.tag.c_str());
+                return false;
+            }
+            if (unique_pools.insert(pool.get()).second) {
+                if (pool->getTotalSizeBytes() > std::numeric_limits<size_t>::max() - native_pool_bytes) {
+                    RTP_LLM_LOG_ERROR("Decode publication native pool capacity overflow");
+                    return false;
+                }
+                native_pool_bytes += pool->getTotalSizeBytes();
+            }
+        }
+        const auto limits = remoteCacheDecodePublicationLimits(native_pool_bytes);
         if (!limits) {
             RTP_LLM_LOG_ERROR("invalid Decode publication pending byte/job budget");
             return false;
         }
         completion_limits_ = *limits;
+        RTP_LLM_LOG_INFO("DTOP_GPU budget native_pool_bytes=%zu pending_bytes_limit=%zu pending_jobs_limit=%zu",
+                         native_pool_bytes, completion_limits_.bytes, completion_limits_.jobs);
         completion_accounting_ = std::make_shared<CompletionAccounting>();
         file_resolver_ = resolver;
     }
@@ -202,7 +225,8 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
     request.computed_tokens                              = computed_end;
     request.published_tokens                             = end;
     size_t                                         bytes = 0;
-    std::set<std::pair<std::string, BlockIdxType>> unique;
+    std::unordered_map<const DeviceBlockPool*, std::unordered_set<BlockIdxType>> charged_blocks;
+    size_t unique_pages = 0;
     for (size_t key = 0; key < request.keys->size(); ++key) {
         for (const auto& entry : group_policy_->groups()) {
             const auto& spec  = entry.second;
@@ -220,8 +244,14 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
                 handle.block = blocks.at((key + 1) * canonical_unit / group.seqSizePerBlock() - 1);
             }
             auto charge = [&](BlockIdxType block) {
-                if (unique.emplace(spec.tag, block).second)
-                    bytes += cache_config_.blockSizeBytesForGroup(spec.tag);
+                const auto& pool = pools_by_tag_.at(spec.tag);
+                if (charged_blocks[pool.get()].insert(block).second) {
+                    const auto page_bytes = pool->blockSizeBytes();
+                    RTP_LLM_CHECK_WITH_INFO(page_bytes <= std::numeric_limits<size_t>::max() - bytes,
+                                            "EOS source-page budget charge overflow");
+                    bytes += page_bytes;
+                    ++unique_pages;
+                }
             };
             charge(handle.block);
             for (auto peer : handle.peer_blocks)
@@ -254,7 +284,7 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
         computed_end,
         end,
         computed_end - end,
-        unique.size(),
+        unique_pages,
         bytes);
     return request;
 }
