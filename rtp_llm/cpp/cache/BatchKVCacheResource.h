@@ -184,6 +184,13 @@ public:
     void swap(BatchKVCacheResource& other) noexcept {
         std::swap(decode_completion_submitted_, other.decode_completion_submitted_);
         std::swap(decode_completion_lifecycle_, other.decode_completion_lifecycle_);
+        swapBlockStorage(other);
+    }
+
+    // An atomic block-table remap stages new storage for the same request. It
+    // must not exchange the logical EOS/once-only state with an empty staging
+    // object, or release-time fallback could publish a second time.
+    void swapBlockStorage(BatchKVCacheResource& other) noexcept {
         batch_resource.swap(other.batch_resource);
         std::swap(cache_keys_initialized_, other.cache_keys_initialized_);
     }
