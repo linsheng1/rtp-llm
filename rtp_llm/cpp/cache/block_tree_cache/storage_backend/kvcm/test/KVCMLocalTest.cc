@@ -533,7 +533,7 @@ TEST(KVCMLocalTest, EnabledReadQuarantinesUnprovenSdkErrorsButNotExplicitSafeRes
     }
 }
 
-TEST(KVCMLocalTest, UnknownWriteDoesNotImmediatelyAbortRemoteAllocationWhileSafeFailureDoes) {
+TEST(KVCMLocalTest, CallerBufferSafetyDoesNotProveRemoteAllocationQuiescence) {
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
     using EC = kv_cache_manager::ClientErrorCode;
     for (const bool enabled : {false, true}) {
@@ -552,7 +552,7 @@ TEST(KVCMLocalTest, UnknownWriteDoesNotImmediatelyAbortRemoteAllocationWhileSafe
             EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
                 .WillOnce(Return(std::make_pair(true, allocation)));
             const bool unknown = enabled && !safe;
-            if (unknown) {
+            if (enabled) {
                 EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).Times(0);
             } else {
                 EXPECT_CALL(*client, finishWrite(_, _, "pending-session", _, _)).WillOnce(Return(true));
@@ -564,6 +564,33 @@ TEST(KVCMLocalTest, UnknownWriteDoesNotImmediatelyAbortRemoteAllocationWhileSafe
             ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
             EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), unknown);
         }
+    }
+}
+
+TEST(KVCMLocalTest, FailureBeforeTransferStillAbortsItsUnusedAllocation) {
+    autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    for (const bool enabled : {false, true}) {
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        auto environment = makeBackendEnvironment("kvcm_pretransfer_failure");
+        auto client = std::make_shared<MockClientWrapper>();
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        auto backend = makeCompletionProofBackend(environment, client);
+        ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+        kv_cache_manager::WriteLocation allocation;
+        allocation.write_session_id = "unused-session";
+        allocation.block_mask = kv_cache_manager::BlockMaskOffset{0};
+        allocation.locations = {{{"unknown-spec-before-io", "write_uri"}}};
+        EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
+            .WillOnce(Return(std::make_pair(true, allocation)));
+        EXPECT_CALL(*client, finishWrite(_, _, "unused-session", kv_cache_manager::BlockMaskOffset{0}, _))
+            .WillOnce(Return(true));
+        EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(0);
+        auto task = backend.backend->prepareWrite(makeStorageRequest(environment));
+        ASSERT_TRUE(static_cast<bool>(task));
+        ASSERT_TRUE(backend.backend->write(std::move(task)));
+        ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+        EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
     }
 }
 

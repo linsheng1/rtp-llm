@@ -630,6 +630,7 @@ public:
         RTP_LLM_CHECK_WITH_INFO(success, "KVCM StartWrite failed");
         static const kv_cache_manager::Locations empty_locations;
         bool                                     finish_attempted = false;
+        bool                                     transfer_attempted = false;
         try {
             std::vector<FunctionRequestPB> requests(
                 static_cast<size_t>(request.decode_completion ? target_prefill_tp_ : parallelism_config_.tp_size));
@@ -698,6 +699,7 @@ public:
                 block_tree_cache_detail::ScopeRollback timer([&] {
                     collector.remote_write_broadcast_time_us = elapsedTimeUs(stage_start);
                 });
+                transfer_attempted = true;
                 return request.decode_completion ?
                            transferCompletedDecode(requests) :
                            dispatchRequests(requests, kv_cache_config_.kvcm_put_broadcast_timeout, request.request_id);
@@ -773,22 +775,18 @@ public:
                                  transferred_bytes);
             }
         } catch (...) {
-            bool unknown_transfer = false;
-            if (decode_publication_enabled_) {
-                try {
-                    throw;
-                } catch (const StorageOperationCompletionUnknown&) {
-                    unknown_transfer = true;
-                } catch (...) {
-                }
-            }
-            if (unknown_transfer) {
-                // Do not immediately recycle remote allocations while an
-                // unproven SDK operation may still reference them. Keep the
-                // original Manager WRITING lease; SDK drain/lease lifetime is
-                // a separate contract, not proof supplied by a failed RPC.
-                RTP_LLM_LOG_WARNING("KVCM write completion unknown; retaining pending session [%s] without abort",
+            if (decode_publication_enabled_ && transfer_attempted && !finish_attempted) {
+                // A BUFFER_SAFE failure permits releasing the caller's GPU
+                // pages, but does not prove detached Consumer writes stopped
+                // touching the remote allocation. Do not explicitly recycle
+                // that allocation without an independent destination fence.
+                // The Manager lease/expiry contract remains separate.
+                RTP_LLM_LOG_WARNING("KVCM remote destination completion unproven; retaining pending session [%s] without abort",
                                     write_location.write_session_id.c_str());
+                RtpLLMRemoteCacheOutcomeMetricsCollector allocation_result;
+                allocation_result.stage = "write_allocation";
+                allocation_result.outcome = "retained_unproven";
+                reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(allocation_result);
             } else if (!finish_attempted) {
                 const auto                             stage_start = Clock::now();
                 block_tree_cache_detail::ScopeRollback timer(
