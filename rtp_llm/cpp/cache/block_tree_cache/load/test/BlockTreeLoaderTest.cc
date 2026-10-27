@@ -39,6 +39,7 @@ TEST(BlockTreeLoaderTest, LocalOnlyCompletionNeverFabricatesRemoteTiming) {
         auto            coordinator = std::make_shared<LoadContextCoordinator>(
             [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, LoadContextCoordinator::AbortCallback{});
         auto context = coordinator->create({}, {}, 0);
+        ASSERT_TRUE(coordinator->registerContext(context));
         ASSERT_TRUE(context->commit());
         ASSERT_TRUE(context->success());
         EXPECT_FALSE(context->remoteRestoreTiming().has_value());
