@@ -1249,7 +1249,7 @@ TEST_F(StreamCacheResourceTest, RemoteTimeoutAllocationRetryKeepsLocalLookupAndS
         ASSERT_TRUE(prefix.back()->group_set_resources[group_id].hasTier(Tier::HOST));
         // The helper seeds the tree directly. Register its HOST candidate as
         // a production insertion would, rather than silently omitting the heap.
-        BlockTreeCacheTestPeer::refreshCandidateForTest(*cache, prefix.back(), group_id);
+        block_tree_cache_test::BlockTreeCacheTestPeer::refreshCandidateForTest(*cache, prefix.back(), group_id);
         backend->blockReads();
         block_tree_cache_detail::ScopeRollback release_read([&] { backend->releaseReads(); });
         backend->timeoutNextRead();
@@ -1274,12 +1274,13 @@ TEST_F(StreamCacheResourceTest, RemoteTimeoutAllocationRetryKeepsLocalLookupAndS
         // Finished loads may still own source tickets through this inspection
         // reference. Release them before exercising production eviction.
         context.reset();
-        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+        block_tree_cache_test::BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
         for (const auto tier : {Tier::DEVICE, Tier::HOST}) {
-            const bool dropped = BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(
+            const bool dropped = block_tree_cache_test::BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(
                 *cache, group_id, tier, /*force_drop=*/true);
-            if (resident)
+            if (resident) {
                 EXPECT_FALSE(dropped);
+            }
         }
         const auto remaining = cache->tree()->findNode({prefix_key});
         const bool local_prefix_available = !remaining.empty()
