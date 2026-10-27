@@ -407,16 +407,18 @@ void StreamCacheResource::reportCacheReuseMetrics() {
         &tags, &cache_reuse_metrics_);
 }
 
-void StreamCacheResource::reportRemoteContextReady() {
-    const auto latency = remote_restore_lifecycle_.completeContextForward();
+void StreamCacheResource::reportRemoteContextReady(std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at) {
+    const auto latency =
+        remote_restore_lifecycle_.completeContextForward(gpu_ready_at.value_or(RemoteRestoreTiming::Clock::now()));
     if (!latency || !stream_->metrics_reporter_) {
         return;
     }
     // The existing context forward can fuse historical tail with new prompt or
     // tool tokens. No source/tail identity is available here yet, so do not call
-    // this tail-only restore, actual D-token use or TTFT. Root updateOutput is
-    // only a CPU observation: it is not proof of all-rank GPU tail completion.
-    reportRemoteRestoreLatency("root_context_update_observed", *latency);
+    // this tail-only restore, actual D-token use or TTFT. The GPU-ready mode
+    // requires the explicit producer collective + existing output-stream fence;
+    // arbitrary CPU updates remain observations without that qualification.
+    reportRemoteRestoreLatency(gpu_ready_at ? "fused_context_gpu_ready" : "root_context_update_observed", *latency);
 }
 
 void StreamCacheResource::reportRemoteRestoreLatency(const char* mode, int64_t latency_us) {

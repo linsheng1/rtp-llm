@@ -1458,11 +1458,12 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                   update_info.top_logprob_token_ids,
                   update_info.top_logprobs,
                   old_seq_length,
-                  update_info.logprobs_offset});
+                  update_info.logprobs_offset,
+                  update_info.context_kv_all_rank_gpu_ready_at});
 
     if (completes_remote_context && !update_info.force_update_info && !hasErrorWithoutLock()
         && !hasEventWithoutLock(StreamEvents::Error)) {
-        stream_cache_resource_->reportRemoteContextReady();
+        stream_cache_resource_->reportRemoteContextReady(update_info.context_kv_all_rank_gpu_ready_at);
     }
 
     // needFinish(), called by updateOutput(), can trim this packet at EOS/stop

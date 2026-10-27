@@ -121,7 +121,7 @@ public:
     bool hasPendingRemoteRestore() const {
         return remote_restore_lifecycle_.pendingForward();
     }
-    void reportRemoteContextReady();
+    void reportRemoteContextReady(std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at = std::nullopt);
 
     void holdKVCacheForPDSep();
     void releaseKVCacheForPDSep();

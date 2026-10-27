@@ -64,6 +64,9 @@ struct StreamUpdateInfo {
     // evaluated against the pre-update output. Thinking-only packets use
     // num_new_tokens; ordinary/content-only packets use zero.
     int32_t logprobs_offset = 0;
+    // Set only after a proven all-rank producer dependency AND the existing
+    // consumer stream completion. A plain CPU stream update is not proof.
+    std::optional<RemoteRestoreTiming::Clock::time_point> context_kv_all_rank_gpu_ready_at = std::nullopt;
 };
 
 struct StreamSpecUpdateInfo {
