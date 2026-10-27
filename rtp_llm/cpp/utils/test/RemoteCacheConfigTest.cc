@@ -13,7 +13,7 @@ namespace {
 class DecodeBudgetConfigTest: public ::testing::Test {
 protected:
     struct UnsetOverride {
-        const char* name;
+        const char*                name;
         std::optional<std::string> previous;
         explicit UnsetOverride(const char* key): name(key) {
             if (const auto* value = std::getenv(key))
@@ -26,17 +26,18 @@ protected:
             else
                 unsetenv(name);
         }
-    } bytes{"RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB"},
-      jobs{"RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS"};
+    } bytes{"RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB"}, jobs{"RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS"};
     static constexpr size_t MiB = 1024 * 1024, GiB = 1024 * MiB;
 };
 
 TEST_F(DecodeBudgetConfigTest, UsesNativeCapacityWithoutRoundingSmallPoolsUp) {
     EXPECT_FALSE(remoteCacheDecodePublicationLimits(0));
     for (auto [capacity, expected] : {std::pair<size_t, size_t>{4 * GiB, 512 * MiB},
-                                     {8 * GiB, GiB}, {24 * GiB, 3 * GiB},
-                                     {48 * GiB, 4 * GiB}, {1024, 128},
-                                     {std::numeric_limits<size_t>::max(), 4 * GiB}}) {
+                                      {8 * GiB, GiB},
+                                      {24 * GiB, 3 * GiB},
+                                      {48 * GiB, 4 * GiB},
+                                      {1024, 128},
+                                      {std::numeric_limits<size_t>::max(), 4 * GiB}}) {
         const auto limits = remoteCacheDecodePublicationLimits(capacity);
         ASSERT_TRUE(limits) << capacity;
         EXPECT_EQ(limits->bytes, expected) << capacity;

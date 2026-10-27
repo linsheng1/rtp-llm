@@ -26,7 +26,7 @@ public:
             || (attempt_started_at && *attempt_started_at > timing.read_started_at)) {
             return false;
         }
-        timing_ = timing;
+        timing_             = timing;
         attempt_started_at_ = attempt_started_at.value_or(timing.read_started_at);
         return true;
     }
@@ -69,7 +69,7 @@ private:
         return std::chrono::duration_cast<std::chrono::microseconds>(at - *attempt_started_at_).count();
     }
     std::optional<RemoteRestoreTiming> timing_;
-    std::optional<Clock::time_point> attempt_started_at_;
+    std::optional<Clock::time_point>   attempt_started_at_;
     bool                               forward_reported_{false};
 };
 

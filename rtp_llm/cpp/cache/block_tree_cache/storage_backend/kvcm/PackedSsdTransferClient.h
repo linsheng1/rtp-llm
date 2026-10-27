@@ -31,13 +31,13 @@ public:
             free_ranges.emplace_back(0, 64ULL * 1024 * 1024);
         }
         std::shared_ptr<void> memory;
-        std::mutex mutex;
+        std::mutex            mutex;
         // GPU ranges, not whole tags, remain quarantined after uncertain DMA.
         // Fixed metadata capacity prevents allocation in the lease destructor.
         std::vector<std::pair<size_t, size_t>> free_ranges;
-        size_t active_reservations{0};
+        size_t                                 active_reservations{0};
         // Accessed only while ClientFactory's device registry mutex is held.
-        bool registered{false};
+        bool                                         registered{false};
         std::vector<kv_cache_manager::GpuMemorySpan> registered_gpu_spans;
 
         bool coversRegisteredGpuSpan(const kv_cache_manager::RegistSpan& span, int device) const noexcept {
@@ -49,8 +49,7 @@ public:
                     continue;
                 const auto base = reinterpret_cast<uintptr_t>(gpu.base);
                 // Subtraction avoids wrapping either end address.
-                if (address >= base && address - base <= gpu.size
-                    && span.size <= gpu.size - (address - base))
+                if (address >= base && address - base <= gpu.size && span.size <= gpu.size - (address - base))
                     return true;
             }
             return false;
@@ -60,18 +59,21 @@ public:
     // stream ordering to observe a gather or protect an in-flight scatter.
     using Copy =
         std::function<bool(void*, kv_cache_manager::MemoryType, const void*, kv_cache_manager::MemoryType, size_t)>;
-    using ReadThreadInit = std::function<bool()>;
-    static constexpr size_t max_operation_bytes = 64ULL * 1024 * 1024;
-    static constexpr size_t max_process_bytes   = 512ULL * 1024 * 1024;
-    static constexpr size_t max_read_window_bytes = 256ULL * 1024;
+    using ReadThreadInit                            = std::function<bool()>;
+    static constexpr size_t max_operation_bytes     = 64ULL * 1024 * 1024;
+    static constexpr size_t max_process_bytes       = 512ULL * 1024 * 1024;
+    static constexpr size_t max_read_window_bytes   = 256ULL * 1024;
     static constexpr size_t max_read_window_objects = 4;
 
     PackedSsdTransferClient(std::unique_ptr<kv_cache_manager::TransferClient> inner,
-                           Copy copy,
-                           std::shared_ptr<GpuPackingContext> gpu_context,
-                           ReadThreadInit read_thread_init = {}):
-        inner_(std::move(inner)), copy_(std::move(copy)), gpu_context_(std::move(gpu_context)),
-        staging_type_(kv_cache_manager::MemoryType::GPU), read_thread_init_(std::move(read_thread_init)) {
+                            Copy                                              copy,
+                            std::shared_ptr<GpuPackingContext>                gpu_context,
+                            ReadThreadInit                                    read_thread_init = {}):
+        inner_(std::move(inner)),
+        copy_(std::move(copy)),
+        gpu_context_(std::move(gpu_context)),
+        staging_type_(kv_cache_manager::MemoryType::GPU),
+        read_thread_init_(std::move(read_thread_init)) {
         if (!inner_ || !copy_ || (!gpu_context_ || !gpu_context_->memory))
             throw std::invalid_argument("missing SSD delegate/copy operation");
     }
@@ -120,12 +122,14 @@ public:
                     reads.reserve(range.second - range.first);
                     for (size_t block = range.first; block < range.second; ++block) {
                         reads.emplace_back(std::async(std::launch::async,
-                            [this, uri = uris[block], buffer = operation->buffers[block],
-                             one_trace = blockTrace(trace, block, uris.size())]() mutable {
-                                if (!read_thread_init_())
-                                    return kv_cache_manager::ER_CUDAMEMCPY_ERROR;
-                                return loadOne(uri, buffer, std::move(one_trace));
-                            }));
+                                                      [this,
+                                                       uri       = uris[block],
+                                                       buffer    = operation->buffers[block],
+                                                       one_trace = blockTrace(trace, block, uris.size())]() mutable {
+                                                          if (!read_thread_init_())
+                                                              return kv_cache_manager::ER_CUDAMEMCPY_ERROR;
+                                                          return loadOne(uri, buffer, std::move(one_trace));
+                                                      }));
                     }
                     std::exception_ptr failure;
                     for (auto& read : reads) {
@@ -234,22 +238,21 @@ private:
     Code loadOne(const std::string& uri, const kv_cache_manager::BlockBuffer& buffer, Trace trace) {
         // Prepare descriptors before the attempted-I/O boundary. Allocation or
         // trace failures here have not called the SDK and report no unknown I/O.
-        const Uris uris{uri};
+        const Uris    uris{uri};
         const Buffers buffers{buffer};
-        Code code;
+        Code          code;
         try {
             code = inner_->LoadKvCaches(uris, buffers, std::move(trace));
         } catch (...) {
             observe(true, 0, true);
             throw;
         }
-        observe(true, code == kv_cache_manager::ER_OK ? buffer.iovs.front().size : 0,
-                code != kv_cache_manager::ER_OK);
+        observe(true, code == kv_cache_manager::ER_OK ? buffer.iovs.front().size : 0, code != kv_cache_manager::ER_OK);
         return code;
     }
     std::pair<Code, Uris> saveOne(const std::string& uri, const kv_cache_manager::BlockBuffer& buffer, Trace trace) {
-        const Uris uris{uri};
-        const Buffers buffers{buffer};
+        const Uris            uris{uri};
+        const Buffers         buffers{buffer};
         std::pair<Code, Uris> result;
         try {
             result = inner_->SaveKvCaches(uris, buffers, std::move(trace));
@@ -257,7 +260,8 @@ private:
             observe(false, 0, true);
             throw;
         }
-        observe(false, result.first == kv_cache_manager::ER_OK ? buffer.iovs.front().size : 0,
+        observe(false,
+                result.first == kv_cache_manager::ER_OK ? buffer.iovs.front().size : 0,
                 result.first != kv_cache_manager::ER_OK);
         return result;
     }
@@ -273,13 +277,13 @@ private:
     }
     struct GpuRangeLease {
         std::shared_ptr<GpuPackingContext> context;
-        size_t begin{0}, bytes{0};
+        size_t                             begin{0}, bytes{0};
         ~GpuRangeLease() {
             if (!context)
                 return;
             std::lock_guard<std::mutex> guard(context->mutex);
-            auto& ranges = context->free_ranges;
-            ranges.emplace_back(begin, bytes); // capacity reserved before any I/O
+            auto&                       ranges = context->free_ranges;
+            ranges.emplace_back(begin, bytes);  // capacity reserved before any I/O
             std::sort(ranges.begin(), ranges.end());
             size_t kept = 0;
             for (size_t index = 0; index < ranges.size(); ++index) {
@@ -294,11 +298,11 @@ private:
         }
     };
     struct Operation {
-        size_t                                  charged = 0;
-        std::shared_ptr<GpuRangeLease>           gpu_lease;
-        std::vector<std::shared_ptr<void>>      bytes;
-        Buffers                                 buffers;
-        std::vector<std::pair<size_t, size_t>>   read_ranges;
+        size_t                                 charged = 0;
+        std::shared_ptr<GpuRangeLease>         gpu_lease;
+        std::vector<std::shared_ptr<void>>     bytes;
+        Buffers                                buffers;
+        std::vector<std::pair<size_t, size_t>> read_ranges;
         ~Operation() {
             process_bytes_.fetch_sub(charged);
         }
@@ -308,8 +312,8 @@ private:
         // Only this client's unresolved GPU range stays reserved. Independent
         // tags can continue using other ranges of the registered arena.
     }
-    std::shared_ptr<Operation> makeOperation(const Uris& uris, const Buffers& original, bool write,
-                                           size_t read_window_objects = 1) {
+    std::shared_ptr<Operation>
+    makeOperation(const Uris& uris, const Buffers& original, bool write, size_t read_window_objects = 1) {
         // Any uncertain completion fails this client closed until shutdown;
         // failed buffers cannot be overwritten by a later operation.
         if (quarantine_ || uris.empty() || uris.size() != original.size())
@@ -320,8 +324,7 @@ private:
             size_t size = 0;
             for (const auto& iov : block.iovs) {
                 if (!iov.size || (write && iov.ignore) || (!iov.ignore && !iov.base)
-                    || iov.type != kv_cache_manager::MemoryType::GPU
-                    || iov.size > max_operation_bytes - size)
+                    || iov.type != kv_cache_manager::MemoryType::GPU || iov.size > max_operation_bytes - size)
                     return {};
                 size += iov.size;
             }
@@ -330,9 +333,9 @@ private:
             total += size;
             sizes.push_back(size);
         }
-        auto   operation = std::make_shared<Operation>();
+        auto                operation = std::make_shared<Operation>();
         std::vector<size_t> offsets(sizes.size(), 0);
-        size_t charge = 0;
+        size_t              charge = 0;
         for (size_t begin = 0; begin < sizes.size();) {
             size_t end = begin, bytes = 0;
             while (end < sizes.size() && end - begin < read_window_objects) {
@@ -345,11 +348,11 @@ private:
             }
             operation->read_ranges.emplace_back(begin, end);
             charge = std::max(charge, bytes);
-            begin = end;
+            begin  = end;
         }
         // Charge the largest simultaneously live GPU window, not the whole
         // logical request. Writes remain single-object and unchanged.
-        size_t previous  = process_bytes_.load();
+        size_t previous = process_bytes_.load();
         do {
             if (previous > max_process_bytes - charge)
                 return {};
@@ -365,7 +368,8 @@ private:
                 if (gpu_context_->active_reservations >= 1024)
                     return {};
                 auto& free = gpu_context_->free_ranges;
-                auto it = std::find_if(free.begin(), free.end(), [charge](const auto& r) { return r.second >= charge; });
+                auto  it =
+                    std::find_if(free.begin(), free.end(), [charge](const auto& r) { return r.second >= charge; });
                 if (it == free.end())
                     return {};
                 offset = it->first;
@@ -375,16 +379,15 @@ private:
                     free.erase(it);
                 ++gpu_context_->active_reservations;
                 lease->context = gpu_context_;
-                lease->begin = offset;
-                lease->bytes = charge;
+                lease->begin   = offset;
+                lease->bytes   = charge;
             }
             operation->gpu_lease = std::move(lease);
         }
         for (size_t i = 0; i < sizes.size(); ++i) {
             operation->bytes[i] = std::shared_ptr<void>(
                 gpu_context_->memory, static_cast<unsigned char*>(gpu_context_->memory.get()) + offset + offsets[i]);
-            operation->buffers[i].iovs.push_back(
-                {staging_type_, operation->bytes[i].get(), sizes[i], false});
+            operation->buffers[i].iovs.push_back({staging_type_, operation->bytes[i].get(), sizes[i], false});
             // Reuse only after the previous window completed and scattered.
         }
         return operation;
@@ -392,8 +395,8 @@ private:
     inline static std::atomic<size_t>                 process_bytes_{0};
     std::unique_ptr<kv_cache_manager::TransferClient> inner_;
     Copy                                              copy_;
-    std::shared_ptr<GpuPackingContext>                 gpu_context_;
-    kv_cache_manager::MemoryType                       staging_type_;
+    std::shared_ptr<GpuPackingContext>                gpu_context_;
+    kv_cache_manager::MemoryType                      staging_type_;
     ReadThreadInit                                    read_thread_init_;
     std::mutex                                        mutex_;
     SdkTransferObserver                               transfer_observer_;

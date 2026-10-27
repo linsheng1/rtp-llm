@@ -7,8 +7,8 @@ namespace rtp_llm {
 class StorageCompletionAdmission {
 public:
     virtual ~StorageCompletionAdmission() = default;
-    virtual void onQueued() noexcept = 0;
-    virtual void onRunning() noexcept = 0;
+    virtual void onQueued() noexcept      = 0;
+    virtual void onRunning() noexcept     = 0;
     virtual void onQuarantined() noexcept = 0;
 };
 

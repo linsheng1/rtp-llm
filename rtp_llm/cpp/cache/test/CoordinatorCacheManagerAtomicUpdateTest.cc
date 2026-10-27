@@ -45,12 +45,12 @@ protected:
 TEST_F(CoordinatorCacheManagerAtomicUpdateTest, RecomputeInvalidatesOnlyItsWritablePhysicalSuffixWhenEnabled) {
     for (const bool enabled : {false, true}) {
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
-        auto config = createSingleTypeTestConfig(1, 6, 4);
-        allocator_ = std::make_shared<TestAllocator>(config, AllocationType::HOST);
+        auto            config = createSingleTypeTestConfig(1, 6, 4);
+        allocator_             = std::make_shared<TestAllocator>(config, AllocationType::HOST);
         ASSERT_TRUE(allocator_->init());
-        const auto pool = allocator_->groupBlockPools().front();
-        auto resource = createBatchKVCacheResource(1, config);
-        const auto blocks = allocateRequestBlocks(pool, 3);
+        const auto pool     = allocator_->groupBlockPools().front();
+        auto       resource = createBatchKVCacheResource(1, config);
+        const auto blocks   = allocateRequestBlocks(pool, 3);
         ASSERT_EQ(blocks.size(), 3u);
         resource->mutableBlockIds(0, "default").assign(blocks);
         ASSERT_TRUE(pool->enableDecodeOriginTracking());
@@ -70,10 +70,10 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, RecomputeInvalidatesOnlyItsWrita
 TEST_F(CoordinatorCacheManagerAtomicUpdateTest, CopySubmissionDoesNotPreserveTheDestinationsOldOrigin) {
     for (const bool enabled : {false, true}) {
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
-        auto config = createSingleTypeTestConfig(1, 5, 4);
-        allocator_ = std::make_shared<TestAllocator>(config, AllocationType::HOST);
+        auto            config = createSingleTypeTestConfig(1, 5, 4);
+        allocator_             = std::make_shared<TestAllocator>(config, AllocationType::HOST);
         ASSERT_TRUE(allocator_->init());
-        const auto pool = allocator_->groupBlockPools().front();
+        const auto pool   = allocator_->groupBlockPools().front();
         const auto blocks = allocateRequestBlocks(pool, 2);
         ASSERT_EQ(blocks.size(), 2u);
         ASSERT_TRUE(pool->enableDecodeOriginTracking());
@@ -91,9 +91,9 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, CopySubmissionDoesNotPreserveThe
 
 TEST_F(CoordinatorCacheManagerAtomicUpdateTest, AtomicRemapPreservesRequestEosAndPublicationIdempotency) {
     auto config = createSingleTypeTestConfig(1, 5, 4);
-    allocator_ = std::make_shared<TestAllocator>(config, AllocationType::HOST);
+    allocator_  = std::make_shared<TestAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
-    auto pool = allocator_->groupBlockPools().front();
+    auto       pool   = allocator_->groupBlockPools().front();
     const auto blocks = allocateRequestBlocks(pool, 2);
     ASSERT_EQ(blocks.size(), 2u);
     auto resource = createBatchKVCacheResource(1, config);

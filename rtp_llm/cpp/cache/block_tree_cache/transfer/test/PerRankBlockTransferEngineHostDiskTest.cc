@@ -185,17 +185,17 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, PhysicalOriginsFollowHostDiskRoundTripAndClearUnknownOverwrite) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
-    auto engine = makeEngine({group_set_});
-    const auto host_block = poolMalloc(*host_pool_);
-    const auto disk_block = poolMalloc(*disk_pool_);
+    auto            engine     = makeEngine({group_set_});
+    const auto      host_block = poolMalloc(*host_pool_);
+    const auto      disk_block = poolMalloc(*disk_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
     ASSERT_TRUE(host_pool_->enableDecodeOriginTracking());
     auto source = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".4.0.8.8.9");
     ASSERT_TRUE(source);
-    const auto origin = std::make_shared<const DecodeCacheOrigin>(*source);
-    const auto& tag = group_set_->groupTags().front();
-    const auto host_generation = host_pool_->decodeOriginIncarnation(host_block);
+    const auto  origin          = std::make_shared<const DecodeCacheOrigin>(*source);
+    const auto& tag             = group_set_->groupTags().front();
+    const auto  host_generation = host_pool_->decodeOriginIncarnation(host_block);
     ASSERT_TRUE(host_pool_->bindDecodeOrigin(host_block, host_generation, tag, origin));
     ASSERT_TRUE(executeSucceeded(engine, makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block)));
     EXPECT_EQ(disk_pool_->decodeOrigin(disk_block, tag), origin);

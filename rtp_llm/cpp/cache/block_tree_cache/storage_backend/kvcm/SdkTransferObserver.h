@@ -12,7 +12,7 @@ using SdkTransferObserver = std::function<void(bool is_read, size_t completed_by
 
 class SdkTransferObservable {
 public:
-    virtual ~SdkTransferObservable() = default;
+    virtual ~SdkTransferObservable()                                  = default;
     virtual void setSdkTransferObserver(SdkTransferObserver observer) = 0;
 };
 

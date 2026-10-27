@@ -20,7 +20,7 @@ TEST(RemoteRestoreLifecycleTest, SeparatesGpuReadinessFromRootContextUpdateObser
 
 TEST(RemoteRestoreLifecycleTest, IncludesLookupAndAllocationWithoutLosingReadSubphase) {
     RemoteRestoreLifecycle lifecycle;
-    const auto start = Clock::time_point{} + Us(1000);
+    const auto             start = Clock::time_point{} + Us(1000);
     ASSERT_TRUE(lifecycle.adopt({start + Us(200), start + Us(700)}, start));
     EXPECT_EQ(lifecycle.checkpointReadyUs(), 700);
     EXPECT_EQ(lifecycle.readToCheckpointUs(), 500);

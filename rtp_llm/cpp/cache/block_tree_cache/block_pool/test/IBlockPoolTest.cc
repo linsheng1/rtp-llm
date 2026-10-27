@@ -70,8 +70,8 @@ TEST(IBlockPoolTest, BlockZeroIsInvalidAndNeverAllocated) {
 }
 
 TEST(IBlockPoolTest, OriginTrackingIsOptionalAndFollowsAllocatedPhysicalLifetime) {
-    auto pool = makeInitializedPool(2);
-    const auto block = *pool->malloc();
+    auto       pool   = makeInitializedPool(2);
+    const auto block  = *pool->malloc();
     const auto parsed = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".7680.7680.8192.8200.8201");
     ASSERT_TRUE(parsed);
     auto source = std::make_shared<const DecodeCacheOrigin>(*parsed);
@@ -85,7 +85,7 @@ TEST(IBlockPoolTest, OriginTrackingIsOptionalAndFollowsAllocatedPhysicalLifetime
     pool->incTreeRef(block, BlockTreeRefType::CACHE);
     pool->decTreeRef(block, BlockTreeRefType::CACHE);
     EXPECT_EQ(pool->decodeOrigin(block, "full"), source);
-    ASSERT_TRUE(pool->enableDecodeOriginTracking()); // idempotent, not a new incarnation
+    ASSERT_TRUE(pool->enableDecodeOriginTracking());  // idempotent, not a new incarnation
     EXPECT_EQ(pool->decodeOriginIncarnation(block), stamp);
     pool->decTreeRef(block, BlockTreeRefType::CACHE);
     EXPECT_FALSE(pool->decodeOrigin(block, "full"));

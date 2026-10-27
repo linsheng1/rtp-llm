@@ -1489,8 +1489,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     if (is_done && hasEventWithoutLock(StreamEvents::GenerateDone) && !hasEventWithoutLock(StreamEvents::Error)
         && !hasErrorWithoutLock() && resourceContext().cache_manager && !useStreamAsyncReserveTokens()
         && num_new_tokens == 1 && currentBatchSize() == 1 && remoteCacheDecodePublicationEnabled()
-        && resourceContext().role_type == RoleType::DECODE && stream_cache_resource_->reuseCache()
-        && seqLength() > 0) {
+        && resourceContext().role_type == RoleType::DECODE && stream_cache_resource_->reuseCache() && seqLength() > 0) {
         resourceContext().cache_manager->captureCompletedDecode(kvCache(), seqLength() - 1, true);
     }
 

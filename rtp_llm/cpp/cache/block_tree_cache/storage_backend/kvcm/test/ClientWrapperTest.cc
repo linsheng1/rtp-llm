@@ -29,10 +29,10 @@ using ::testing::ReturnRef;
 using ::testing::SetArgReferee;
 
 TEST(ClientFactoryGdrTest, SsdAutomaticallyRequiresGpuRegistrations) {
-    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
-    ClientFactory factory;
+    autil::EnvGuard              enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ClientFactory                factory;
     kv_cache_manager::InitParams params{};
-    const std::string ssd = R"({"sdk_config":{"sdk_backend_configs":[{"type":"pace_ssd"}]}})";
+    const std::string            ssd = R"({"sdk_config":{"sdk_backend_configs":[{"type":"pace_ssd"}]}})";
     EXPECT_THROW(factory.createTransferClient(ssd, params), std::invalid_argument);
     const std::string mixed = R"({"sdk_config":{"sdk_backend_configs":[{"type":"pace"},{"type":"pace_ssd"}]}})";
     kv_cache_manager::ClientMemoryRegistrations registrations;
@@ -154,11 +154,11 @@ template<typename Match>
 Match hostStateFixture(const std::string& host, int64_t local, int64_t remote) {
     Match result{};
     result.host_ip_port = host;
-    result.local = local;
+    result.local        = local;
     if constexpr (HasGlobalHostCacheMatch<Match>::value) {
         result.global = remote;
     } else {
-        result.p2p_1_fetch = 1;
+        result.p2p_1_fetch       = 1;
         result.p2p_1_total_match = remote;
     }
     return result;
@@ -181,27 +181,36 @@ void expectHostState(const Match& value, const Match& expected) {
 // silently disable the estimate even though the metadata call succeeds.
 TEST(ClientWrapperTest, HostStatePreservesP2pSelectionAndSdkFailureWithPublicationOnAndOff) {
     using namespace kv_cache_manager;
-    const std::vector<int64_t> keys{101, 202};
+    const std::vector<int64_t>     keys{101, 202};
     const std::vector<std::string> medium{"hbm"};
-    const HostCacheState expected{hostStateFixture<HostCacheMatch>("host-a:1", 2, 3),
+    const HostCacheState           expected{hostStateFixture<HostCacheMatch>("host-a:1", 2, 3),
                                   hostStateFixture<HostCacheMatch>("host-b:2", 5, 7)};
     for (const std::string enabled : {"0", "1"}) {
         SCOPED_TRACE(enabled);
-        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled);
+        autil::EnvGuard      feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled);
         std::array<char, 32> data{};
-        RegistSpan span{data.data(), data.size()};
-        InitObservation observation;
-        MockMetaClient* meta = nullptr;
-        auto destroyed = std::make_shared<int>(0);
-        auto wrapper = initializeClient(false, "direct", span, observation, destroyed, &meta);
+        RegistSpan           span{data.data(), data.size()};
+        InitObservation      observation;
+        MockMetaClient*      meta      = nullptr;
+        auto                 destroyed = std::make_shared<int>(0);
+        auto                 wrapper   = initializeClient(false, "direct", span, observation, destroyed, &meta);
         ASSERT_NE(wrapper, nullptr);
         if constexpr (std::is_invocable_v<decltype(&MetaClient::GetHostCacheState),
-                                          MetaClient&, const std::string&, QueryType,
-                                          const std::vector<int64_t>&, const std::vector<std::string>&,
-                                          int32_t, const std::vector<StorageType>&>) {
+                                          MetaClient&,
+                                          const std::string&,
+                                          QueryType,
+                                          const std::vector<int64_t>&,
+                                          const std::vector<std::string>&,
+                                          int32_t,
+                                          const std::vector<StorageType>&>) {
             EXPECT_CALL(*meta, GetHostCacheState(_, _, _, _, _)).Times(0);
-            EXPECT_CALL(*meta, GetHostCacheState("host-state", QueryType::QT_PREFIX_MATCH, keys, medium, 2,
-                                                 std::vector<StorageType>{StorageType::ST_EVENT_REPORT_L2}))
+            EXPECT_CALL(*meta,
+                        GetHostCacheState("host-state",
+                                          QueryType::QT_PREFIX_MATCH,
+                                          keys,
+                                          medium,
+                                          2,
+                                          std::vector<StorageType>{StorageType::ST_EVENT_REPORT_L2}))
                 .WillOnce(Return(std::make_pair(ER_OK, expected)))
                 .WillOnce(Return(std::make_pair(ER_INVALID_PARAMS, expected)));
         } else {
@@ -210,15 +219,14 @@ TEST(ClientWrapperTest, HostStatePreservesP2pSelectionAndSdkFailureWithPublicati
                 .WillOnce(Return(std::make_pair(ER_OK, expected)))
                 .WillOnce(Return(std::make_pair(ER_INVALID_PARAMS, expected)));
         }
-        auto [ok, hosts] = wrapper->getHostCacheState("", "host-state", QueryType::QT_PREFIX_MATCH,
-                                                     keys, medium, 2);
+        auto [ok, hosts] = wrapper->getHostCacheState("", "host-state", QueryType::QT_PREFIX_MATCH, keys, medium, 2);
         ASSERT_TRUE(ok);
         ASSERT_EQ(hosts.size(), expected.size());
         for (size_t i = 0; i < hosts.size(); ++i) {
             expectHostState(hosts[i], expected[i]);
         }
-        auto [failed, ignored] = wrapper->getHostCacheState("", "host-state", QueryType::QT_PREFIX_MATCH,
-                                                           keys, medium, 2);
+        auto [failed, ignored] =
+            wrapper->getHostCacheState("", "host-state", QueryType::QT_PREFIX_MATCH, keys, medium, 2);
         EXPECT_FALSE(failed);
         EXPECT_TRUE(ignored.empty());
         wrapper->shutdown();
@@ -1014,22 +1022,22 @@ TEST(ClientWrapperTest, ServiceInstanceFailureReRegistersAndRoutesTheNextRequest
 TEST(ClientWrapperTest, DisabledPublicationPreservesSdkCallAndTraceIdentity) {
     autil::EnvGuard disabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     using namespace kv_cache_manager;
-    unsigned char byte = 7;
-    RegistSpan span{&byte, 1};
-    InitObservation observation;
-    MockTransferClient* mock = nullptr;
-    auto client = initializeClient(
+    unsigned char       byte = 7;
+    RegistSpan          span{&byte, 1};
+    InitObservation     observation;
+    MockTransferClient* mock   = nullptr;
+    auto                client = initializeClient(
         false, "upstream_passthrough", span, observation, std::make_shared<int>(0), nullptr, nullptr, &mock);
     ASSERT_NE(client, nullptr);
     // Above both the new block/IOV chunk limits: ordinary SDK clients retain
     // their original call granularity and receive the caller's descriptors.
-    UriStrVec uris(300, "allocated_uri"), actual(300, "actual_uri");
+    UriStrVec    uris(300, "allocated_uri"), actual(300, "actual_uri");
     BlockBuffers buffers(300);
     for (auto& block : buffers)
         for (size_t j = 0; j < 4; ++j)
             block.iovs.push_back({MemoryType::CPU, &byte, 1, false});
-    auto trace = std::make_shared<TransferTraceInfo>();
-    trace->block_ids = uris;
+    auto trace          = std::make_shared<TransferTraceInfo>();
+    trace->block_ids    = uris;
     size_t observations = 0;
     client->setTransferObserver([&](bool, size_t, bool) { ++observations; });
     EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).WillOnce(Invoke([&](const auto& u, const auto& b, const auto& t) {
@@ -1048,8 +1056,7 @@ TEST(ClientWrapperTest, DisabledPublicationPreservesSdkCallAndTraceIdentity) {
         *static_cast<unsigned char*>(b[0].iovs[0].base) = 9;
         return ClientErrorCode::ER_SDK_TIMEOUT;
     }));
-    EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", actual, buffers, trace),
-              ClientErrorCode::ER_SDK_TIMEOUT);
+    EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", actual, buffers, trace), ClientErrorCode::ER_SDK_TIMEOUT);
     EXPECT_EQ(byte, 9u);
     EXPECT_EQ(buffers[0].iovs[0].size, 1u);
     EXPECT_CALL(*mock, SaveKvCaches(_, _, _))
@@ -1090,9 +1097,9 @@ TEST(ClientWrapperTest, BoundedSdkChunksPreserveUrisAndDestinationBytes) {
             target.back().iovs.push_back({MemoryType::CPU, destination.data() + i * 19 + j, 1, false});
         }
     }
-    auto trace = std::make_shared<TransferTraceInfo>();
+    auto trace        = std::make_shared<TransferTraceInfo>();
     trace->need_print = true;
-    trace->block_ids = uris;
+    trace->block_ids  = uris;
     size_t saved = 0, loaded = 0;
     EXPECT_CALL(*mock, SaveKvCaches(_, _, _))
         .Times(5)
@@ -1115,20 +1122,22 @@ TEST(ClientWrapperTest, BoundedSdkChunksPreserveUrisAndDestinationBytes) {
     ASSERT_EQ(written.first, ClientErrorCode::ER_OK);
     ASSERT_EQ(saved, 250u);
     ASSERT_EQ(written.second.size(), 250u);
-    EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).Times(5).WillRepeatedly(Invoke([&](const auto& u, auto& b, const auto& part_trace) {
-        EXPECT_NE(part_trace, nullptr);
-        EXPECT_EQ(part_trace->block_ids.size(), u.size());
-        for (size_t i = 0; i < u.size(); ++i)
-            EXPECT_EQ(part_trace->block_ids[i], uris[loaded + i]);
-        EXPECT_LE(u.size() * 19, 1024u);
-        for (size_t i = 0; i < u.size(); ++i) {
-            EXPECT_EQ(u[i], "actual_" + uris[loaded + i]);
-            for (size_t j = 0; j < 19; ++j)
-                *static_cast<unsigned char*>(b[i].iovs[j].base) = data[(loaded + i) * 19 + j];
-        }
-        loaded += u.size();
-        return ClientErrorCode::ER_OK;
-    }));
+    EXPECT_CALL(*mock, LoadKvCaches(_, _, _))
+        .Times(5)
+        .WillRepeatedly(Invoke([&](const auto& u, auto& b, const auto& part_trace) {
+            EXPECT_NE(part_trace, nullptr);
+            EXPECT_EQ(part_trace->block_ids.size(), u.size());
+            for (size_t i = 0; i < u.size(); ++i)
+                EXPECT_EQ(part_trace->block_ids[i], uris[loaded + i]);
+            EXPECT_LE(u.size() * 19, 1024u);
+            for (size_t i = 0; i < u.size(); ++i) {
+                EXPECT_EQ(u[i], "actual_" + uris[loaded + i]);
+                for (size_t j = 0; j < 19; ++j)
+                    *static_cast<unsigned char*>(b[i].iovs[j].base) = data[(loaded + i) * 19 + j];
+            }
+            loaded += u.size();
+            return ClientErrorCode::ER_OK;
+        }));
     ASSERT_EQ(client->loadKvCachesForTagWithStatus("default", written.second, target, trace), ClientErrorCode::ER_OK);
     EXPECT_EQ(loaded, 250u);
     EXPECT_EQ(data, destination);
@@ -1298,8 +1307,10 @@ TEST(ClientWrapperTest, FeatureOffDoesNotInstallAnInnerSdkObserver) {
 
 template<typename Code>
 std::vector<std::pair<Code, bool>> completionProofCases() {
-    std::vector<std::pair<Code, bool>> cases{{Code::ER_OK, true}, {Code::ER_INVALID_PARAMS, false},
-                                           {Code::ER_SDKREAD_ERROR, false}, {Code::ER_SDK_TIMEOUT, false}};
+    std::vector<std::pair<Code, bool>> cases{{Code::ER_OK, true},
+                                             {Code::ER_INVALID_PARAMS, false},
+                                             {Code::ER_SDKREAD_ERROR, false},
+                                             {Code::ER_SDK_TIMEOUT, false}};
     if constexpr (detail::HasExplicitBufferSafeCodes<Code>::value) {
         cases.emplace_back(Code::ER_SDK_TIMEOUT_BUFFER_SAFE, true);
         cases.emplace_back(Code::ER_SDK_ERROR_BUFFER_SAFE, true);
@@ -1349,16 +1360,16 @@ TEST(ClientWrapperTest, CompletionProofDistinguishesLocalRejectionFromActualSdkE
 TEST(ClientWrapperTest, ThrowingSdkMarksUnknownAndShutdownReleasesObserver) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     using namespace kv_cache_manager;
-    unsigned char byte = 7;
-    RegistSpan span{&byte, 1};
-    InitObservation observation;
+    unsigned char       byte = 7;
+    RegistSpan          span{&byte, 1};
+    InitObservation     observation;
     MockTransferClient* mock = nullptr;
-    auto client = initializeClient(
-        false, "throwing_sdk", span, observation, std::make_shared<int>(0), nullptr, nullptr, &mock);
+    auto                client =
+        initializeClient(false, "throwing_sdk", span, observation, std::make_shared<int>(0), nullptr, nullptr, &mock);
     ASSERT_NE(client, nullptr);
-    auto owner = std::make_shared<int>(0);
-    std::weak_ptr<int> alive = owner;
-    size_t unknown = 0;
+    auto               owner   = std::make_shared<int>(0);
+    std::weak_ptr<int> alive   = owner;
+    size_t             unknown = 0;
     client->setTransferObserver([owner, &unknown](bool read, size_t bytes, bool uncertain) {
         (void)owner;
         EXPECT_TRUE(read);

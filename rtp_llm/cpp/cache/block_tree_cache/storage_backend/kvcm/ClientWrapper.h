@@ -150,7 +150,7 @@ private:
     // Transfer I/O remains available while metadata clients are re-registering.
     // Shutdown takes this lock exclusively before destroying the pool transfer clients.
     std::shared_mutex transfer_mutex_;
-    TransferObserver transfer_observer_;
+    TransferObserver  transfer_observer_;
 
     // when slaver reaches 3, need reinitAllMetaClients
     std::atomic<int> grpc_error_count_{0};

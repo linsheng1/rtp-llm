@@ -1306,15 +1306,15 @@ public:
 
 class RtpLLMDecodePublicationEventMetricsCollector final {
 public:
-    const char* outcome{"failed"};
+    const char*            outcome{"failed"};
     std::optional<int64_t> eos_to_commit_us;
 };
 
 class RtpLLMDecodePublicationMetrics: public kmonitor::MetricsGroup {
 public:
-    bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags*, RtpLLMDecodePublicationStateMetricsCollector*);
-    void report(const kmonitor::MetricsTags*, RtpLLMDecodePublicationEventMetricsCollector*);
+    bool                     init(kmonitor::MetricsGroupManager* manager) override;
+    void                     report(const kmonitor::MetricsTags*, RtpLLMDecodePublicationStateMetricsCollector*);
+    void                     report(const kmonitor::MetricsTags*, RtpLLMDecodePublicationEventMetricsCollector*);
     kmonitor::MutableMetric* pending_bytes_metric{nullptr};
     kmonitor::MutableMetric* pending_jobs_metric{nullptr};
     kmonitor::MutableMetric* queued_jobs_metric{nullptr};
@@ -1327,6 +1327,7 @@ public:
     kmonitor::MutableMetric* budget_skip_qps_metric{nullptr};
     kmonitor::MutableMetric* eos_latency_bucket_qps_metric{nullptr};
     kmonitor::MutableMetric* eos_latency_sum_us_qps_metric{nullptr};
+
 private:
     AUTIL_LOG_DECLARE();
 };
@@ -1358,23 +1359,25 @@ class RtpLLMDecodeCacheTokenMetricsCollector final {
 public:
     const char* stage{"restored"};
     const char* tier{"REMOTE"};
-    int64_t logical_tokens{0};
+    int64_t     logical_tokens{0};
 };
 
 class RtpLLMDecodeCacheTokenMetrics: public kmonitor::MetricsGroup {
 public:
-    bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags*, RtpLLMDecodeCacheTokenMetricsCollector*);
+    bool                     init(kmonitor::MetricsGroupManager* manager) override;
+    void                     report(const kmonitor::MetricsTags*, RtpLLMDecodeCacheTokenMetricsCollector*);
     kmonitor::MutableMetric* logical_tokens_qps_metric{nullptr};
+
 private:
     AUTIL_LOG_DECLARE();
 };
 
 class RtpLLMRemoteCacheOutcomeMetrics: public kmonitor::MetricsGroup {
 public:
-    bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags*, RtpLLMRemoteCacheOutcomeMetricsCollector*);
+    bool                     init(kmonitor::MetricsGroupManager* manager) override;
+    void                     report(const kmonitor::MetricsTags*, RtpLLMRemoteCacheOutcomeMetricsCollector*);
     kmonitor::MutableMetric* outcome_qps_metric{nullptr};
+
 private:
     AUTIL_LOG_DECLARE();
 };
@@ -1410,15 +1413,16 @@ public:
 class RtpLLMRemoteCachePayloadMetricsCollector final {
 public:
     int64_t completed_payload_bytes{0};
-    bool completion_unknown{false};
+    bool    completion_unknown{false};
 };
 
 class RtpLLMRemoteCachePayloadMetrics: public kmonitor::MetricsGroup {
 public:
-    bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags*, RtpLLMRemoteCachePayloadMetricsCollector*);
+    bool                     init(kmonitor::MetricsGroupManager* manager) override;
+    void                     report(const kmonitor::MetricsTags*, RtpLLMRemoteCachePayloadMetricsCollector*);
     kmonitor::MutableMetric* completed_payload_bytes_qps_metric{nullptr};
     kmonitor::MutableMetric* completion_unknown_qps_metric{nullptr};
+
 private:
     AUTIL_LOG_DECLARE();
 };

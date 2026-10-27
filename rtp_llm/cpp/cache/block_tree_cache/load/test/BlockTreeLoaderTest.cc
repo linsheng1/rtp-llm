@@ -39,10 +39,10 @@ TEST(BlockTreeLoaderTest, LocalOnlyCompletionNeverFabricatesRemoteTiming) {
         auto            coordinator = std::make_shared<LoadContextCoordinator>(
             [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, LoadContextCoordinator::AbortCallback{});
         auto context = coordinator->create({}, {}, 0);
-        auto origin = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".4.0.8.8.9");
+        auto origin  = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".4.0.8.8.9");
         ASSERT_TRUE(origin);
-        auto sources = std::make_shared<const DecodeReuseSources>(DecodeReuseSources{
-            {std::make_shared<const DecodeCacheOrigin>(*origin), Tier::DEVICE}});
+        auto sources = std::make_shared<const DecodeReuseSources>(
+            DecodeReuseSources{{std::make_shared<const DecodeCacheOrigin>(*origin), Tier::DEVICE}});
         context->setLocalDecodeSources(sources);
         EXPECT_FALSE(context->decodeSources());
         ASSERT_TRUE(coordinator->registerContext(context));
@@ -58,38 +58,42 @@ TEST(BlockTreeLoaderTest, DeviceHotOriginsRequirePhysicalRequiredMemberConsensus
         GTEST_SKIP() << "CUDA not available";
     }
     for (const bool enabled : {false, true}) {
-        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        autil::EnvGuard           feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
         FullSWAEnvironmentOptions options;
         options.path_length = 1;
         options.enable_disk = false;
-        auto environment = FullSWAEnvironment::create(options);
+        auto environment    = FullSWAEnvironment::create(options);
         ASSERT_NE(environment, nullptr);
         environment->insertRequestPath();
         environment->releaseRequestRefs();
         const auto resources = environment->resourcesForPathNode(0);
-        const auto unit = environment->groups.front()->group(environment->groups.front()->groupTags().front())
-                              .cacheKeyTokenStride();
-        auto origin = std::make_shared<const DecodeCacheOrigin>(DecodeCacheOrigin{
-            std::string(32, 'a'), 0, 0, static_cast<int64_t>(unit), static_cast<int64_t>(unit),
-            static_cast<int64_t>(unit + 1)});
+        const auto unit =
+            environment->groups.front()->group(environment->groups.front()->groupTags().front()).cacheKeyTokenStride();
+        auto origin = std::make_shared<const DecodeCacheOrigin>(DecodeCacheOrigin{std::string(32, 'a'),
+                                                                                  0,
+                                                                                  0,
+                                                                                  static_cast<int64_t>(unit),
+                                                                                  static_cast<int64_t>(unit),
+                                                                                  static_cast<int64_t>(unit + 1)});
         for (size_t group_id = 0; group_id < environment->groups.size(); ++group_id) {
             const auto& group = environment->groups[group_id];
             for (size_t member = 0; member < group->groupTags().size(); ++member) {
-                const auto& pool = group->devicePools()[member];
-                const auto block = resources[group_id].device_blocks[member];
+                const auto& pool  = group->devicePools()[member];
+                const auto  block = resources[group_id].device_blocks[member];
                 ASSERT_TRUE(pool->enableDecodeOriginTracking());
-                ASSERT_TRUE(pool->bindDecodeOrigin(block, pool->decodeOriginIncarnation(block),
-                                                   group->groupTags()[member], origin));
+                ASSERT_TRUE(pool->bindDecodeOrigin(
+                    block, pool->decodeOriginIncarnation(block), group->groupTags()[member], origin));
             }
         }
         for (const bool consensus : {true, false}) {
             if (!consensus) {
                 const auto& group = environment->groups.back();
-                const auto& pool = group->devicePools().front();
-                const auto block = resources.back().device_blocks.front();
-                auto other = *origin;
-                other.session = std::string(32, 'b');
-                ASSERT_TRUE(pool->bindDecodeOrigin(block, pool->decodeOriginIncarnation(block),
+                const auto& pool  = group->devicePools().front();
+                const auto  block = resources.back().device_blocks.front();
+                auto        other = *origin;
+                other.session     = std::string(32, 'b');
+                ASSERT_TRUE(pool->bindDecodeOrigin(block,
+                                                   pool->decodeOriginIncarnation(block),
                                                    group->groupTags().front(),
                                                    std::make_shared<const DecodeCacheOrigin>(other)));
             }

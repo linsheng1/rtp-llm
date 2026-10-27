@@ -17,29 +17,29 @@ namespace rtp_llm {
 // offsets are exclusive computed-KV ends, never sampled-token ownership.
 struct DecodeCacheOrigin {
     std::string session;
-    int64_t handoff_end{0}, begin{0}, end{0}, computed_end{0}, sampled_end{0};
+    int64_t     handoff_end{0}, begin{0}, end{0}, computed_end{0}, sampled_end{0};
 
     static std::optional<DecodeCacheOrigin> parse(std::string_view value) {
         if (value.size() > 140 || value.substr(0, 3) != "v1.")
             return std::nullopt;
         std::array<std::string_view, 6> fields;
-        size_t offset = 3;
+        size_t                          offset = 3;
         for (size_t i = 0; i < fields.size(); ++i) {
             const auto next = value.find('.', offset);
             if ((i + 1 == fields.size()) != (next == std::string_view::npos))
                 return std::nullopt;
             const auto end = next == std::string_view::npos ? value.size() : next;
-            fields[i] = value.substr(offset, end - offset);
-            offset = end + 1;
+            fields[i]      = value.substr(offset, end - offset);
+            offset         = end + 1;
         }
         if (fields[0].size() != 32)
             return std::nullopt;
         for (const char c : fields[0])
             if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')))
                 return std::nullopt;
-        DecodeCacheOrigin result;
-        std::array<int64_t*, 5> output{&result.handoff_end, &result.begin, &result.end, &result.computed_end,
-                                       &result.sampled_end};
+        DecodeCacheOrigin       result;
+        std::array<int64_t*, 5> output{
+            &result.handoff_end, &result.begin, &result.end, &result.computed_end, &result.sampled_end};
         for (size_t i = 0; i < output.size(); ++i) {
             const auto field = fields[i + 1];
             if (field.empty() || field.front() < '0' || field.front() > '9'
@@ -80,16 +80,18 @@ inline std::optional<std::map<std::string, std::string>> queryFields(std::string
     if (uri.empty() || uri.size() > 16384 || uri.find('#') != std::string_view::npos)
         return std::nullopt;
     std::map<std::string, std::string> result;
-    const auto question = uri.find('?');
-    size_t begin = question == std::string_view::npos ? uri.size() : question + 1;
+    const auto                         question = uri.find('?');
+    size_t                             begin    = question == std::string_view::npos ? uri.size() : question + 1;
     while (begin < uri.size()) {
         auto end = uri.find('&', begin);
         if (end == std::string_view::npos)
             end = uri.size();
         const auto equal = uri.find('=', begin);
         if (equal == std::string_view::npos || equal >= end || equal == begin
-            || !result.emplace(std::string(uri.substr(begin, equal - begin)),
-                               std::string(uri.substr(equal + 1, end - equal - 1))).second)
+            || !result
+                    .emplace(std::string(uri.substr(begin, equal - begin)),
+                             std::string(uri.substr(equal + 1, end - equal - 1)))
+                    .second)
             return std::nullopt;
         begin = end + 1;
     }
@@ -108,12 +110,12 @@ inline std::optional<DecodeCacheOrigin> decodeCacheOriginFromUri(std::string_vie
 // Preserve every original query value. The Manager independently verifies that
 // this is its exact allocation, not a writer-selected address or changed core.
 inline std::optional<std::string> attachDecodeCacheOrigin(std::string_view uri, const DecodeCacheOrigin& origin) {
-    auto fields = decode_origin_detail::queryFields(uri);
-    const auto value = origin.encode();
+    auto       fields = decode_origin_detail::queryFields(uri);
+    const auto value  = origin.encode();
     if (!fields || !value || !fields->emplace("dtop_origin", *value).second)
         return std::nullopt;
     std::string result(uri.substr(0, uri.find('?')));
-    char separator = '?';
+    char        separator = '?';
     for (const auto& [key, data] : *fields) {
         result += separator;
         result += key + "=" + data;

@@ -34,8 +34,8 @@ std::optional<DecodePublicationLimits> remoteCacheDecodePublicationLimits(size_t
         for (const char* p = value; *p; ++p)
             if (*p < '0' || *p > '9')
                 return std::nullopt;
-        errno = 0;
-        char* end = nullptr;
+        errno             = 0;
+        char*      end    = nullptr;
         const auto parsed = std::strtoull(value, &end, 10);
         if (errno == ERANGE || *end || parsed == 0 || parsed > maximum)
             return std::nullopt;
@@ -45,7 +45,7 @@ std::optional<DecodePublicationLimits> remoteCacheDecodePublicationLimits(size_t
     limits.bytes = std::max<size_t>(1, std::min<size_t>(native_pool_bytes / 8, 4ULL * 1024 * 1024 * 1024));
     // Preserve sub-MiB budgets for small native test pools. Only explicit
     // overrides are expressed in MiB; deriving the default must not round up.
-    auto mib = positive("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB", 1, 16384);
+    auto mib  = positive("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB", 1, 16384);
     auto jobs = positive("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS", limits.jobs, 64);
     if (!mib || !jobs)
         return std::nullopt;

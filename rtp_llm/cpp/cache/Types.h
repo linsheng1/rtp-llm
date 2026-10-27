@@ -117,7 +117,7 @@ struct MallocResult {
     MallocStatus status             = MallocStatus::INTERNAL_ERROR;
 
     std::shared_ptr<AsyncContext> async_context = nullptr;
-    DecodeReuseSourcesPtr decode_sources;
+    DecodeReuseSourcesPtr         decode_sources;
 
     // Lower-tier reuse is published only after async_context completes.
 

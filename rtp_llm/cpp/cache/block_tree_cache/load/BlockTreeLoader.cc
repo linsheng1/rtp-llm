@@ -53,41 +53,40 @@ DecodeReuseSourcesPtr BlockTreeLoader::snapshotDecodeSources(const std::vector<T
     if (!track_decode_origins_ || prefix == 0 || prefix > path.size() || tree_->groupSets().empty())
         return {};
     try {
-        auto sources = std::make_shared<DecodeReuseSources>();
-        const auto& first = tree_->groupSets().front();
-        const size_t unit = first->group(first->groupTags().front()).cacheKeyTokenStride();
+        auto         sources = std::make_shared<DecodeReuseSources>();
+        const auto&  first   = tree_->groupSets().front();
+        const size_t unit    = first->group(first->groupTags().front()).cacheKeyTokenStride();
         if (unit == 0 || prefix > static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / unit)
             return {};
         for (size_t key = 0; key < prefix; ++key) {
             PhysicalDecodeOrigins::Origin agreed;
-            bool known = true;
-            Tier source_tier = Tier::DEVICE;
+            bool                          known       = true;
+            Tier                          source_tier = Tier::DEVICE;
             for (size_t group_id = 0; group_id < tree_->groupSets().size() && known; ++group_id) {
                 const auto& group = tree_->groupSets()[group_id];
                 if (prefix - key > group->computeReuseBlockCount(prefix))
                     continue;
                 const auto& value = path[key]->group_set_resources[group_id];
-                const auto tier = value.getTopTier();
-                source_tier = std::max(source_tier, tier);
+                const auto  tier  = value.getTopTier();
+                source_tier       = std::max(source_tier, tier);
                 for (size_t member = 0; member < group->groupTags().size(); ++member) {
                     std::shared_ptr<IBlockPool> pool;
-                    BlockIdxType block = NULL_BLOCK_IDX;
+                    BlockIdxType                block = NULL_BLOCK_IDX;
                     if (tier == Tier::DEVICE && member < value.device_blocks.size()) {
-                        pool = group->devicePools()[member];
+                        pool  = group->devicePools()[member];
                         block = value.device_blocks[member];
                     } else if (tier == Tier::HOST) {
-                        pool = group->hostPool();
+                        pool  = group->hostPool();
                         block = value.host_block;
                     } else if (tier == Tier::DISK) {
-                        pool = group->diskPool();
+                        pool  = group->diskPool();
                         block = value.disk_block;
                     }
-                    const auto source = pool && !isNullBlockIdx(block)
-                                            ? pool->decodeOrigin(block, group->groupTags()[member])
-                                            : PhysicalDecodeOrigins::Origin{};
+                    const auto source = pool && !isNullBlockIdx(block) ?
+                                            pool->decodeOrigin(block, group->groupTags()[member]) :
+                                            PhysicalDecodeOrigins::Origin{};
                     if (!source || source->begin != static_cast<int64_t>(key * unit)
-                        || source->end != static_cast<int64_t>((key + 1) * unit)
-                        || (agreed && !(*agreed == *source))) {
+                        || source->end != static_cast<int64_t>((key + 1) * unit) || (agreed && !(*agreed == *source))) {
                         known = false;
                         break;
                     }

@@ -1242,9 +1242,9 @@ TEST_F(StreamCacheResourceTest, RemoteTimeoutAllocationRetryKeepsLocalLookupAndS
         initCacheKeys(resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), 2);
         auto cache = cache_manager_->block_tree_cache_;
         ASSERT_EQ(cache->groupSets().size(), 1u);
-        const auto group_id = cache->groupSets().front()->groupSetId();
+        const auto group_id   = cache->groupSets().front()->groupSetId();
         const auto prefix_key = resource.batch_kv_cache_resource_->cacheKeys(0).front();
-        const auto prefix = cache->tree()->findNode({prefix_key});
+        const auto prefix     = cache->tree()->findNode({prefix_key});
         ASSERT_EQ(prefix.size(), 1u);
         ASSERT_TRUE(prefix.back()->group_set_resources[group_id].hasTier(Tier::HOST));
         // The helper seeds the tree directly. Register its HOST candidate as
@@ -1282,11 +1282,11 @@ TEST_F(StreamCacheResourceTest, RemoteTimeoutAllocationRetryKeepsLocalLookupAndS
                 EXPECT_FALSE(dropped);
             }
         }
-        const auto remaining = cache->tree()->findNode({prefix_key});
+        const auto remaining              = cache->tree()->findNode({prefix_key});
         const bool local_prefix_available = !remaining.empty()
-            && (remaining.back()->group_set_resources[group_id].hasTier(Tier::DEVICE)
-                || remaining.back()->group_set_resources[group_id].hasTier(Tier::HOST)
-                || remaining.back()->group_set_resources[group_id].hasTier(Tier::DISK));
+                                            && (remaining.back()->group_set_resources[group_id].hasTier(Tier::DEVICE)
+                                                || remaining.back()->group_set_resources[group_id].hasTier(Tier::HOST)
+                                                || remaining.back()->group_set_resources[group_id].hasTier(Tier::DISK));
         ASSERT_EQ(local_prefix_available, resident);
         pool->decRef(*held);
         release_held.dismiss();

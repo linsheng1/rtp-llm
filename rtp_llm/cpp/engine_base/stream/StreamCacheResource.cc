@@ -124,8 +124,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               stream_->streamId(),
                               total_blocks,
                               tierName(target_tier));
-            if (remoteCacheDecodePublicationEnabled()
-                && resource_context_.role_type == RoleType::DECODE
+            if (remoteCacheDecodePublicationEnabled() && resource_context_.role_type == RoleType::DECODE
                 && !autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false)
                 && stream_->completeTokenIdsPtr()->seqLength() > 0) {
                 (void)resource_context_.cache_manager->captureCompletedDecode(
@@ -268,8 +267,7 @@ void StreamCacheResource::adoptDecodeReuse(DecodeReuseSourcesPtr sources, int64_
         decode_reuse_use_state_.adopt(std::move(sources), adopted_end);
 }
 
-void StreamCacheResource::reportDecodeCacheUse(
-    std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at) {
+void StreamCacheResource::reportDecodeCacheUse(std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at) {
     if (resource_context_.role_type != RoleType::PREFILL || !stream_->metrics_reporter_ || !gpu_ready_at)
         return;
     try {
@@ -280,13 +278,13 @@ void StreamCacheResource::reportDecodeCacheUse(
             if (counts->by_tier[tier] <= 0)
                 continue;
             RtpLLMDecodeCacheTokenMetricsCollector collector;
-            collector.stage = "used";
-            collector.tier = tierName(static_cast<Tier>(tier));
+            collector.stage          = "used";
+            collector.tier           = tierName(static_cast<Tier>(tier));
             collector.logical_tokens = counts->by_tier[tier];
             stream_->metrics_reporter_->report<RtpLLMDecodeCacheTokenMetrics>(nullptr, &collector);
         }
         RtpLLMRemoteCacheOutcomeMetricsCollector outcome;
-        outcome.stage = "use";
+        outcome.stage   = "use";
         outcome.outcome = counts->total() > 0 ? "used" : "no_decode_interval";
         stream_->metrics_reporter_->report<RtpLLMRemoteCacheOutcomeMetrics>(nullptr, &outcome);
     } catch (const std::bad_alloc&) {

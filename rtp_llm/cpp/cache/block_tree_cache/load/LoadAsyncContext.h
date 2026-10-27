@@ -89,8 +89,8 @@ public:
     bool         localLoadSucceeded() const;
     bool         backendTimedOut() const;
     std::optional<RemoteRestoreTiming> remoteRestoreTiming() const;
-    void setLocalDecodeSources(DecodeReuseSourcesPtr sources);
-    DecodeReuseSourcesPtr decodeSources(bool local_only = false) const;
+    void                               setLocalDecodeSources(DecodeReuseSourcesPtr sources);
+    DecodeReuseSourcesPtr              decodeSources(bool local_only = false) const;
     bool         settle(bool success);
     bool         onTaskFail();
     void         waitDone() override;
@@ -104,7 +104,7 @@ private:
     void markAborted();
     void rebuildMatchedBlocksByTier();
     void onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success);
-    void onBackendRead(ErrorInfo error, DecodeReuseSourcesPtr sources = {});
+    void      onBackendRead(ErrorInfo error, DecodeReuseSourcesPtr sources = {});
     void failBeforeCommit();
     void failCommit();
     void finishIfReadyLocked(bool& notify, SettlementReadyCallback& settlement_ready_callback);
@@ -149,8 +149,8 @@ private:
     const bool                                            track_remote_restore_{false};
     std::optional<RemoteRestoreTiming::Clock::time_point> remote_read_started_at_;
     std::optional<RemoteRestoreTiming::Clock::time_point> remote_gpu_ready_at_;
-    DecodeReuseSourcesPtr local_decode_sources_;
-    DecodeReuseSourcesPtr remote_decode_sources_;
+    DecodeReuseSourcesPtr                                 local_decode_sources_;
+    DecodeReuseSourcesPtr                                 remote_decode_sources_;
     SettlementReadyCallback   settlement_ready_callback_;
     std::vector<DoneCallback> callbacks_;
 

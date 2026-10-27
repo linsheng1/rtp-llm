@@ -110,7 +110,7 @@ CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
 }
 
 void CacheStoreAsyncWriter::shutdown() {
-    std::lock_guard<std::mutex> shutdown_lock(shutdown_mutex_);
+    std::lock_guard<std::mutex>           shutdown_lock(shutdown_mutex_);
     bool                                  unfinished = false;
     std::shared_ptr<StoreCompletionState> active_completion_state;
     std::shared_ptr<StoreCompletionState> finished_completion_state;
@@ -122,7 +122,7 @@ void CacheStoreAsyncWriter::shutdown() {
         unfinished                = state_ != State::IDLE || finished_store_completion_state_ != nullptr;
         active_completion_state   = active_store_completion_state_;
         finished_completion_state = finished_store_completion_state_;
-        state_ = State::CLOSED;
+        state_                    = State::CLOSED;
     }
     if (unfinished) {
         RTP_LLM_LOG_WARNING("CacheStoreAsyncWriter destroyed with unfinished cache-store work - "

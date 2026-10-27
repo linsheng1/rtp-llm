@@ -27,11 +27,13 @@ protected:
     }
     void initialize(const kmonitor::MetricsReporterPtr& reporter) {
         std::vector<std::string> vocab;
-        for (int i = 0; i < 128; ++i) { vocab.emplace_back(1, static_cast<char>(i)); }
+        for (int i = 0; i < 128; ++i) {
+            vocab.emplace_back(1, static_cast<char>(i));
+        }
         GrammarConfig grammar;
         grammar.num_workers = 2;
-        grammar.tokenizer_info_json = xgrammar::TokenizerInfo(
-            vocab, xgrammar::VocabType::RAW, 128, std::vector<int32_t>{0}).SerializeJSON();
+        grammar.tokenizer_info_json =
+            xgrammar::TokenizerInfo(vocab, xgrammar::VocabType::RAW, 128, std::vector<int32_t>{0}).SerializeJSON();
         LogitsProcessorFactory::init(ModelConfig{}, grammar, "", reporter);
     }
 };

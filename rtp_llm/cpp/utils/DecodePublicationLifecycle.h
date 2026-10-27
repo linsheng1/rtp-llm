@@ -15,7 +15,9 @@ public:
         if (!eos_at_)
             eos_at_ = at;
     }
-    const std::optional<Clock::time_point>& eosAt() const { return eos_at_; }
+    const std::optional<Clock::time_point>& eosAt() const {
+        return eos_at_;
+    }
     // Set by the validated P-to-D handoff, never inferred from D's input length.
     bool recordPrefillComputedEnd(int64_t end) const {
         if (end < 0 || (prefill_computed_end_ && *prefill_computed_end_ != end)) {
@@ -42,7 +44,7 @@ public:
 private:
     mutable std::optional<Clock::time_point> eos_at_;
     mutable std::optional<int64_t>           prefill_computed_end_;
-    mutable bool budget_skip_reported_{false};
+    mutable bool                             budget_skip_reported_{false};
 };
 
 }  // namespace rtp_llm

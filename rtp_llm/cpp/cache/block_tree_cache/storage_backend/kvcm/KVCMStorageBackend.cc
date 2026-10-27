@@ -322,7 +322,7 @@ public:
             client_wrapper_->setTransferObserver([reporter](bool read, size_t bytes, bool unknown) {
                 RtpLLMRemoteCachePayloadMetricsCollector collector;
                 collector.completed_payload_bytes = static_cast<int64_t>(bytes);
-                collector.completion_unknown = unknown;
+                collector.completion_unknown      = unknown;
                 static const kmonitor::MetricsTags read_tags("mode", "read");
                 static const kmonitor::MetricsTags write_tags("mode", "write");
                 reporter->report<RtpLLMRemoteCachePayloadMetrics, RtpLLMRemoteCachePayloadMetricsCollector>(
@@ -359,14 +359,14 @@ public:
             return {request.local_matched_blocks_num, nullptr};
         }
         RtpLLMRemoteCacheMatchMetricsCollector collector;
-        const char* lookup_outcome = "failed";
+        const char*                            lookup_outcome = "failed";
         const auto                            start = Clock::now();
         block_tree_cache_detail::ScopeRollback report([&] {
             collector.remote_match_time_us = elapsedTimeUs(start);
             reportRemoteMetrics<RtpLLMRemoteCacheMatchMetrics>(collector);
             if (decode_publication_enabled_) {
                 RtpLLMRemoteCacheOutcomeMetricsCollector result;
-                result.stage = "lookup";
+                result.stage   = "lookup";
                 result.outcome = lookup_outcome;
                 reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(result);
             }
@@ -400,9 +400,8 @@ public:
             return {request.local_matched_blocks_num, nullptr};
         }
         if (decode_publication_enabled_) {
-            const bool found_any = std::any_of(locations.begin(), locations.end(), [](const auto& row) {
-                return !row.empty();
-            });
+            const bool found_any =
+                std::any_of(locations.begin(), locations.end(), [](const auto& row) { return !row.empty(); });
             lookup_outcome = found_any ? "found_unusable" : "not_found";
         }
         if (positional) {
@@ -444,14 +443,14 @@ public:
                                 "KVCM metadata read must run on tp rank 0, got %ld",
                                 parallelism_config_.tp_rank);
         RtpLLMRemoteCacheReadMetricsCollector collector;
-        const char* read_outcome = "failed";
+        const char*                            read_outcome = "failed";
         const auto                           start = Clock::now();
         block_tree_cache_detail::ScopeRollback report([&] {
             collector.remote_read_task_cost_time_us = elapsedTimeUs(start);
             reportRemoteMetrics<RtpLLMRemoteCacheReadMetrics>(collector);
             if (decode_publication_enabled_) {
                 RtpLLMRemoteCacheOutcomeMetricsCollector result;
-                result.stage = "read";
+                result.stage   = "read";
                 result.outcome = read_outcome;
                 reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(result);
             }
@@ -482,17 +481,17 @@ public:
         const std::string              trace_id  = nextTraceId("read", read_trace_sequence_);
         initializeRequests(requests, REMOTE_OPERATION_READ, trace_id);
         struct OriginBinding {
-            size_t key;
-            DeviceBlockPoolPtr pool;
-            BlockIdxType block;
-            uint64_t incarnation;
-            std::string tag;
+            size_t                        key;
+            DeviceBlockPoolPtr            pool;
+            BlockIdxType                  block;
+            uint64_t                      incarnation;
+            std::string                   tag;
             PhysicalDecodeOrigins::Origin origin;
         };
         std::vector<OriginBinding> origin_bindings;
-        const bool track_origins = decode_publication_enabled_ && parallelism_config_.role_type == RoleType::PREFILL;
-        bool collect_bindings = track_origins;
-        size_t validated_source_keys = 0;
+        const bool track_origins    = decode_publication_enabled_ && parallelism_config_.role_type == RoleType::PREFILL;
+        bool       collect_bindings = track_origins;
+        size_t     validated_source_keys = 0;
         if (collect_bindings) {
             try {
                 size_t count = 0;
@@ -532,16 +531,16 @@ public:
                 remote->add_block_ids(handle->block);
                 remote->add_uris(std::string(location_spec.uri));
                 if (track_origins && info->second.tp_rank == parallelism_config_.tp_rank) {
-                    const auto& pool = pools_by_tag_.at(info->second.tag);
-                    const auto incarnation = pool->decodeOriginIncarnation(handle->block);
+                    const auto& pool        = pools_by_tag_.at(info->second.tag);
+                    const auto  incarnation = pool->decodeOriginIncarnation(handle->block);
                     // A destination overwrite must not retain its previous
                     // source, including a legacy or failed remote read. This
                     // does not invalidate siblings sharing the physical page.
                     pool->bindDecodeOrigin(handle->block, incarnation, info->second.tag, nullptr);
                     if (origin && incarnation != 0) {
                         try {
-                            origin_bindings.push_back({key_idx, pool, handle->block, incarnation,
-                                                       info->second.tag, origin});
+                            origin_bindings.push_back(
+                                {key_idx, pool, handle->block, incarnation, info->second.tag, origin});
                         } catch (const std::bad_alloc&) {
                             origin_bindings.clear();
                             collect_bindings = false;
@@ -555,7 +554,7 @@ public:
         // StorageBackend's task still owns the destination pins here. Publish
         // provenance only after every required rank has completed its actual
         // GPU read. A stale bind can never clear a newer allocation's source.
-        size_t bound_regions = 0;
+        size_t                              bound_regions = 0;
         std::shared_ptr<DecodeReuseSources> restored_sources;
         if (track_origins && collect_bindings) {
             try {
@@ -586,18 +585,21 @@ public:
             }
             begin = end;
         }
-        meta->decode_sources = restored_sources && !restored_sources->empty()
-                                   ? std::move(restored_sources) : DecodeReuseSourcesPtr{};
+        meta->decode_sources =
+            restored_sources && !restored_sources->empty() ? std::move(restored_sources) : DecodeReuseSourcesPtr{};
         if (meta->decode_sources) {
             try {
                 const auto unit = topology_->groups().front().cacheKeyTokenStride();
-                const auto adopted_end = unit != 0
-                    && request.handles.size() <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / unit
-                        ? static_cast<int64_t>(request.handles.size() * unit) : int64_t{0};
+                const auto adopted_end =
+                    unit != 0
+                            && request.handles.size()
+                                   <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / unit ?
+                        static_cast<int64_t>(request.handles.size() * unit) :
+                        int64_t{0};
                 const auto counts = countDecodeReuse(*meta->decode_sources, adopted_end);
                 if (counts.total() > 0) {
                     RtpLLMDecodeCacheTokenMetricsCollector restored;
-                    restored.stage = "restored";
+                    restored.stage          = "restored";
                     restored.logical_tokens = counts.total();
                     reportRemoteMetrics<RtpLLMDecodeCacheTokenMetrics>(restored);
                 }
@@ -608,9 +610,8 @@ public:
         if (track_origins) {
             RtpLLMRemoteCacheOutcomeMetricsCollector source_result;
             source_result.stage = "read_source";
-            source_result.outcome = collect_bindings && validated_source_keys == remote_blocks
-                                        ? "validated"
-                                        : "unknown_or_invalid";
+            source_result.outcome =
+                collect_bindings && validated_source_keys == remote_blocks ? "validated" : "unknown_or_invalid";
             reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(source_result);
             RTP_LLM_LOG_INFO("DTOP_GPU read_source_bound_regions=%zu source_counts=awaiting_allocator_adoption",
                              bound_regions);
@@ -620,7 +621,7 @@ public:
         collector.remote_read_token_num =
             static_cast<int64_t>(remote_blocks * topology_->groups().front().cacheKeyTokenStride());
         collector.remote_read_fail_qps = false;
-        read_outcome = "read_complete";
+        read_outcome                   = "read_complete";
     }
 
     void write(const StorageRequest& request) {
@@ -726,10 +727,9 @@ public:
             }
 
             const auto responses = [&] {
-                const auto stage_start = Clock::now();
-                block_tree_cache_detail::ScopeRollback timer([&] {
-                    collector.remote_write_broadcast_time_us = elapsedTimeUs(stage_start);
-                });
+                const auto                             stage_start = Clock::now();
+                block_tree_cache_detail::ScopeRollback timer(
+                    [&] { collector.remote_write_broadcast_time_us = elapsedTimeUs(stage_start); });
                 transfer_attempted = true;
                 return request.decode_completion ?
                            transferCompletedDecode(requests) :
@@ -752,10 +752,14 @@ public:
             std::optional<kvcm::DtopOriginMetadata> source_metadata;
             if (request.decode_completion && request.prefill_computed_tokens) {
                 try {
-                    source_metadata = kvcm::makeDtopOriginMetadata(
-                        write_location.locations, write_location.write_session_id, key_indices,
-                        static_cast<size_t>(cache_config_.seq_size_per_block) * target_physical_shards_,
-                        request.published_tokens, request.computed_tokens, *request.prefill_computed_tokens);
+                    source_metadata = kvcm::makeDtopOriginMetadata(write_location.locations,
+                                                                   write_location.write_session_id,
+                                                                   key_indices,
+                                                                   static_cast<size_t>(cache_config_.seq_size_per_block)
+                                                                       * target_physical_shards_,
+                                                                   request.published_tokens,
+                                                                   request.computed_tokens,
+                                                                   *request.prefill_computed_tokens);
                 } catch (const std::bad_alloc&) {
                     // Source attribution is optional metadata. A completed GPU
                     // payload must not fail because its source could not be stored.
@@ -764,7 +768,8 @@ public:
                     RTP_LLM_LOG_WARNING("DTOP source metadata unavailable; retaining ordinary payload publication");
             }
             const auto& actual_locations = source_metadata ? source_metadata->locations :
-                                           has_actual_uri ? write_location.locations : empty_locations;
+                                           has_actual_uri  ? write_location.locations :
+                                                             empty_locations;
             finish_attempted             = true;
             {
                 const auto                             stage_start = Clock::now();
@@ -780,8 +785,8 @@ public:
             }
             collector.remote_write_cache_block_num = static_cast<int64_t>(write_location.locations.size());
             collector.remote_write_fail_qps        = false;
-            if (const auto lease = std::dynamic_pointer_cast<kvcm::DecodePublicationAccounting::Lease>(
-                    request.completion_admission))
+            if (const auto lease =
+                    std::dynamic_pointer_cast<kvcm::DecodePublicationAccounting::Lease>(request.completion_admission))
                 lease->recordOutcome("committed", /*acknowledged=*/true);
             if (request.decode_completion) {
                 // An older Manager ignores actual_locations. An ACK proves the
@@ -812,10 +817,11 @@ public:
                 // touching the remote allocation. Do not explicitly recycle
                 // that allocation without an independent destination fence.
                 // The Manager lease/expiry contract remains separate.
-                RTP_LLM_LOG_WARNING("KVCM remote destination completion unproven; retaining pending session [%s] without abort",
-                                    write_location.write_session_id.c_str());
+                RTP_LLM_LOG_WARNING(
+                    "KVCM remote destination completion unproven; retaining pending session [%s] without abort",
+                    write_location.write_session_id.c_str());
                 RtpLLMRemoteCacheOutcomeMetricsCollector allocation_result;
-                allocation_result.stage = "write_allocation";
+                allocation_result.stage   = "write_allocation";
                 allocation_result.outcome = "retained_unproven";
                 reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(allocation_result);
             } else if (!finish_attempted) {
@@ -957,8 +963,7 @@ private:
     }
 
     static bool isPayloadBackend(int type) {
-        return type == 1 || type == 2 || type == 3 || type == 4 || type == 5
-               || type == 9;
+        return type == 1 || type == 2 || type == 3 || type == 4 || type == 5 || type == 9;
     }
 
     kv_cache_manager::Locations selectBackendLocations(const kv_cache_manager::BackendLocations& result) const {
@@ -1104,12 +1109,14 @@ private:
         auto infos  = std::make_shared<kvcm::KVCMConfig::LocationSpecInfoMap>();
         auto groups = std::make_shared<kvcm::KVCMConfig::LocationSpecGroups>();
         RTP_LLM_CHECK_WITH_INFO(
-            group_policy_->buildLocationSpecGroups(decode_publication_enabled_ ? target_prefill_tp_ : static_cast<int>(parallelism_config_.tp_size),
-                                                    *groups,
-                                                    runtime_config_.model_name),
+            group_policy_->buildLocationSpecGroups(
+                decode_publication_enabled_ ? target_prefill_tp_ : static_cast<int>(parallelism_config_.tp_size),
+                *groups,
+                runtime_config_.model_name),
             "failed to build KVCM location spec groups");
         for (const auto& [group_id, group] : group_policy_->groups()) {
-            for (int rank = 0; rank < (decode_publication_enabled_ ? target_prefill_tp_ : parallelism_config_.tp_size); ++rank) {
+            for (int rank = 0; rank < (decode_publication_enabled_ ? target_prefill_tp_ : parallelism_config_.tp_size);
+                 ++rank) {
                 const std::string spec_name =
                     kvcm::genLocationSpecName(rank, group.group_name, runtime_config_.model_name);
                 infos->emplace(spec_name, group.block_size_bytes);
@@ -1276,7 +1283,10 @@ private:
             }
             if (gdr_enabled_ && !use_gdr) {
                 if (decode_publication_enabled_) {
-                    RTP_LLM_LOG_ERROR("Requested GDR cannot register group %d tag=%s as dedicated GPU memory; refusing CPU fallback", group_id, tag.c_str());
+                    RTP_LLM_LOG_ERROR(
+                        "Requested GDR cannot register group %d tag=%s as dedicated GPU memory; refusing CPU fallback",
+                        group_id,
+                        tag.c_str());
                     return {};
                 }
                 RTP_LLM_LOG_WARNING("RemoteCache GDR unavailable for group %d tag=%s; falling back to standard "
@@ -1298,7 +1308,8 @@ private:
             for (int peer = 0; peer < peers; ++peer) {
                 auto wire_registration               = registration;
                 wire_registration.location_spec_name = kvcm::genLocationSpecName(
-                    decode_publication_enabled_ && is_decode_role_ ? peer : static_cast<int>(parallelism_config_.tp_rank),
+                    decode_publication_enabled_ && is_decode_role_ ? peer :
+                                                                     static_cast<int>(parallelism_config_.tp_rank),
                     groups.at(group_id).group_name,
                     runtime_config_.model_name);
                 registration_tags.push_back(fileTag(tag, peer));
@@ -1642,8 +1653,8 @@ private:
     int                            target_prefill_cp_{1}, target_prefill_tp_{1}, target_physical_shards_{1};
     bool                           decode_publication_enabled_{false}, pace_backend_{false}, is_decode_role_{false};
     StorageBackend::BufferResolver file_resolver_;
-    std::shared_ptr<kvcm::DecodePublicationAccounting> completion_accounting_;
-    DecodePublicationLimits completion_limits_;
+    std::shared_ptr<kvcm::DecodePublicationAccounting>   completion_accounting_;
+    DecodePublicationLimits                              completion_limits_;
     CacheConfig                          cache_config_;
     KVCacheConfig                        kv_cache_config_;
     RuntimeConfig                        runtime_config_;

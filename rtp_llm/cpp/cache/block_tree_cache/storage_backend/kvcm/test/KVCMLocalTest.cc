@@ -61,14 +61,14 @@ kvcm::KVCMConfigPtr makeLocalConfig() {
 TEST(KVCMLocalTest, PublicationStateMetricsKeepQuarantineInPendingTotals) {
     auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     RtpLLMDecodePublicationStateMetricsCollector collector;
-    collector.pending_bytes = 100;
-    collector.pending_jobs = 3;
-    collector.queued_jobs = 1;
-    collector.running_jobs = 1;
+    collector.pending_bytes    = 100;
+    collector.pending_jobs     = 3;
+    collector.queued_jobs      = 1;
+    collector.running_jobs     = 1;
     collector.quarantined_jobs = 1;
-    collector.byte_limit = 512;
-    collector.job_limit = 4;
-    collector.oldest_age_us = 7000000;
+    collector.byte_limit       = 512;
+    collector.job_limit        = 4;
+    collector.oldest_age_us    = 7000000;
     reporter->report<RtpLLMDecodePublicationMetrics, RtpLLMDecodePublicationStateMetricsCollector>(nullptr, &collector);
     auto* metrics = reporter->getMetricsGroup<RtpLLMDecodePublicationMetrics>();
     ASSERT_NE(metrics, nullptr);
@@ -186,12 +186,12 @@ TEST(KVCMLocalTest, DisabledPublicationIgnoresDecodeOnlyBackendAndBudgetRestrict
     autil::EnvGuard off("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     autil::EnvGuard budget("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB", "invalid");
     autil::EnvGuard jobs("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS", "invalid");
-    auto environment = makeBackendEnvironment("kvcm_disabled_decode_preserves_prefill");
-    auto client = std::make_shared<MockClientWrapper>();
+    auto            environment = makeBackendEnvironment("kvcm_disabled_decode_preserves_prefill");
+    auto            client      = std::make_shared<MockClientWrapper>();
     EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
     EXPECT_CALL(*client, shutdown()).Times(1);
     KVCacheConfig config;
-    config.kvcm_server_address = "unused-test-address";
+    config.kvcm_server_address   = "unused-test-address";
     config.kvcm_model_sdk_config = R"([{"type":"pace_ssd"}])";
     // Deliberately outside the new Decode SSD/GDR pairing restrictions: off
     // must delegate the ordinary configuration to its original SDK path.
@@ -199,14 +199,14 @@ TEST(KVCMLocalTest, DisabledPublicationIgnoresDecodeOnlyBackendAndBudgetRestrict
     RuntimeConfig runtime;
     runtime.model_name = "kvcm_disabled_decode";
     BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config,
-                                                             config,
-                                                             runtime,
-                                                             singleRankConfig(),
-                                                             SpeculativeExecutionConfig{},
-                                                             nullptr,
-                                                             /*gdr_enabled=*/false,
-                                                             nullptr,
-                                                             client));
+                                                               config,
+                                                               runtime,
+                                                               singleRankConfig(),
+                                                               SpeculativeExecutionConfig{},
+                                                               nullptr,
+                                                               /*gdr_enabled=*/false,
+                                                               nullptr,
+                                                               client));
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
     kv_cache_manager::Locations locations{
         kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "read_uri"}}};
@@ -282,7 +282,7 @@ TEST(KVCMLocalTest, PublicationSwitchPreservesLegacyHostPoolFallbackAndRequiresG
     for (const bool enabled : {false, true}) {
         SCOPED_TRACE(enabled);
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
-        auto environment = makeHybridBackendEnvironment("kvcm_storage_backend_mixed_gdr_span");
+        auto            environment = makeHybridBackendEnvironment("kvcm_storage_backend_mixed_gdr_span");
         ASSERT_EQ(environment.cache_config.groupTags().size(), 2u);
 
         const auto& host_tag = environment.cache_config.groupTags().back();
@@ -307,8 +307,8 @@ TEST(KVCMLocalTest, PublicationSwitchPreservesLegacyHostPoolFallbackAndRequiresG
         if (enabled) {
             EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).Times(0);
         } else {
-            EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Invoke(
-                [&](const auto&, auto, const auto& registrations, const auto& tags) {
+            EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _))
+                .WillOnce(Invoke([&](const auto&, auto, const auto& registrations, const auto& tags) {
                     EXPECT_EQ(registrations.size(), 2u);
                     EXPECT_EQ(registrations.size(), tags.size());
                     bool saw_host = false;
@@ -320,7 +320,7 @@ TEST(KVCMLocalTest, PublicationSwitchPreservesLegacyHostPoolFallbackAndRequiresG
                             EXPECT_EQ(registrations[i].span.size, host_pool->getTotalSizeBytes());
                             EXPECT_FALSE(registrations[i].memory_registrations.has_value());
                         } else {
-                            saw_gpu = true;
+                            saw_gpu              = true;
                             const auto& gpu_pool = environment.pools_by_tag.at(tags[i]);
                             EXPECT_EQ(registrations[i].span.base, gpu_pool->getBaseAddress());
                             EXPECT_EQ(registrations[i].span.size, gpu_pool->getAllocationSizeBytes());
@@ -347,19 +347,24 @@ TEST(KVCMLocalTest, PublicationSwitchPreservesLegacyHostPoolFallbackAndRequiresG
         // Both branches use a valid P CP1 configuration. The enabled negative must
         // reach actual pool-registration validation, not fail earlier on role/SDK.
         KVCacheConfig config;
-        config.kvcm_server_address = "unused-test-address";
-        config.kvcm_instance_id_salt = "host-pool-fallback-contract";
-        config.kvcm_model_sdk_config = R"([{"type":"pace"}])";
-        config.kvcm_read_backend_type = 3;
-        auto parallel = singleRankConfig();
-        parallel.role_type = RoleType::PREFILL;
+        config.kvcm_server_address                 = "unused-test-address";
+        config.kvcm_instance_id_salt               = "host-pool-fallback-contract";
+        config.kvcm_model_sdk_config               = R"([{"type":"pace"}])";
+        config.kvcm_read_backend_type              = 3;
+        auto parallel                              = singleRankConfig();
+        parallel.role_type                         = RoleType::PREFILL;
         parallel.prefill_cp_config.prefill_cp_size = 1;
         RuntimeConfig runtime;
         runtime.model_name = "host_pool_fallback";
         BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config,
-                                                                  config, runtime, parallel,
-                                                                  SpeculativeExecutionConfig{}, nullptr,
-                                                                  /*gdr_enabled=*/true, nullptr, client_wrapper));
+                                                                   config,
+                                                                   runtime,
+                                                                   parallel,
+                                                                   SpeculativeExecutionConfig{},
+                                                                   nullptr,
+                                                                   /*gdr_enabled=*/true,
+                                                                   nullptr,
+                                                                   client_wrapper));
         EXPECT_EQ(initSingleRank(*backend.backend, environment), !enabled);
     }
 }
@@ -449,22 +454,22 @@ TEST(KVCMLocalTest, SuccessfulReadBindsItsRequiredSourceButLegacyOverwriteClears
         SCOPED_TRACE(known_source);
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
         autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
-        auto environment = makeBackendEnvironment("kvcm_physical_source_binding");
-        auto client = std::make_shared<MockClientWrapper>();
+        auto            environment = makeBackendEnvironment("kvcm_physical_source_binding");
+        auto            client      = std::make_shared<MockClientWrapper>();
         EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
         EXPECT_CALL(*client, shutdown()).Times(1);
         auto backend = makeCompletionProofBackend(environment, client);
         ASSERT_TRUE(initSingleRank(*backend.backend, environment));
         auto source = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".4.0.8.8.9");
         ASSERT_TRUE(source);
-        auto old_value = *source;
-        old_value.session = std::string(32, 'b');
-        const auto old = std::make_shared<const DecodeCacheOrigin>(old_value);
+        auto old_value        = *source;
+        old_value.session     = std::string(32, 'b');
+        const auto old        = std::make_shared<const DecodeCacheOrigin>(old_value);
         const auto generation = environment.device_pool->decodeOriginIncarnation(environment.block_id);
         ASSERT_NE(generation, uint64_t{0});
         ASSERT_TRUE(environment.device_pool->bindDecodeOrigin(environment.block_id, generation, "default", old));
-        const std::string canonical = "pace://allocated/1?media_type=2&node_id=1&size=32";
-        const auto uri = known_source ? *attachDecodeCacheOrigin(canonical, *source) : canonical;
+        const std::string           canonical = "pace://allocated/1?media_type=2&node_id=1&size=32";
+        const auto                  uri       = known_source ? *attachDecodeCacheOrigin(canonical, *source) : canonical;
         kv_cache_manager::Locations locations{{{"tp0_Fdefault", uri}}};
         EXPECT_CALL(*client, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
         auto observation = match(*backend.backend, makeStorageRequest(environment));
@@ -496,7 +501,7 @@ TEST(KVCMLocalTest, SuccessfulReadBindsItsRequiredSourceButLegacyOverwriteClears
 template<typename Code>
 std::vector<std::pair<Code, bool>> failedCompletionCases(bool write = false) {
     std::vector<std::pair<Code, bool>> cases{{write ? Code::ER_SDKWRITE_ERROR : Code::ER_SDKREAD_ERROR, false},
-                                           {Code::ER_INVALID_PARAMS, false}};
+                                             {Code::ER_INVALID_PARAMS, false}};
     if constexpr (kvcm::detail::HasExplicitBufferSafeCodes<Code>::value) {
         cases.emplace_back(Code::ER_SDK_TIMEOUT_BUFFER_SAFE, true);
         cases.emplace_back(Code::ER_SDK_ERROR_BUFFER_SAFE, true);
@@ -545,16 +550,16 @@ TEST(KVCMLocalTest, CallerBufferSafetyDoesNotProveRemoteAllocationQuiescence) {
     for (const bool enabled : {false, true}) {
         for (const auto& [ec, safe] : failedCompletionCases<EC>(/*write=*/true)) {
             autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
-            auto environment = makeBackendEnvironment("kvcm_write_completion_proof");
-            auto client = std::make_shared<MockClientWrapper>();
+            auto            environment = makeBackendEnvironment("kvcm_write_completion_proof");
+            auto            client      = std::make_shared<MockClientWrapper>();
             EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
             EXPECT_CALL(*client, shutdown()).Times(1);
             auto backend = makeCompletionProofBackend(environment, client);
             ASSERT_TRUE(initSingleRank(*backend.backend, environment));
             kv_cache_manager::WriteLocation allocation;
             allocation.write_session_id = "pending-session";
-            allocation.block_mask = kv_cache_manager::BlockMaskOffset{0};
-            allocation.locations = {{{"tp0_Fdefault", "write_uri"}}};
+            allocation.block_mask       = kv_cache_manager::BlockMaskOffset{0};
+            allocation.locations        = {{{"tp0_Fdefault", "write_uri"}}};
             EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
                 .WillOnce(Return(std::make_pair(true, allocation)));
             const bool unknown = enabled && !safe;
@@ -564,7 +569,7 @@ TEST(KVCMLocalTest, CallerBufferSafetyDoesNotProveRemoteAllocationQuiescence) {
                 EXPECT_CALL(*client, finishWrite(_, _, "pending-session", _, _)).WillOnce(Return(true));
             }
             client->save_status = ec;
-            auto task = backend.backend->prepareWrite(makeStorageRequest(environment));
+            auto task           = backend.backend->prepareWrite(makeStorageRequest(environment));
             ASSERT_TRUE(static_cast<bool>(task));
             ASSERT_TRUE(backend.backend->write(std::move(task)));
             ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
@@ -577,18 +582,17 @@ TEST(KVCMLocalTest, FailureBeforeTransferStillAbortsItsUnusedAllocation) {
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
     for (const bool enabled : {false, true}) {
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
-        auto environment = makeBackendEnvironment("kvcm_pretransfer_failure");
-        auto client = std::make_shared<MockClientWrapper>();
+        auto            environment = makeBackendEnvironment("kvcm_pretransfer_failure");
+        auto            client      = std::make_shared<MockClientWrapper>();
         EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
         EXPECT_CALL(*client, shutdown()).Times(1);
         auto backend = makeCompletionProofBackend(environment, client);
         ASSERT_TRUE(initSingleRank(*backend.backend, environment));
         kv_cache_manager::WriteLocation allocation;
         allocation.write_session_id = "unused-session";
-        allocation.block_mask = kv_cache_manager::BlockMaskOffset{0};
-        allocation.locations = {{{"unknown-spec-before-io", "write_uri"}}};
-        EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
-            .WillOnce(Return(std::make_pair(true, allocation)));
+        allocation.block_mask       = kv_cache_manager::BlockMaskOffset{0};
+        allocation.locations        = {{{"unknown-spec-before-io", "write_uri"}}};
+        EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0)).WillOnce(Return(std::make_pair(true, allocation)));
         EXPECT_CALL(*client, finishWrite(_, _, "unused-session", kv_cache_manager::BlockMaskOffset{0}, _))
             .WillOnce(Return(true));
         EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(0);

@@ -10,7 +10,7 @@
 namespace rtp_llm::kvcm {
 namespace {
 using Accounting = DecodePublicationAccounting;
-using Clock = Accounting::Clock;
+using Clock      = Accounting::Clock;
 
 TEST(DecodePublicationAccountingTest, BudgetsCoverLeaseCopiesAndFrozenPages) {
     auto state = std::make_shared<Accounting>(100, 2);
@@ -60,8 +60,10 @@ TEST(DecodePublicationAccountingTest, RetriesAndQuarantineKeepFirstAdmissionAge)
 
 TEST(DecodePublicationAccountingTest, OutcomeIsOncePerAdmissionAndIncludesEosQueueTime) {
     std::vector<std::pair<std::string, std::optional<int64_t>>> events;
-    auto state = std::make_shared<Accounting>(100, 2, Accounting::SnapshotObserver{},
-        [&](const char* result, auto latency) { events.emplace_back(result, latency); });
+    auto                                                        state =
+        std::make_shared<Accounting>(100, 2, Accounting::SnapshotObserver{}, [&](const char* result, auto latency) {
+            events.emplace_back(result, latency);
+        });
     auto lease = state->tryAcquire(60, Clock::now() - std::chrono::seconds(2));
     ASSERT_NE(lease, nullptr);
     lease->recordOutcome("committed", true);
@@ -80,14 +82,13 @@ TEST(DecodePublicationAccountingTest, OutcomeIsOncePerAdmissionAndIncludesEosQue
 
 TEST(DecodePublicationAccountingTest, IdleSamplerObservesStuckAgeWithoutInferenceAndStops) {
     std::promise<int64_t> observed;
-    auto result = observed.get_future();
-    std::once_flag once;
-    auto state = std::make_shared<Accounting>(100, 2,
-        [&](const auto& value) {
-            if (value.jobs == 1)
-                std::call_once(once, [&] { observed.set_value(value.oldest_age_us); });
-        });
-    auto lease = state->tryAcquire(60, Clock::now(), Clock::now() - std::chrono::seconds(3));
+    auto                  result = observed.get_future();
+    std::once_flag        once;
+    auto                  state = std::make_shared<Accounting>(100, 2, [&](const auto& value) {
+        if (value.jobs == 1)
+            std::call_once(once, [&] { observed.set_value(value.oldest_age_us); });
+    });
+    auto                  lease = state->tryAcquire(60, Clock::now(), Clock::now() - std::chrono::seconds(3));
     state->startSampling();
     ASSERT_EQ(result.wait_for(std::chrono::seconds(2)), std::future_status::ready);
     EXPECT_GE(result.get(), 3000000);
@@ -97,8 +98,9 @@ TEST(DecodePublicationAccountingTest, IdleSamplerObservesStuckAgeWithoutInferenc
 }
 
 TEST(DecodePublicationAccountingTest, TelemetryExceptionsCannotLeakAdmission) {
-    auto state = std::make_shared<Accounting>(100, 2, Accounting::SnapshotObserver{},
-        [](const char*, auto) { throw std::runtime_error("telemetry unavailable"); });
+    auto state = std::make_shared<Accounting>(100, 2, Accounting::SnapshotObserver{}, [](const char*, auto) {
+        throw std::runtime_error("telemetry unavailable");
+    });
     auto lease = state->tryAcquire(60, Clock::now());
     ASSERT_NE(lease, nullptr);
     lease->recordOutcome("committed", true);
@@ -108,17 +110,18 @@ TEST(DecodePublicationAccountingTest, TelemetryExceptionsCannotLeakAdmission) {
 }
 
 TEST(DecodePublicationAccountingTest, ConcurrentAdmissionCannotOversubscribeBudgets) {
-    auto state = std::make_shared<Accounting>(32, 3);
-    std::mutex mutex;
-    std::condition_variable cv;
-    size_t attempted = 0;
-    bool release = false;
-    std::atomic<size_t> accepted{0};
+    auto                     state = std::make_shared<Accounting>(32, 3);
+    std::mutex               mutex;
+    std::condition_variable  cv;
+    size_t                   attempted = 0;
+    bool                     release   = false;
+    std::atomic<size_t>      accepted{0};
     std::vector<std::thread> workers;
     for (size_t i = 0; i < 16; ++i)
         workers.emplace_back([&] {
             auto lease = state->tryAcquire(8, Clock::now());
-            if (lease) ++accepted;
+            if (lease)
+                ++accepted;
             std::unique_lock<std::mutex> lock(mutex);
             ++attempted;
             cv.notify_all();
@@ -133,7 +136,8 @@ TEST(DecodePublicationAccountingTest, ConcurrentAdmissionCannotOversubscribeBudg
         release = true;
     }
     cv.notify_all();
-    for (auto& worker : workers) worker.join();
+    for (auto& worker : workers)
+        worker.join();
     EXPECT_TRUE(all_attempted);
     EXPECT_EQ(accepted.load(), 3u);
     EXPECT_EQ(state->snapshot().jobs, 0u);
@@ -142,12 +146,14 @@ TEST(DecodePublicationAccountingTest, ConcurrentAdmissionCannotOversubscribeBudg
 
 TEST(DecodePublicationAccountingTest, DelayedRetryAfterBudgetRefusalKeepsOriginalEosAndReportsSkipOnce) {
     std::vector<std::pair<std::string, std::optional<int64_t>>> events;
-    auto state = std::make_shared<Accounting>(100, 1, Accounting::SnapshotObserver{},
-        [&](const char* result, auto latency) { events.emplace_back(result, latency); });
+    auto                                                        state =
+        std::make_shared<Accounting>(100, 1, Accounting::SnapshotObserver{}, [&](const char* result, auto latency) {
+            events.emplace_back(result, latency);
+        });
     auto occupied = state->tryAcquire(100, std::nullopt);
     ASSERT_NE(occupied, nullptr);
     DecodePublicationLifecycle lifecycle;
-    const auto eos = Clock::now() - std::chrono::seconds(2);
+    const auto                 eos = Clock::now() - std::chrono::seconds(2);
     lifecycle.recordEos(eos);
     for (size_t retry = 0; retry < 2; ++retry) {
         EXPECT_EQ(state->tryAcquire(10, lifecycle.eosAt()), nullptr);
@@ -171,9 +177,12 @@ TEST(DecodePublicationAccountingTest, DelayedRetryAfterBudgetRefusalKeepsOrigina
 
 TEST(DecodePublicationAccountingTest, MissingActualEosNeverFabricatesLatencyAtAdmission) {
     std::optional<int64_t> observed;
-    bool acknowledged = false;
-    auto state = std::make_shared<Accounting>(100, 1, Accounting::SnapshotObserver{},
-        [&](const char* result, auto latency) { acknowledged = std::string(result) == "committed"; observed = latency; });
+    bool                   acknowledged = false;
+    auto                   state =
+        std::make_shared<Accounting>(100, 1, Accounting::SnapshotObserver{}, [&](const char* result, auto latency) {
+            acknowledged = std::string(result) == "committed";
+            observed     = latency;
+        });
     auto lease = state->tryAcquire(10, std::nullopt);
     ASSERT_NE(lease, nullptr);
     lease->recordOutcome("committed", true);

@@ -60,11 +60,11 @@ bool boundedSdkRanges(const kv_cache_manager::UriStrVec&    uris,
     return true;
 }
 
-std::shared_ptr<kv_cache_manager::TransferTraceInfo> traceForRange(
-    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace, const SdkRange& range) {
+std::shared_ptr<kv_cache_manager::TransferTraceInfo>
+traceForRange(const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace, const SdkRange& range) {
     if (!trace || trace->block_ids.empty())
         return trace;
-    auto result = std::make_shared<kv_cache_manager::TransferTraceInfo>(*trace);
+    auto result       = std::make_shared<kv_cache_manager::TransferTraceInfo>(*trace);
     result->block_ids = {trace->block_ids.begin() + range.begin, trace->block_ids.begin() + range.end};
     return result;
 }
@@ -651,8 +651,11 @@ void ClientWrapper::setTransferObserver(TransferObserver observer) {
 
 void ClientWrapper::observeTransfer(bool is_read, size_t completed_bytes, bool completion_unknown) const noexcept {
     if (transfer_observer_) {
-        try { transfer_observer_(is_read, completed_bytes, completion_unknown); }
-        catch (...) { RTP_LLM_LOG_ERROR("failed to report confirmed SDK payload"); }
+        try {
+            transfer_observer_(is_read, completed_bytes, completion_unknown);
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("failed to report confirmed SDK payload");
+        }
     }
 }
 
@@ -702,7 +705,7 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
     const auto io_started = std::chrono::steady_clock::now();
     const bool inner_observation =
         dynamic_cast<SdkTransferObservable*>(transfer_clients_[slot->second].get()) != nullptr;
-    auto       ec         = kv_cache_manager::ClientErrorCode::ER_OK;
+    auto                  ec = kv_cache_manager::ClientErrorCode::ER_OK;
     std::vector<SdkRange> ranges;
     if ((trace_info && !trace_info->block_ids.empty() && trace_info->block_ids.size() != uri_str_vec.size())
         || !boundedSdkRanges(uri_str_vec, block_buffers, ranges)) {
@@ -712,10 +715,9 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
     for (const auto& range : ranges) {
         kv_cache_manager::UriStrVec uris(uri_str_vec.begin() + range.begin, uri_str_vec.begin() + range.end);
         // Shallow pointer descriptors; caller pins own all payloads for the whole operation.
-        kv_cache_manager::BlockBuffers buffers(block_buffers.begin() + range.begin,
-                                               block_buffers.begin() + range.end);
-        const auto                     began = std::chrono::steady_clock::now();
-        const auto part_trace = traceForRange(trace_info, range);
+        kv_cache_manager::BlockBuffers buffers(block_buffers.begin() + range.begin, block_buffers.begin() + range.end);
+        const auto                     began      = std::chrono::steady_clock::now();
+        const auto                     part_trace = traceForRange(trace_info, range);
         try {
             if (completion)
                 *completion = TransferCompletion::UNKNOWN;
@@ -805,12 +807,12 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
         }
         return result;
     }
-    const auto                  io_started = std::chrono::steady_clock::now();
-    const bool                  inner_observation =
+    const auto io_started = std::chrono::steady_clock::now();
+    const bool inner_observation =
         dynamic_cast<SdkTransferObservable*>(transfer_clients_[slot->second].get()) != nullptr;
-    auto                        ec         = kv_cache_manager::ClientErrorCode::ER_OK;
+    auto                        ec = kv_cache_manager::ClientErrorCode::ER_OK;
     kv_cache_manager::UriStrVec result;
-    std::vector<SdkRange> ranges;
+    std::vector<SdkRange>       ranges;
     if ((trace_info && !trace_info->block_ids.empty() && trace_info->block_ids.size() != uri_str_vec.size())
         || !boundedSdkRanges(uri_str_vec, block_buffers, ranges)) {
         RTP_LLM_LOG_ERROR("KVCM bounded SDK rejects malformed or oversized block geometry");
@@ -819,11 +821,10 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
     for (const auto& range : ranges) {
         kv_cache_manager::UriStrVec uris(uri_str_vec.begin() + range.begin, uri_str_vec.begin() + range.end);
         // Shallow pointer descriptors; caller pins own all payloads for the whole operation.
-        kv_cache_manager::BlockBuffers buffers(block_buffers.begin() + range.begin,
-                                               block_buffers.begin() + range.end);
-        const auto                     began = std::chrono::steady_clock::now();
-        const auto part_trace = traceForRange(trace_info, range);
-        auto saved = [&] {
+        kv_cache_manager::BlockBuffers buffers(block_buffers.begin() + range.begin, block_buffers.begin() + range.end);
+        const auto                     began      = std::chrono::steady_clock::now();
+        const auto                     part_trace = traceForRange(trace_info, range);
+        auto                           saved      = [&] {
             try {
                 if (completion)
                     *completion = TransferCompletion::UNKNOWN;
@@ -834,7 +835,7 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
                 throw;
             }
         }();
-        ec         = saved.first;
+        ec = saved.first;
         if (completion)
             *completion = sdkResultCompletion(ec);
         if (!inner_observation) {

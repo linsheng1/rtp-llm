@@ -260,7 +260,7 @@ public:
 
 private:
     mutable bool                 decode_completion_submitted_{false};
-    DecodePublicationLifecycle decode_completion_lifecycle_;
+    DecodePublicationLifecycle   decode_completion_lifecycle_;
     std::vector<KVCacheResource> batch_resource;  // [batch_size]
     bool                         cache_keys_initialized_{false};
 };

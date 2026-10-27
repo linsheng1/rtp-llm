@@ -123,7 +123,9 @@ public:
         return remote_restore_lifecycle_.pendingForward();
     }
     void reportRemoteContextReady(std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at = std::nullopt);
-    bool hasPendingDecodeReuse() const { return decode_reuse_use_state_.pending(); }
+    bool hasPendingDecodeReuse() const {
+        return decode_reuse_use_state_.pending();
+    }
     void reportDecodeCacheUse(std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at);
 
     void holdKVCacheForPDSep();
@@ -164,8 +166,8 @@ private:
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
     int64_t                          malloc_begin_time_us_    = 0;
     int64_t                          load_wait_begin_time_us_ = 0;
-    RemoteRestoreLifecycle           remote_restore_lifecycle_;
-    DecodeReuseUseState               decode_reuse_use_state_;
+    RemoteRestoreLifecycle                                remote_restore_lifecycle_;
+    DecodeReuseUseState                                   decode_reuse_use_state_;
     std::optional<RemoteRestoreTiming::Clock::time_point> remote_restore_attempt_started_at_;
 
     // Physical block pins held for PD separation.

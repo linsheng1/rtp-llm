@@ -21,13 +21,17 @@ TEST(DecodeCacheOriginTest, RoundtripMatchesManagerCanonicalMetadataContract) {
 }
 
 TEST(DecodeCacheOriginTest, RejectsMalformedOrAmbiguousVersionsWithoutAttributingLegacyData) {
-    for (const auto& value : std::vector<std::string>{
-             "", "v2." + session + ".7680.7680.8192.8200.8201", valid + ".0",
-             "v1." + session + ".-1.7680.8192.8200.8201", "v1." + session + ".07680.7680.8192.8200.8201",
-             "v1." + session + ".7680.8192.8192.8200.8201", "v1." + session + ".7680.7680.8201.8200.8201",
-             "v1." + session + ".7680.7680.8192.8200.8200", "v1." + session + ".7680.7680.8192.9223372036854775807.0",
-             "v1." + std::string(31, 'a') + ".7680.7680.8192.8200.8201",
-             "v1." + std::string(31, 'a') + "_.7680.7680.8192.8200.8201"}) {
+    for (const auto& value : std::vector<std::string>{"",
+                                                      "v2." + session + ".7680.7680.8192.8200.8201",
+                                                      valid + ".0",
+                                                      "v1." + session + ".-1.7680.8192.8200.8201",
+                                                      "v1." + session + ".07680.7680.8192.8200.8201",
+                                                      "v1." + session + ".7680.8192.8192.8200.8201",
+                                                      "v1." + session + ".7680.7680.8201.8200.8201",
+                                                      "v1." + session + ".7680.7680.8192.8200.8200",
+                                                      "v1." + session + ".7680.7680.8192.9223372036854775807.0",
+                                                      "v1." + std::string(31, 'a') + ".7680.7680.8192.8200.8201",
+                                                      "v1." + std::string(31, 'a') + "_.7680.7680.8192.8200.8201"}) {
         EXPECT_FALSE(DecodeCacheOrigin::parse(value)) << value;
     }
     EXPECT_FALSE(decodeCacheOriginFromUri("pace://legacy?blkid=1"));
@@ -44,9 +48,13 @@ TEST(DecodeCacheOriginTest, CountsComputedIntervalOnlyOnceIndependentlyOfCpCopie
     EXPECT_EQ(origin->logicalDecodeTokens(9000), 512);
     EXPECT_EQ(origin->logicalDecodeTokens(7600), 0);
     EXPECT_EQ(origin->logicalDecodeTokens(std::numeric_limits<int64_t>::min()), 0);
-    auto before = *origin;before.begin = 7168;before.end = 7680;
+    auto before  = *origin;
+    before.begin = 7168;
+    before.end   = 7680;
     EXPECT_EQ(before.logicalDecodeTokens(8192), 0);
-    auto crossing = *origin;crossing.begin = 7424;crossing.end = 7936;
+    auto crossing  = *origin;
+    crossing.begin = 7424;
+    crossing.end   = 7936;
     EXPECT_EQ(crossing.logicalDecodeTokens(8192), 256);
     // No cp/rank factor exists in the logical interval contract.
 }

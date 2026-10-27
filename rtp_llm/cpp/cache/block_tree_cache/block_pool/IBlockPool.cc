@@ -229,17 +229,19 @@ bool IBlockPool::enableDecodeOriginTracking() {
 
 uint64_t IBlockPool::decodeOriginIncarnation(BlockIdxType block) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return decode_origins_ && validBlockNoLock(block) && allocated_[block] ?
-               decode_origins_->incarnation(block) : 0;
+    return decode_origins_ && validBlockNoLock(block) && allocated_[block] ? decode_origins_->incarnation(block) : 0;
 }
 
 PhysicalDecodeOrigins::Origin IBlockPool::decodeOrigin(BlockIdxType block, std::string_view region) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return decode_origins_ && validBlockNoLock(block) && allocated_[block] ? decode_origins_->get(block, region) : nullptr;
+    return decode_origins_ && validBlockNoLock(block) && allocated_[block] ? decode_origins_->get(block, region) :
+                                                                             nullptr;
 }
 
-bool IBlockPool::bindDecodeOrigin(BlockIdxType block, uint64_t expected_incarnation, std::string_view region,
-                                 PhysicalDecodeOrigins::Origin origin) {
+bool IBlockPool::bindDecodeOrigin(BlockIdxType                  block,
+                                  uint64_t                      expected_incarnation,
+                                  std::string_view              region,
+                                  PhysicalDecodeOrigins::Origin origin) {
     std::lock_guard<std::mutex> lock(mutex_);
     return decode_origins_ && validBlockNoLock(block) && allocated_[block]
            && decode_origins_->bind(block, expected_incarnation, region, std::move(origin));

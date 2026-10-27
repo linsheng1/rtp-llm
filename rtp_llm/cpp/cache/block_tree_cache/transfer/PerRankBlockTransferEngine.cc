@@ -29,13 +29,13 @@ std::shared_ptr<TransferAsyncContext> invalidTransferContext(size_t block_count)
 // records pack multiple member tags; keep those regions independent. Existing
 // task references, not this observer, protect the source/destination buffers.
 struct RegionOriginTransfer {
-    std::shared_ptr<IBlockPool> source;
-    std::shared_ptr<IBlockPool> target;
-    BlockIdxType source_block;
-    BlockIdxType target_block;
-    uint64_t source_incarnation;
-    uint64_t target_incarnation;
-    std::string tag;
+    std::shared_ptr<IBlockPool>   source;
+    std::shared_ptr<IBlockPool>   target;
+    BlockIdxType                  source_block;
+    BlockIdxType                  target_block;
+    uint64_t                      source_incarnation;
+    uint64_t                      target_incarnation;
+    std::string                   tag;
     PhysicalDecodeOrigins::Origin origin;
 };
 
@@ -49,13 +49,13 @@ std::shared_ptr<IBlockPool> originPool(const GroupSet& group, Tier tier, size_t 
     return nullptr;
 }
 
-std::vector<RegionOriginTransfer> prepareOriginTransfers(
-    const std::vector<TransferDescriptor>& descriptors, const std::vector<const GroupSet*>& groups) {
+std::vector<RegionOriginTransfer> prepareOriginTransfers(const std::vector<TransferDescriptor>& descriptors,
+                                                         const std::vector<const GroupSet*>&    groups) {
     std::vector<RegionOriginTransfer> transfers;
-    bool collect = true;
+    bool                              collect = true;
     for (size_t index = 0; index < descriptors.size(); ++index) {
-        const auto& descriptor = descriptors[index];
-        const auto& group = *groups[index];
+        const auto&  descriptor   = descriptors[index];
+        const auto&  group        = *groups[index];
         const size_t source_count = descriptor.source_tier == Tier::DEVICE ? group.groupTags().size() : 1;
         const size_t target_count = descriptor.target_tier == Tier::DEVICE ? group.groupTags().size() : 1;
         if (descriptor.source_blocks.size() != source_count || descriptor.target_blocks.size() != target_count
@@ -67,11 +67,11 @@ std::vector<RegionOriginTransfer> prepareOriginTransfers(
             const auto target = originPool(group, descriptor.target_tier, member);
             if (!source || !target)
                 continue;
-            const auto source_block = descriptor.source_blocks.at(descriptor.source_tier == Tier::DEVICE ? member : 0);
-            const auto target_block = descriptor.target_blocks.at(descriptor.target_tier == Tier::DEVICE ? member : 0);
-            const auto& tag = group.groupTags()[member];
-            const auto source_incarnation = source->decodeOriginIncarnation(source_block);
-            const auto origin = source->decodeOrigin(source_block, tag);
+            const auto  source_block = descriptor.source_blocks.at(descriptor.source_tier == Tier::DEVICE ? member : 0);
+            const auto  target_block = descriptor.target_blocks.at(descriptor.target_tier == Tier::DEVICE ? member : 0);
+            const auto& tag          = group.groupTags()[member];
+            const auto  source_incarnation = source->decodeOriginIncarnation(source_block);
+            const auto  origin             = source->decodeOrigin(source_block, tag);
             if (origin && collect)
                 (void)target->enableDecodeOriginTracking();
             const auto target_incarnation = target->decodeOriginIncarnation(target_block);
@@ -80,8 +80,14 @@ std::vector<RegionOriginTransfer> prepareOriginTransfers(
             target->bindDecodeOrigin(target_block, target_incarnation, tag, nullptr);
             if (origin && collect && source_incarnation != 0 && target_incarnation != 0) {
                 try {
-                    transfers.push_back({source, target, source_block, target_block, source_incarnation,
-                                         target_incarnation, tag, origin});
+                    transfers.push_back({source,
+                                         target,
+                                         source_block,
+                                         target_block,
+                                         source_incarnation,
+                                         target_incarnation,
+                                         tag,
+                                         origin});
                 } catch (const std::bad_alloc&) {
                     transfers.clear();
                     collect = false;
@@ -98,8 +104,8 @@ void completeOriginTransfers(const std::vector<RegionOriginTransfer>& transfers,
     for (const auto& transfer : transfers) {
         if (transfer.source->decodeOriginIncarnation(transfer.source_block) == transfer.source_incarnation
             && transfer.source->decodeOrigin(transfer.source_block, transfer.tag) == transfer.origin) {
-            transfer.target->bindDecodeOrigin(transfer.target_block, transfer.target_incarnation,
-                                              transfer.tag, transfer.origin);
+            transfer.target->bindDecodeOrigin(
+                transfer.target_block, transfer.target_incarnation, transfer.tag, transfer.origin);
         }
     }
 }
@@ -115,7 +121,8 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
                                                        size_t                   transfer_queue_max_size,
                                                        std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter,
                                                        int64_t                                        world_rank):
-    group_sets_(std::move(group_sets)), transfer_worker_count_(transfer_worker_count),
+    group_sets_(std::move(group_sets)),
+    transfer_worker_count_(transfer_worker_count),
     track_decode_origins_(remoteCacheDecodePublicationEnabled()) {
     RTP_LLM_CHECK(max_descriptors_per_batch > 0);
     RTP_LLM_CHECK(transfer_worker_count > 0);
