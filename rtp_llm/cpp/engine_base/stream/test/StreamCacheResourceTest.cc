@@ -454,7 +454,8 @@ TEST_F(StreamCacheResourceTest, SwapLinearBlocksUsesPolicyAndTagAfterGroupReorde
     }
 }
 
-TEST_F(StreamCacheResourceTest, testAllocateResource) {
+TEST_F(StreamCacheResourceTest, testAllocateResourceIgnoresObsoleteBenchmarkSwitch) {
+    autil::EnvGuard obsolete_benchmark("RTP_DTOP_BENCH_READ_ONLY_REQUESTS", "1");
     for (const bool with_backend : {false, true}) {
         for (const bool ignore_request_switches : {false, true}) {
             for (const bool request_reuse : {false, true}) {

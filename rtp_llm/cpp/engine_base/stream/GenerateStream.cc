@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include <algorithm>
 #include <chrono>
 #include <condition_variable>
@@ -1471,10 +1472,8 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     // queues the existing Prefill writer; no decode-progress CPU snapshots.
     if (is_done && hasEventWithoutLock(StreamEvents::GenerateDone) && !hasEventWithoutLock(StreamEvents::Error)
         && !hasErrorWithoutLock() && resourceContext().cache_manager && !useStreamAsyncReserveTokens()
-        && num_new_tokens == 1 && currentBatchSize() == 1 && autil::EnvUtil::getEnv("RTP_DTOP_FILE_CP2", false)
+        && num_new_tokens == 1 && currentBatchSize() == 1 && remoteCacheDecodePublicationEnabled()
         && resourceContext().role_type == RoleType::DECODE && stream_cache_resource_->reuseCache()
-        && !(autil::EnvUtil::getEnv("RTP_DTOP_BENCH_READ_ONLY_REQUESTS", false)
-             && !generateConfig()->enable_device_cache)
         && seqLength() > 0) {
         resourceContext().cache_manager->captureCompletedDecode(kvCache(), seqLength() - 1, true);
     }

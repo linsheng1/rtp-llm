@@ -6,6 +6,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/CoalescedPaceWriteClient.h"
 #include "autil/legacy/json.h"
 #include <cstring>
+#include <map>
 #if USING_CUDA
 #include <cuda_runtime_api.h>
 #endif
@@ -53,6 +54,77 @@ std::unique_ptr<kv_cache_manager::TransferClient> createPackedSsd(const std::str
 }
 bool coalescedPaceWriteRequested() {
     return autil::EnvUtil::getEnv("RTP_KVCM_COALESCE_PACE_WRITES", false);
+}
+std::unique_ptr<kv_cache_manager::TransferClient>
+createNativeSsdGpu(const std::string& config,
+                   const kv_cache_manager::InitParams& params,
+                   const kv_cache_manager::ClientMemoryRegistrations& registrations) {
+#if USING_CUDA
+    // PACE SSD treats each IOV as a complete object write. A model page has
+    // several layer IOVs, so gather into one registered GPU span per URI.
+    // This is D2D packing, not the legacy CPU snapshot/packed wrapper.
+    using namespace autil::legacy;
+    const auto fields = AnyCast<json::JsonMap>(json::ParseJson(config));
+    const auto sdk = AnyCast<json::JsonMap>(fields.at("sdk_config"));
+    const auto backends = AnyCast<json::JsonArray>(sdk.at("sdk_backend_configs"));
+    if (backends.size() != 1 || AnyCast<std::string>(AnyCast<json::JsonMap>(backends.front()).at("type")) != "pace_ssd")
+        throw std::invalid_argument("native SSD GDR requires exactly one pace_ssd backend");
+    // PACE seals GPU registration at the first Init. Reuse one pre-registered
+    // span across this process/device's tag clients; lease disjoint ranges per operation.
+    using Context = PackedSsdTransferClient::GpuPackingContext;
+    static std::mutex registry_mutex;
+    static std::map<int, std::weak_ptr<Context>> contexts;
+    static std::atomic<size_t> resident_bytes{0};
+    constexpr size_t bytes = PackedSsdTransferClient::max_operation_bytes;
+    int device = 0;
+    if (cudaGetDevice(&device) != cudaSuccess)
+        return {};
+    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    auto context = contexts[device].lock();
+    if (!context) {
+        size_t previous = resident_bytes.load();
+        do {
+            if (previous > PackedSsdTransferClient::max_process_bytes - bytes)
+                throw std::runtime_error("native SSD registered GPU packing capacity exhausted");
+        } while (!resident_bytes.compare_exchange_weak(previous, previous + bytes));
+        void* base = nullptr;
+        if (cudaMalloc(&base, bytes) != cudaSuccess) {
+            resident_bytes.fetch_sub(bytes);
+            return {};
+        }
+        auto arena = std::shared_ptr<void>(base, [device](void* p) {
+            int previous_device = device;
+            cudaGetDevice(&previous_device);
+            cudaSetDevice(device);
+            cudaFree(p);
+            cudaSetDevice(previous_device);
+            resident_bytes.fetch_sub(bytes);
+        });
+        context = std::make_shared<Context>(std::move(arena));
+        contexts[device] = context;
+    }
+    auto memory = registrations;
+    if (!context->registered)
+        memory.gpu.push_back({context->memory.get(), bytes, device});
+    auto delegate = kv_cache_manager::TransferClient::Create(config, params, memory);
+    if (!delegate)
+        return {};
+    context->registered = true;
+    return std::make_unique<PackedSsdTransferClient>(
+        std::move(delegate),
+        [](void* dst, kv_cache_manager::MemoryType dt, const void* src, kv_cache_manager::MemoryType st, size_t size) {
+            using M = kv_cache_manager::MemoryType;
+            // D2D cudaMemcpy need not wait on the host. External RDMA is
+            // not ordered by the CUDA default stream: publish/scatter must
+            // finish before handing off or reusing the registered range.
+            return dt == M::GPU && st == M::GPU
+                   && cudaMemcpy(dst, src, size, cudaMemcpyDeviceToDevice) == cudaSuccess
+                   && cudaStreamSynchronize(nullptr) == cudaSuccess;
+        },
+        std::move(context));
+#else
+    throw std::invalid_argument("native SSD GDR requires CUDA");
+#endif
 }
 std::unique_ptr<kv_cache_manager::TransferClient>
 coalescePaceWrite(const std::string& config, std::unique_ptr<kv_cache_manager::TransferClient> delegate) {
@@ -112,8 +184,11 @@ ClientFactory::createTransferClientWithMemory(
     const kv_cache_manager::ClientMemoryRegistrations& memory_registrations) const {
     if (packedSsdRequested())
         throw std::invalid_argument("packed SSD forbids GDR registrations");
-    auto client = kv_cache_manager::TransferClient::Create(config, init_params, memory_registrations);
-    return coalescedPaceWriteRequested() ? coalescePaceWrite(config, std::move(client)) : std::move(client);
+    if (coalescedPaceWriteRequested())
+        throw std::invalid_argument("GDR registrations forbid CPU coalesced PACE writes");
+    if (autil::EnvUtil::getEnv("RTP_DTOP_PACE_SSD_NATIVE_GDR", false))
+        return createNativeSsdGpu(config, init_params, memory_registrations);
+    return kv_cache_manager::TransferClient::Create(config, init_params, memory_registrations);
 }
 
 std::unique_ptr<Subscriber> ClientFactory::createSubscriber(bool enable_vipserver) const {

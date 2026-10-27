@@ -16,6 +16,14 @@ bool remoteCacheGdrEnabled() {
     return enabled;
 }
 
+bool remoteCacheDecodePublicationEnabled() {
+    const char* value = std::getenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH");
+    if (value != nullptr)
+        return std::string_view(value) == "1";
+    const char* legacy = std::getenv("RTP_DTOP_FILE_CP2");
+    return legacy != nullptr && std::string_view(legacy) == "1";
+}
+
 std::optional<double> remoteCacheQuarantineAbortRatio() {
     const char* value = std::getenv("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO");
     if (value == nullptr || *value == '\0') {

@@ -15,79 +15,90 @@ struct CompletionLease {
     }
 };
 
-bool configureFileCp2(StorageBackend::BufferResolver resolver) {
+bool configureDecodePublication(StorageBackend::BufferResolver resolver) {
     file_resolver_             = resolver;
-    file_pace_                 = autil::EnvUtil::getEnv("RTP_DTOP_PACE", false);
-    file_cp2_                  = file_pace_ || autil::EnvUtil::getEnv("RTP_DTOP_FILE_CP2", false);
+    const char* feature = std::getenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH");
+    if (feature && std::string_view(feature) != "0" && std::string_view(feature) != "1") {
+        RTP_LLM_LOG_ERROR("ENABLE_DECODE_PUBLISH must be 0 or 1");
+        return false;
+    }
+    decode_publication_enabled_ = remoteCacheDecodePublicationEnabled();
     std::string backend_config = kv_cache_config_.kvcm_model_sdk_config;
     backend_config.erase(
         std::remove_if(backend_config.begin(), backend_config.end(), [](unsigned char c) { return std::isspace(c); }),
         backend_config.end());
+    // Backend selection is independent of Decode publication. Ordinary Prefill
+    // GDR and B/C toggles need no second experimental PACE enable flag.
+    pace_backend_ = backend_config == "[{\"type\":\"pace\"}]"
+                    || backend_config == "[{\"type\":\"pace_ssd\"}]";
     const bool packed_ssd = autil::EnvUtil::getEnv("RTP_DTOP_PACE_SSD_PACKED_IO", false);
+    // Native SSD delegates GPU IOVs and registrations to the SDK. Keep this
+    // explicit until its matching SDK/Consumer has passed model acceptance.
+    const bool native_ssd = autil::EnvUtil::getEnv("RTP_DTOP_PACE_SSD_NATIVE_GDR", false);
+    if (native_ssd
+        && (!pace_backend_ || !gdr_enabled_ || packed_ssd
+            || backend_config != "[{\"type\":\"pace_ssd\"}]"
+            || kv_cache_config_.kvcm_read_backend_type != 9)) {
+        RTP_LLM_LOG_ERROR("native SSD requires PACE backend9/pace_ssd, GDR, and no packed CPU wrapper");
+        return false;
+    }
     if (packed_ssd
-        && (!file_pace_ || gdr_enabled_ || backend_config != "[{\"type\":\"pace_ssd\"}]"
+        && (!pace_backend_ || gdr_enabled_ || backend_config != "[{\"type\":\"pace_ssd\"}]"
             || kv_cache_config_.kvcm_read_backend_type != 9)) {
         RTP_LLM_LOG_ERROR("explicit SSD compatibility requires backend9/pace_ssd and CPU staging, GDR disabled");
         return false;
     }
-    if (!file_cp2_) {
+    if (!decode_publication_enabled_) {
         return true;
     }
     const int gpu_mib  = autil::EnvUtil::getEnv("RTP_DTOP_GPU_PENDING_MIB", 4096);
     const int gpu_jobs = autil::EnvUtil::getEnv("RTP_DTOP_GPU_PENDING_JOBS", 2);
     if (gpu_mib < 1 || gpu_mib > 16384 || gpu_jobs < 1 || gpu_jobs > 64)
         return false;
-    const int requested_tp = autil::EnvUtil::getEnv("RTP_DTOP_FILE_TARGET_P_TP", 2);
-    if (!file_pace_ || (requested_tp != 2 && requested_tp != 4)
-        || parallelism_config_.prefill_cp_config.prefill_cp_size != requested_tp) {
-        RTP_LLM_LOG_ERROR("DTOP native candidate requires matching PACE CP2 or CP4 target");
+    file_decode_ = parallelism_config_.role_type == RoleType::DECODE;
+    const bool prefill = parallelism_config_.role_type == RoleType::PREFILL;
+    const auto& cp = parallelism_config_.prefill_cp_config;
+    target_prefill_cp_ = cp.prefill_cp_size;
+    target_prefill_tp_ = target_prefill_cp_;
+    target_physical_shards_ = cp.kv_cache_sharded ? target_prefill_cp_ : 1;
+    file_capture_blocks_ = target_physical_shards_;
+    // CP is the target layout, DP is execution parallelism. They are independent.
+    // Geometry checks remain in CPSlotMapper / group projection, never a CP2/4 whitelist.
+    if (!pace_backend_ || (!file_decode_ && !prefill) || target_prefill_cp_ < 1
+        || cache_config_.seq_size_per_block < 1
+        || static_cast<size_t>(target_prefill_cp_) > static_cast<size_t>(std::numeric_limits<int>::max()) / cache_config_.seq_size_per_block
+        || !cache_config_.mtp_sub_configs.empty() || sp_config_.type != SP_TYPE_NONE
+        || autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false)
+        || !kv_cache_config_.kvcm_client_config.empty() || kv_cache_config_.kvcm_instance_id_salt.empty()
+        || (pace_backend_ && backend_config != ((packed_ssd || native_ssd) ? "[{\"type\":\"pace_ssd\"}]" : "[{\"type\":\"pace\"}]"))
+        || (file_decode_ && (parallelism_config_.tp_size != 1 || parallelism_config_.dp_size < 1))
+        || (prefill && (parallelism_config_.tp_size != target_prefill_cp_ || parallelism_config_.dp_size != 1))) {
+        RTP_LLM_LOG_ERROR("Decode publication requires matching target P CP layout, positive D DP, synchronous single-token decoding, and native PACE");
         return false;
     }
-    file_decode_         = parallelism_config_.role_type == RoleType::DECODE;
-    const bool  prefill  = parallelism_config_.role_type == RoleType::PREFILL;
-    const auto& cp       = parallelism_config_.prefill_cp_config;
-    file_target_cp_      = cp.prefill_cp_size;
-    file_target_tp_      = autil::EnvUtil::getEnv("RTP_DTOP_FILE_TARGET_P_TP",
-                                             prefill ? static_cast<int>(parallelism_config_.tp_size) : file_target_cp_);
-    file_shards_         = cp.kv_cache_sharded ? file_target_cp_ : 1;
-    file_capture_blocks_ = autil::EnvUtil::getEnv("RTP_DTOP_FILE_CAPTURE_BLOCKS", file_shards_);
-    if ((!file_decode_ && !prefill) || cache_config_.seq_size_per_block != 128 || !cache_config_.mtp_sub_configs.empty()
-        || sp_config_.type != SP_TYPE_NONE
-        || !((file_target_tp_ == 2 && (cp.prefill_cp_size == 1 || cp.prefill_cp_size == 2))
-             || (file_target_tp_ == 4 && (cp.prefill_cp_size == 1 || cp.prefill_cp_size == 4)))
-        || (file_capture_blocks_ != 1 && file_capture_blocks_ != file_shards_
-            && !(file_shards_ == 1 && file_capture_blocks_ == file_target_cp_))
-        || !kv_cache_config_.kvcm_client_config.empty() || kv_cache_config_.kvcm_instance_id_salt.empty()
-        || kv_cache_config_.kvcm_instance_group.rfind("linshuo_decode_remote_", 0) != 0
-        || (file_pace_ ? backend_config != (packed_ssd ? "[{\"type\":\"pace_ssd\"}]" : "[{\"type\":\"pace\"}]") :
-                         kv_cache_config_.kvcm_model_sdk_config.find("\"file\"") == std::string::npos)
-        || (file_decode_
-            && !((file_target_tp_ == 2 && (parallelism_config_.tp_size == 1 && parallelism_config_.dp_size == 2))
-                 || (file_target_tp_ == 4 && parallelism_config_.tp_size == 1 && parallelism_config_.dp_size == 4
-                     && parallelism_config_.ep_size == 4)))
-        || (prefill && (parallelism_config_.tp_size != file_target_tp_ || parallelism_config_.dp_size != 1))) {
-        RTP_LLM_LOG_ERROR("DTOP_FILE rejects unsupported role/layout/configuration");
+    if (!gdr_enabled_) {
+        RTP_LLM_LOG_ERROR("Decode publication requires GDR; CPU payload staging is not an alternative");
         return false;
     }
     RTP_LLM_LOG_INFO(
-        "DTOP_FILE layout target_cp=%d target_tp=%d shards=%d capture_blocks=%d visible_tokens=%d dp=%ld role=%d",
-        file_target_cp_,
-        file_target_tp_,
-        file_shards_,
+        "DTOP_FILE layout target_cp=%d target_tp=%d shards=%d capture_blocks=%d visible_tokens=%zu dp=%ld role=%d",
+        target_prefill_cp_,
+        target_prefill_tp_,
+        target_physical_shards_,
         file_capture_blocks_,
-        128 * std::max(file_shards_, file_capture_blocks_),
+        cache_config_.seq_size_per_block * target_physical_shards_,
         parallelism_config_.dp_size,
         static_cast<int>(parallelism_config_.role_type));
     RTP_LLM_LOG_INFO("DTOP_TRANSPORT backend=%s end_only=1 target_cp=%d target_tp=%d",
-                     file_pace_ ? "pace" : "file",
-                     file_target_cp_,
-                     file_target_tp_);
+                     pace_backend_ ? "pace" : "file",
+                     target_prefill_cp_,
+                     target_prefill_tp_);
     file_resolver_ = std::move(resolver);
     return true;
 }
 
 size_t fileWireBytes(const std::string& tag) const {
-    if (!file_cp2_ || !file_decode_ || file_shards_ == 1) {
+    if (!decode_publication_enabled_ || !file_decode_ || target_physical_shards_ == 1) {
         return cache_config_.blockSizeBytesForGroup(tag);
     }
     const auto& group = cache_config_.topology().group(tag);
@@ -98,7 +109,7 @@ size_t fileWireBytes(const std::string& tag) const {
         return cache_config_.blockSizeBytesForGroup(tag);
     }
     RTP_LLM_CHECK_WITH_INFO(group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK
-                                && group.seqSizePerBlock() == 128 * file_shards_,
+                                && group.seqSizePerBlock() == 128 * target_physical_shards_,
                             "DTOP_FILE requires matching canonical state/SWA span, tag=%s",
                             tag.c_str());
     size_t bytes = 0;
@@ -115,8 +126,8 @@ size_t fileWireBytes(const std::string& tag) const {
                                     tag.c_str());
         }
         RTP_LLM_CHECK_WITH_INFO(
-            payload > 0 && payload % file_shards_ == 0, "DTOP_FILE invalid state payload, tag=%s", tag.c_str());
-        bytes += payload / file_shards_;
+            payload > 0 && payload % target_physical_shards_ == 0, "DTOP_FILE invalid state payload, tag=%s", tag.c_str());
+        bytes += payload / target_physical_shards_;
     }
     return bytes;
 }
@@ -128,10 +139,10 @@ std::string fileTag(const std::string& tag, int peer) const {
 void logFileRead(const std::string&                 tag,
                  const std::vector<int32_t>&        blocks,
                  const kv_cache_manager::UriStrVec& uris) const {
-    if (file_pace_ && !autil::EnvUtil::getEnv("RTP_DTOP_PAYLOAD_AUDIT", false)) {
+    if (pace_backend_ && !autil::EnvUtil::getEnv("RTP_DTOP_PAYLOAD_AUDIT", false)) {
         return;
     }
-    if (!file_cp2_ && !autil::EnvUtil::getEnv("RTP_DTOP_FILE_AUDIT_BASELINE_P", false)) {
+    if (!decode_publication_enabled_ && !autil::EnvUtil::getEnv("RTP_DTOP_FILE_AUDIT_BASELINE_P", false)) {
         return;
     }
     const auto                  diagnostic_started_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -177,10 +188,10 @@ void logFileRead(const std::string&                 tag,
 void logPrefillFileWrite(const std::string&                 tag,
                          const std::vector<int32_t>&        blocks,
                          const kv_cache_manager::UriStrVec& uris) const {
-    if (file_pace_ && !autil::EnvUtil::getEnv("RTP_DTOP_PAYLOAD_AUDIT", false)) {
+    if (pace_backend_ && !autil::EnvUtil::getEnv("RTP_DTOP_PAYLOAD_AUDIT", false)) {
         return;
     }
-    if (!file_cp2_ && !autil::EnvUtil::getEnv("RTP_DTOP_FILE_AUDIT_BASELINE_P", false)) {
+    if (!decode_publication_enabled_ && !autil::EnvUtil::getEnv("RTP_DTOP_FILE_AUDIT_BASELINE_P", false)) {
         return;
     }
     const auto                  diagnostic_started_us = autil::TimeUtility::currentTimeInMicroSeconds();
@@ -222,13 +233,15 @@ void logPrefillFileWrite(const std::string&                 tag,
 // required terminal STATE/SWA page must still be present at that exact key.
 StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end) {
     StorageRequest request;
-    if (!file_cp2_ || !file_decode_ || parallelism_config_.tp_rank != 0
-        || !autil::EnvUtil::getEnv("RTP_DTOP_DECODE_PUBLISH", true) || resource.decodeCompletionSubmitted())
+    if (!decode_publication_enabled_ || !file_decode_ || parallelism_config_.tp_rank != 0
+        || (!std::getenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH")
+            && !autil::EnvUtil::getEnv("RTP_DTOP_DECODE_PUBLISH", true))
+        || resource.decodeCompletionSubmitted())
         return request;
     if (resource.batchSize() != 1 || computed_end == 0)
         return request;
     const size_t base           = cache_config_.seq_size_per_block;
-    const size_t canonical_unit = base * file_shards_;
+    const size_t canonical_unit = base * target_physical_shards_;
     const size_t completed_full = computed_end / base;
     const auto&  source_keys    = resource.cacheKeys(0);
     if (source_keys.size() < completed_full) {
@@ -242,7 +255,7 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
         if (!entry.second.is_full)
             unit = std::lcm(unit, group.seqSizePerBlock());
     }
-    CPSlotMapper mapper(0, file_shards_, static_cast<int>(base));
+    CPSlotMapper mapper(0, target_physical_shards_, static_cast<int>(base));
     size_t       end = computed_end / unit * unit;
     for (; end > 0; end -= unit) {
         const size_t count = end / canonical_unit;
@@ -300,8 +313,8 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
             StorageBlockHandle handle;
             handle.tag = spec.tag;
             if (spec.is_full) {
-                for (int peer = 0; peer < file_target_tp_; ++peer)
-                    handle.peer_blocks.push_back(blocks.at(file_shards_ * key + (file_shards_ > 1 ? peer : 0)));
+                for (int peer = 0; peer < target_prefill_tp_; ++peer)
+                    handle.peer_blocks.push_back(blocks.at(target_physical_shards_ * key + (target_physical_shards_ > 1 ? peer : 0)));
                 handle.block = handle.peer_blocks.front();
             } else {
                 handle.block = blocks.at((key + 1) * canonical_unit / group.seqSizePerBlock() - 1);
@@ -358,7 +371,7 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
         kv_cache_manager::BlockBuffers buffers;
     };
     std::vector<Batch> batches(requests.size());
-    CPSlotMapper       mapper(0, file_shards_, cache_config_.seq_size_per_block);
+    CPSlotMapper       mapper(0, target_physical_shards_, cache_config_.seq_size_per_block);
     // Validate and resolve every source before submitting any SDK operation.
     for (size_t peer = 0; peer < requests.size(); ++peer) {
         const auto& remote = requests[peer].remote_request();

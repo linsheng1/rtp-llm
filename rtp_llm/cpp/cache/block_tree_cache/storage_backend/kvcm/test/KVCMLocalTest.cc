@@ -212,7 +212,7 @@ TEST(KVCMLocalTest, GdrRegistrationUsesActualAllocationSpan) {
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 }
 
-TEST(KVCMLocalTest, GdrFallsBackToStandardRegistrationForHostPinnedPool) {
+TEST(KVCMLocalTest, StrictGdrRejectsHostPinnedPoolBeforeSdkInitialization) {
     auto environment = makeHybridBackendEnvironment("kvcm_storage_backend_mixed_gdr_span");
     ASSERT_EQ(environment.cache_config.groupTags().size(), 2u);
 
@@ -235,41 +235,7 @@ TEST(KVCMLocalTest, GdrFallsBackToStandardRegistrationForHostPinnedPool) {
     environment.pools_by_tag[host_tag] = host_pool;
 
     auto client_wrapper = std::make_shared<MockClientWrapper>();
-    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _))
-        .WillOnce(Invoke([&](const kvcm::ClientWrapper::ConfigMap&,
-                             kv_cache_manager::RoleType,
-                             const std::vector<kvcm::ClientWrapper::PoolRegistration>& registrations,
-                             const std::vector<std::string>&                           tags) {
-            EXPECT_EQ(registrations.size(), environment.cache_config.groupTags().size());
-            EXPECT_EQ(tags.size(), registrations.size());
-            if (registrations.size() != tags.size()) {
-                return false;
-            }
-            for (size_t index = 0; index < tags.size(); ++index) {
-                const auto& pool         = environment.pools_by_tag.at(tags[index]);
-                const auto& registration = registrations[index];
-                EXPECT_EQ(registration.span.base, pool->getBaseAddress());
-                if (tags[index] == host_tag) {
-                    EXPECT_EQ(pool->where(), MemoryType::MEMORY_CPU_PINNED);
-                    EXPECT_EQ(registration.span.size, pool->getTotalSizeBytes());
-                    EXPECT_FALSE(registration.memory_registrations.has_value());
-                } else {
-                    EXPECT_TRUE(pool->usesDedicatedDeviceAllocation());
-                    EXPECT_EQ(registration.span.size, pool->getAllocationSizeBytes());
-                    if (!registration.memory_registrations.has_value()) {
-                        ADD_FAILURE() << "expected GDR memory registration for device pool";
-                        return false;
-                    }
-                    if (registration.memory_registrations->gpu.size() != 1u) {
-                        ADD_FAILURE() << "expected one GPU registration for device pool";
-                        return false;
-                    }
-                    EXPECT_EQ(registration.memory_registrations->gpu.front().base, pool->getBaseAddress());
-                    EXPECT_EQ(registration.memory_registrations->gpu.front().size, pool->getAllocationSizeBytes());
-                }
-            }
-            return true;
-        }));
+    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).Times(0);
     EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
     auto backend = makeBackend(environment,
                                singleRankConfig(),
@@ -277,7 +243,7 @@ TEST(KVCMLocalTest, GdrFallsBackToStandardRegistrationForHostPinnedPool) {
                                /*broadcast_manager=*/nullptr,
                                /*metrics_reporter=*/nullptr,
                                /*gdr_enabled=*/true);
-    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+    ASSERT_FALSE(initSingleRank(*backend.backend, environment));
 }
 
 TEST(KVCMLocalTest, LegacyEmptyRemoteResponsePreservesOneofPresence) {

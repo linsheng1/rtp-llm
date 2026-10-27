@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamCacheResource.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -122,9 +123,7 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               stream_->streamId(),
                               total_blocks,
                               tierName(target_tier));
-            const bool lookup_only = autil::EnvUtil::getEnv("RTP_DTOP_BENCH_READ_ONLY_REQUESTS", false)
-                                     && !stream_->generateConfig()->enable_device_cache;
-            if (!lookup_only && autil::EnvUtil::getEnv("RTP_DTOP_FILE_CP2", false)
+            if (remoteCacheDecodePublicationEnabled()
                 && resource_context_.role_type == RoleType::DECODE
                 && !autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false)
                 && stream_->completeTokenIdsPtr()->seqLength() > 0) {
@@ -567,10 +566,6 @@ bool StreamCacheResource::enableCacheLookup() const {
 
 Tier StreamCacheResource::storeTarget() const {
     if (!reuseCache()) {
-        return Tier::NONE;
-    }
-    if (autil::EnvUtil::getEnv("RTP_DTOP_BENCH_READ_ONLY_REQUESTS", false)
-        && !stream_->generateConfig()->enable_device_cache) {
         return Tier::NONE;
     }
     if (enableDeviceCache()) {

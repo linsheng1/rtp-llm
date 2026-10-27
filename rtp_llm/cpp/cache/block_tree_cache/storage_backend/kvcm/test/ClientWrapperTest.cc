@@ -25,6 +25,21 @@ using ::testing::Return;
 using ::testing::ReturnRef;
 using ::testing::SetArgReferee;
 
+TEST(ClientFactoryGdrTest, RejectsCpuWrappersBeforeInitializingSdk) {
+    ClientFactory factory;
+    kv_cache_manager::InitParams params{};
+    kv_cache_manager::ClientMemoryRegistrations registrations;
+    {
+        autil::EnvGuard packed{"RTP_DTOP_PACE_SSD_PACKED_IO", "1"};
+        EXPECT_THROW(factory.createTransferClientWithMemory("{}", params, registrations), std::invalid_argument);
+    }
+    {
+        autil::EnvGuard packed{"RTP_DTOP_PACE_SSD_PACKED_IO", "0"};
+        autil::EnvGuard coalesced{"RTP_KVCM_COALESCE_PACE_WRITES", "1"};
+        EXPECT_THROW(factory.createTransferClientWithMemory("{}", params, registrations), std::invalid_argument);
+    }
+}
+
 struct InitObservation {
     const kv_cache_manager::RegistSpan* registration_descriptor = nullptr;
     void*                               registration_base       = nullptr;

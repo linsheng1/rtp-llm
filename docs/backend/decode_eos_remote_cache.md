@@ -1,14 +1,17 @@
 # Decode EOS publication through the Prefill remote-cache pipeline
 
-Status: **review-only port**, based on the upstream
-`feature/dsv41-dev-main-202161013` snapshot
-`a06c91abea437bf85cd5bc6634b0e142093ebe2e`, copied unchanged into the fork.
-Changes live on a separate branch; neither upstream nor the fork baseline has
-been merged or modified. ARM64 native regression on this base passed;
-full-wheel and model acceptance conditions are recorded below. The PR remains Draft.
-This implementation
-retains native GPU pages after successful Decode completion. It does **not**
-implement SDK/Consumer GPU registration or establish GDR support.
+Status: **review-only**, targeting `feature/dsv41-dev-main-202161013`.
+No upstream or fork baseline has been merged. The current candidate generalizes
+P CP / D DP configuration and supplies dedicated GPU memory registrations to a
+matching PACE SDK. It retains native GPU pages after successful Decode completion;
+there is no early CPU KV snapshot. Actual RDMA/GDR is a property of the matching
+SDK, Consumer, Provider and transport configuration, and must be verified at both
+ends rather than inferred from an environment variable.
+
+The current functional and capacity qualification is maintained separately from
+the historical release-port results below. Native GPU/mock tests do not qualify
+physical CP8/CP16 model execution. Large synthetic backend payloads do not qualify
+large model KV histories or net session performance.
 
 ## Lifecycle and checkpoint selection
 
@@ -41,41 +44,155 @@ implement SDK/Consumer GPU registration or establish GDR support.
    transaction or indefinitely retain payload whose transfer already completed.
 
 One EOS device fence makes the final GPU writes visible before asynchronous
-publication. GPU IOVs reach the transfer client, but the current SDK can still use
-CPU staging internally. Native page retention is not proof of zero-copy transfer.
+publication. FULL pages and final state/SWA data are sent through the existing
+Prefill transaction and GPU IOV path. Dedicated GPU registration is mandatory
+when GDR is requested; an unsuitable host-pinned or non-dedicated pool fails
+initialization rather than silently switching to CPU payload staging.
 
-## Admission and opt-in settings
+## General configuration
 
-No GPU shadow KV pool or early request-owned CPU snapshot is allocated. The cost
-is delayed reclamation of existing GPU KV pages. Admission currently accounts for
-the entire candidate checkpoint before the metadata mask is available; masked
-pages are not released early.
+Use the same feature setting and target layout on P and D:
+
+```sh
+export RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH=1
+export RTP_LLM_REMOTE_CACHE_ENABLE_GDR_ZERO_COPY=1
+export RTP_KVCM_BOUNDED_SDK_BATCH=1
+```
+
+`prefill_cp_size` is the target P CP count on both roles. P uses TP equal to
+that count and DP1; D uses TP1 and an independent positive `dp_size`. For example,
+P CP2 / D DP4 and P CP8 / D DP4 use exactly the same feature switch. There is no
+CP2/CP4 whitelist, instance-group name prefix requirement, or DP=CP requirement.
+The model's own shape, expert-parallel and hardware constraints still apply.
+
+Select replication with the existing `prefill_cp_kv_cache_sharded=0`, or sharding
+with `prefill_cp_kv_cache_sharded=1`. Both roles must agree. Cache identity includes
+target CP, physical shard count and base block size automatically. Do not reuse
+old-format remote keys across layouts; the identity change deliberately causes a
+cold miss rather than a potentially incorrect cross-layout hit.
+
+For DRAM select the existing `pace` SDK backend and read backend 3. For explicit
+SSD select `pace_ssd`, read backend 9, and
+`RTP_DTOP_PACE_SSD_NATIVE_GDR=1`. Backend selection is independent of Decode
+publication, so ordinary Prefill GDR does not require a second experimental PACE
+flag. The old packed-SSD CPU wrapper and CPU coalescer are incompatible with GDR
+registrations and must remain disabled for the direct GPU path.
+
+The transport configuration must select RDMA without a TCP payload fallback.
+Configure the matching Consumer's GDR read/write and external-memory flags,
+`MC_DISABLE_GPU_DIRECT_RDMA=0`, and the real local rank count for
+`TAIR_MEMPOOL_EXPECTED_EXTERNAL_CLIENTS` (the actual local client-process count
+for that Consumer: CP/DP count in the single-host-per-role examples; per-node local
+rank count for multi-host roles). A Provider does not inherit the Consumer's rank count. GPU
+registration success alone does not prove that a closed-source Consumer avoided
+D2H/H2D: validate registered payload address ranges and Consumer CUDA activities
+with a working same-process positive control.
+
+Legacy `RTP_DTOP_FILE_CP2` is read only when the new feature switch is absent.
+An explicit new value 0 overrides that legacy enable, and an explicit value 1
+also overrides `RTP_DTOP_DECODE_PUBLISH=0`. New deployments need none of the old
+CP-specific target/count flags. Obsolete BENCH flags no longer change normal
+Prefill publication or request-level local cache policy.
+
+The enabled path currently rejects MTP/speculative decoding and asynchronous
+stream reservation explicitly. It requires a native single PACE backend, valid
+base-block geometry and a nonempty instance salt. Normal feature-off behavior
+remains available. Request errors/cancellation do not publish. Deployment-level
+cache-tier policy and the existing request reuse-cache/override policy retain
+their ordinary meaning. With publication enabled, D remote lookup is intentionally
+local-only; D receives its prompt KV through the existing P-to-D mechanism and
+publishes completed additions for P. This does not add remote-to-D reconstruction
+from the P-layout wire format. D local hot-cache reuse remains enabled.
+
+## Admission and failure isolation
+
+No GPU shadow KV pool or request-owned early CPU payload snapshot is allocated.
+The cost is delayed reclamation of existing source GPU pages. Local hot-cache
+insertion and ordinary Prefill remote publication remain enabled.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `RTP_DTOP_GPU_PENDING_MIB` | `4096` | Per-D-process unique retained source-page budget, including quarantine; accepted range 1–16384 MiB. |
-| `RTP_DTOP_GPU_PENDING_JOBS` | `2` | Per-D-process publication job budget, including quarantine; accepted range 1–64. |
-| `RTP_DTOP_DECODE_PUBLISH` | `true` | Enable EOS publication after the experiment has been explicitly configured. Set false for a Prefill-only control. |
-| `RTP_KVCM_BOUNDED_SDK_BATCH` | `false` | Split SDK calls at 64 MiB, 256 blocks or 1024 IOVs while preserving trace metadata and actual-URI order. |
-| `RTP_KVCM_COALESCE_PACE_WRITES` | `false` | Pack one URI's IOVs into a bounded CPU staging buffer for the explicit PACE DRAM backend. |
-| `RTP_KVCM_COALESCE_2D_PACK` | `false` | With coalescing enabled, combine verified regular GPU rows with `cudaMemcpy2D`. |
+| `RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH` | `0` | One opt-in switch for all supported P CP / independent D DP layouts. |
+| `RTP_DTOP_GPU_PENDING_MIB` | `4096` | Per-D-process unique retained source-page budget, including quarantine; range 1–16384 MiB. |
+| `RTP_DTOP_GPU_PENDING_JOBS` | `2` | Per-D-process publication jobs, including quarantine; range 1–64. |
+| `RTP_KVCM_BOUNDED_SDK_BATCH` | `0` | Split SDK calls at 64 MiB, 256 blocks or 1024 IOVs; preserve trace and actual-URI order. |
+| `RTP_DTOP_PACE_SSD_NATIVE_GDR` | `0` | Explicit SSD GPU IOV compatibility using a pre-registered GPU D2D packing arena. |
 
-When admission is exhausted, skip the optional remote publication and preserve
-the generated response and local cache. The retained-page budget is not an extra
-HBM allocation. Coalescing separately limits staging to 64 MiB per call and
-512 MiB per process. It is mutually exclusive with the packed SSD adapter and is
-explicitly a CPU-staging optimization.
+Admission accounts for the entire candidate checkpoint before the metadata mask
+is available; masked pages are not released early. Exhaustion skips optional
+remote publication while preserving the response and normal local cache. The
+retained-page limit is not an extra HBM allocation or a proof of zero capacity
+loss.
 
-The original implementation's narrow experiment gate remains: `RTP_DTOP_PACE=true` and
-`RTP_DTOP_FILE_CP2=true` (the inherited gate name also covers CP4),
-matching `RTP_DTOP_FILE_TARGET_P_TP=2` or `4`, 128-token base blocks, no MTP or
-speculative decoding, P CP2/CP4 with TP matching CP, D TP1 with DP2/DP4 (EP4 for
-DP4), an explicit single PACE backend, nonempty instance salt, and an isolated
-instance group beginning with `linshuo_decode_remote_`. Replication is selected
-by the existing `prefill_cp_config.kv_cache_sharded` setting, not a second pool.
-These guards are inherited experimental constraints, not a general deployment API.
+The SSD adapter uses one shared registered 64 MiB GPU arena per process/device,
+with a 512 MiB per-process registered-arena cap. Operations lease disjoint ranges
+sized to their largest URI, not their entire logical batch. GPU writes gather one
+URI immediately before its SDK write; reads scatter its result before the next
+URI overwrites that range. This avoids starving concurrent cache tags when a
+replicated SWA batch approaches 64 MiB. The legacy CPU adapter retains separate
+per-object buffers. The dedicated GPU copy callback explicitly waits for its
+default-stream D2D copy before returning, because external RDMA is not ordered
+by CUDA stream dependencies. This is a per-packing-copy completion guarantee,
+not a new per-token inference fence.
+Unknown SDK completion quarantines only that operation's range; independent tags
+can continue using other ranges. The affected client fails closed until shutdown,
+and its delegate drains before its quarantined memory is released. This protects
+pending DMA and can reduce available capacity; it does not make uncertain writes
+successful. The limits are transient-operation limits, not remote DRAM/SSD pool
+capacity limits. SSD uses D2D gather/scatter, not a CPU KV snapshot; this does not
+claim GPUDirect Storage on the remote SSD host.
 
 ## Validation and limits
+
+### Current generalized candidate
+
+Native GPU/mock coverage is CP1/2/4/8/16 × sharded/replicated × independent
+DP1/3/8. The current 377 executed tests passed with zero skips, including GPU
+packing/scatter ordering, concurrent large logical batches and unknown-completion
+range isolation. Real-model qualification includes CP2 P / DP4 D and CP4 P / DP4 D,
+with both layouts and DRAM/explicit SSD. Execution results, exact wheel/source
+hashes, actual pool budgets and Consumer observations must be taken from the
+matching test report. Unexecuted combinations are not passes.
+
+The current large backend test generates distinct 32 MiB objects entirely on GPU,
+commits the actual writes, and uses an independent reader process to compare every
+64-bit word on GPU. The only readback is an 8-byte diagnostic mismatch count per
+object, outside the registered payload range. Target payloads are 128 GiB in a
+160 GiB DRAM pool and 512 GiB in a 640 GiB SSD backing file. Actual SSD allocation,
+process IO and O_DIRECT descriptors are recorded; sparse file length alone is not
+acceptance. These byte tests and the real-model tests are reported separately.
+
+### Current executed result (generalized v5)
+
+Full wheel SHA256: `628b4aa3c8c0cdaa29f49d28e2dbff1054a919c396edb2c4164b9136ce04eee2`;
+source overlay SHA256: `e8d5831fff2c5373bdfb9596e14c0008e4b2a4279f105d05fa721348716cc2bd`.
+All 377 native tests executed with zero failures or skips. All four actual-model
+paths below passed EOS publication, new-P cold recovery, local-hot/bypass exact
+token comparison, and normal model/Consumer shutdown:
+
+| Backend | Layout | P CP | D DP | Published endpoints | Result |
+| --- | --- | --- | --- | --- | --- |
+| DRAM | sharded | 2 | 4 | 8192, 8192, 8192, 8448 | Passed |
+| DRAM | replicated | 4 | 4 | 8192, 8192, 8320, 8448 | Passed |
+| SSD | replicated | 2 | 4 | 8192, 8192, 8320, 8448 | Passed |
+| SSD | sharded | 4 | 4 | 8192, 8192, 8192, 8192 | Passed |
+
+Both model and Consumer observations show zero KV-payload D2H/H2D in the
+qualified route. SSD GPU D2D packing is counted separately. Actual SSD cold
+reads were 19,292,160 and 9,449,472 bytes, with O_DIRECT descriptors observed.
+The model pools were 4 GiB/card; this is correctness qualification, not a maximum
+HBM-capacity or performance-frontier result. CP8/CP16 and DP3/DP8 have native
+GPU/mock coverage, without physical multi-node model qualification.
+
+Large backend verification separately passed 128 GiB DRAM and 512 GiB SSD
+full-word GPU checks, using the v3 single-URI probe. Its source revision and
+copy diagnostics remain distinct from final v5 model evidence. In v3, the last
+CP2-replicated model attempt revealed ordinary P write failures despite matching
+continuations. V4 switched GPU packing leases from logical-batch size to the
+largest URI; v5 explicitly completed D2D copies before external RDMA handoff.
+Failed and interrupted attempts are retained and not counted as final passes.
+
+### Historical qualification (different revisions)
 
 ### Initial release-port attempt (historical)
 

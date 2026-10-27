@@ -1,20 +1,182 @@
 #include <cuda_runtime_api.h>
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include <algorithm>
 #include <atomic>
 #include <future>
 #include <map>
 #include <tuple>
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PackedSsdTransferClient.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
 namespace rtp_llm {
 namespace {
+TEST(DecodePublicationConfigTest, GenericSwitchOverridesLegacyAndNeedsNoCpSpecificFlag) {
+    autil::EnvGuard legacy("RTP_DTOP_FILE_CP2", "1");
+    {
+        autil::EnvGuard off("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+        EXPECT_FALSE(remoteCacheDecodePublicationEnabled());
+    }
+    {
+        autil::EnvGuard on("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+        EXPECT_TRUE(remoteCacheDecodePublicationEnabled());
+    }
+}
+TEST(NativeSsdGpuPackingTest, GathersAndScattersDifferentGpuIovsWithoutHostPayloadStaging) {
+    using namespace kv_cache_manager;
+    using M = kv_cache_manager::MemoryType;
+    auto allocate = [](size_t bytes) {
+        void* p = nullptr;
+        if (cudaMalloc(&p, bytes) != cudaSuccess)
+            throw std::runtime_error("test GPU allocation failed");
+        return std::shared_ptr<void>(p, [](void* v) { cudaFree(v); });
+    };
+    auto arena = allocate(kvcm::PackedSsdTransferClient::max_operation_bytes);
+    auto input = allocate(4096), output = allocate(4096), remote = allocate(4096);
+    std::vector<unsigned char> expected(1280);
+    for (size_t i = 0; i < expected.size(); ++i)
+        expected[i] = (i * 31 + 17) % 256;
+    ASSERT_EQ(cudaMemcpy(input.get(), expected.data(), expected.size(), cudaMemcpyHostToDevice), cudaSuccess);
+    auto* src = static_cast<unsigned char*>(input.get());
+    auto* dst = static_cast<unsigned char*>(output.get());
+    auto* storage = static_cast<unsigned char*>(remote.get());
+    auto destroyed = std::make_shared<int>(0);
+    auto delegate = std::make_unique<MockTransferClient>(destroyed);
+    const UriStrVec uris{"object0", "object1"};
+    EXPECT_CALL(*delegate, SaveKvCaches(_, _, _)).Times(2).WillRepeatedly(
+        Invoke([&](const UriStrVec& u, const BlockBuffers& b, auto) {
+            EXPECT_EQ(u.size(), 1u);
+            EXPECT_EQ(b.size(), 1u);
+            EXPECT_EQ(b[0].iovs.size(), 1u);
+            EXPECT_EQ(b[0].iovs[0].type, M::GPU);
+            size_t offset = u[0] == uris[0] ? 0 : 257;
+            EXPECT_EQ(b[0].iovs[0].size, u[0] == uris[0] ? 257u : 1023u);
+            EXPECT_EQ(cudaMemcpy(storage + offset, b[0].iovs[0].base, b[0].iovs[0].size,
+                                 cudaMemcpyDeviceToDevice), cudaSuccess);
+            return std::make_pair(ER_OK, u);
+        }));
+    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(2).WillRepeatedly(
+        Invoke([&](const UriStrVec& u, const BlockBuffers& b, auto) {
+            EXPECT_EQ(b.size(), 1u);
+            EXPECT_EQ(b[0].iovs.size(), 1u);
+            EXPECT_EQ(b[0].iovs[0].type, M::GPU);
+            size_t offset = u[0] == uris[0] ? 0 : 257;
+            EXPECT_EQ(cudaMemcpy(b[0].iovs[0].base, storage + offset, b[0].iovs[0].size,
+                                 cudaMemcpyDeviceToDevice), cudaSuccess);
+            return ER_OK;
+        }));
+    kvcm::PackedSsdTransferClient client(
+        std::move(delegate),
+        [](void* d, M dt, const void* s, M st, size_t n) {
+            EXPECT_EQ(dt, M::GPU);
+            EXPECT_EQ(st, M::GPU);
+            return dt == M::GPU && st == M::GPU
+                   && cudaMemcpy(d, s, n, cudaMemcpyDeviceToDevice) == cudaSuccess;
+        }, std::make_shared<kvcm::PackedSsdTransferClient::GpuPackingContext>(arena));
+    BlockBuffers source(2), destination(2);
+    source[0].iovs = {{M::GPU, src, 17}, {M::GPU, src + 17, 240}};
+    source[1].iovs = {{M::GPU, src + 257, 513}, {M::GPU, src + 770, 510}};
+    destination[0].iovs = {{M::GPU, dst + 2048, 19}, {M::GPU, dst + 2067, 238}};
+    destination[1].iovs = {{M::GPU, dst, 13}, {M::GPU, dst + 13, 1010}};
+    ASSERT_EQ(client.SaveKvCaches(uris, source).first, ER_OK);
+    ASSERT_EQ(client.LoadKvCaches(uris, destination), ER_OK);
+    std::vector<unsigned char> first(257), second(1023);
+    ASSERT_EQ(cudaMemcpy(first.data(), dst + 2048, first.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+    ASSERT_EQ(cudaMemcpy(second.data(), dst, second.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+    EXPECT_TRUE(std::equal(first.begin(), first.end(), expected.begin()));
+    EXPECT_TRUE(std::equal(second.begin(), second.end(), expected.begin() + 257));
+}
+TEST(NativeSsdGpuPackingTest, ConcurrentLargeLogicalBatchesReserveOnlyOneGpuObjectEach) {
+    using namespace kv_cache_manager;
+    using M = kv_cache_manager::MemoryType;
+    constexpr size_t object_bytes = 16ULL * 1024 * 1024;
+    void* base = nullptr;
+    void* source = nullptr;
+    ASSERT_EQ(cudaMalloc(&base, kvcm::PackedSsdTransferClient::max_operation_bytes), cudaSuccess);
+    auto arena = std::shared_ptr<void>(base, [](void* p) { cudaFree(p); });
+    ASSERT_EQ(cudaMalloc(&source, object_bytes), cudaSuccess);
+    auto input = std::shared_ptr<void>(source, [](void* p) { cudaFree(p); });
+    ASSERT_EQ(cudaMemset(source, 0x5a, object_bytes), cudaSuccess);
+    auto context = std::make_shared<kvcm::PackedSsdTransferClient::GpuPackingContext>(arena);
+    auto destroyed = std::make_shared<int>(0);
+    auto first = std::make_unique<MockTransferClient>(destroyed);
+    auto second = std::make_unique<MockTransferClient>(destroyed);
+    std::promise<void> entered, release;
+    auto started = entered.get_future();
+    auto released = release.get_future().share();
+    std::atomic<int> first_calls{0};
+    EXPECT_CALL(*first, SaveKvCaches(_, _, _)).Times(4).WillRepeatedly(
+        Invoke([&](const auto& u, const auto& b, auto) {
+            EXPECT_EQ(b.size(), 1u);
+            EXPECT_EQ(b[0].iovs[0].size, object_bytes);
+            if (first_calls.fetch_add(1) == 0) {
+                entered.set_value();
+                released.wait();
+            }
+            return std::make_pair(ER_OK, u);
+        }));
+    EXPECT_CALL(*second, SaveKvCaches(_, _, _)).Times(4).WillRepeatedly(
+        Invoke([&](const auto& u, const auto& b, auto) {
+            EXPECT_EQ(b.size(), 1u);
+            EXPECT_EQ(b[0].iovs[0].type, M::GPU);
+            EXPECT_EQ(context->active_reservations, 2u);
+            return std::make_pair(ER_OK, u);
+        }));
+    auto copy = [](void* d, M dt, const void* s, M st, size_t n) {
+        return dt == M::GPU && st == M::GPU && cudaMemcpy(d, s, n, cudaMemcpyDeviceToDevice) == cudaSuccess;
+    };
+    kvcm::PackedSsdTransferClient a(std::move(first), copy, context);
+    kvcm::PackedSsdTransferClient b(std::move(second), copy, context);
+    BlockBuffers buffers(4);
+    for (auto& block : buffers)
+        block.iovs = {{M::GPU, source, object_bytes}};
+    UriStrVec uris{"a", "b", "c", "d"};
+    auto first_result = std::async(std::launch::async, [&] { return a.SaveKvCaches(uris, buffers).first; });
+    const auto ready = started.wait_for(std::chrono::seconds(10));
+    // Release before any fatal assertion so the test cannot strand the worker.
+    const auto second_result = ready == std::future_status::ready ? b.SaveKvCaches(uris, buffers).first : ER_INVALID_PARAMS;
+    release.set_value();
+    EXPECT_EQ(first_result.get(), ER_OK);
+    ASSERT_EQ(ready, std::future_status::ready);
+    EXPECT_EQ(second_result, ER_OK);
+    EXPECT_EQ(context->active_reservations, 0u);
+}
+TEST(NativeSsdGpuPackingTest, UnknownCompletionRetainsItsRangeButOtherTagsContinue) {
+    using M = kv_cache_manager::MemoryType;
+    void* base = nullptr;
+    void* source = nullptr;
+    ASSERT_EQ(cudaMalloc(&base, kvcm::PackedSsdTransferClient::max_operation_bytes), cudaSuccess);
+    ASSERT_EQ(cudaMalloc(&source, 1024), cudaSuccess);
+    auto arena = std::shared_ptr<void>(base, [](void* p) { cudaFree(p); });
+    auto input = std::shared_ptr<void>(source, [](void* p) { cudaFree(p); });
+    auto context = std::make_shared<kvcm::PackedSsdTransferClient::GpuPackingContext>(arena);
+    auto destroyed = std::make_shared<int>(0);
+    auto first = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+    auto second = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+    EXPECT_CALL(*first, SaveKvCaches(_, _, _)).WillOnce(::testing::Throw(std::runtime_error("uncertain DMA")));
+    EXPECT_CALL(*second, SaveKvCaches(_, _, _)).WillOnce(Invoke([](const auto& u, const auto&, auto) { return std::make_pair(kv_cache_manager::ER_OK, u); }));
+    auto copy = [](void* d, M dt, const void* s, M st, size_t n) {
+        return dt == M::GPU && st == M::GPU && cudaMemcpy(d, s, n, cudaMemcpyDeviceToDevice) == cudaSuccess;
+    };
+    kvcm::PackedSsdTransferClient a(std::move(first), copy, context);
+    kvcm::PackedSsdTransferClient b(std::move(second), copy, context);
+    kv_cache_manager::BlockBuffers buffers(1);
+    buffers[0].iovs = {{M::GPU, source, 1024}};
+    ASSERT_EQ(cudaMemset(source, 0x5a, 1024), cudaSuccess);
+    EXPECT_THROW(a.SaveKvCaches({"first"}, buffers), std::runtime_error);
+    EXPECT_EQ(context->active_reservations, 1u);
+    ASSERT_EQ(cudaMemset(source, 0x22, 1024), cudaSuccess);
+    EXPECT_EQ(b.SaveKvCaches({"second"}, buffers).first, kv_cache_manager::ER_OK);
+    unsigned char retained = 0;
+    ASSERT_EQ(cudaMemcpy(&retained, arena.get(), 1, cudaMemcpyDeviceToHost), cudaSuccess);
+    EXPECT_EQ(retained, 0x5a);
+}
 // GPU pages + recording SDK. CPU copies below are assertions only; the
 // implementation must pass native GPU IOVs through the Prefill transfer path.
-class EosGpuCompletionTest: public ::testing::TestWithParam<std::tuple<int, bool>> {
+class EosGpuCompletionTest: public ::testing::TestWithParam<std::tuple<int, bool, int>> {
 protected:
-    autil::EnvGuard enable{"RTP_DTOP_FILE_CP2", "1"}, pace{"RTP_DTOP_PACE", "1"}, audit{"RTP_DTOP_PAYLOAD_AUDIT", "0"},
-        pending{"RTP_DTOP_GPU_PENDING_JOBS", "1"};
+    autil::EnvGuard enable{"RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1"}, pace{"RTP_DTOP_PACE", "0"}, audit{"RTP_DTOP_PAYLOAD_AUDIT", "0"},
+        pending{"RTP_DTOP_GPU_PENDING_JOBS", "1"}, obsolete_disable{"RTP_DTOP_DECODE_PUBLISH", "0"};
     // Failure cases deliberately freeze a large fraction of these tiny pools.
     autil::EnvGuard quarantine_abort{"RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", "0"};
     struct Scenario {
@@ -30,9 +192,9 @@ protected:
         std::promise<void>                  entered, released;
         std::shared_future<void>            release = released.get_future().share();
         std::future<void>                   started = entered.get_future();
-        std::unique_ptr<autil::EnvGuard>    target;
-        explicit Scenario(int target_cp, bool sharded, bool bounded = true): cp(target_cp), shards(sharded ? cp : 1) {
-            target                 = std::make_unique<autil::EnvGuard>("RTP_DTOP_FILE_TARGET_P_TP", std::to_string(cp));
+        explicit Scenario(int target_cp, bool sharded, bool bounded = true, bool native_ssd_gdr = false, int decode_dp = 1):
+            cp(target_cp), shards(sharded ? cp : 1) {
+            // The target CP comes only from ParallelismConfig, not a CP-specific environment flag.
             auto f                 = defaultCacheGroupPolicy(CacheGroupType::FULL);
             auto s                 = defaultCacheGroupPolicy(CacheGroupType::SWA);
             s.enable_prefix_reuse  = true;
@@ -49,8 +211,9 @@ protected:
                                               {CacheGroupType::FULL, CacheGroupType::SWA},
                                               {"full", "state"},
                                               {f, s});
-            env.cache_config.finalizeBlockNums(32, RuntimeConfig{});
-            initializeEnvironmentPools(env, "eos_native_gpu", 32);
+            const int pool_blocks = std::max(32, (count + 1) * shards + 8);
+            env.cache_config.finalizeBlockNums(pool_blocks, RuntimeConfig{});
+            initializeEnvironmentPools(env, "eos_native_gpu", pool_blocks);
             full  = *env.pools_by_tag.at("full")->malloc((count + 1) * shards);
             state = *env.pools_by_tag.at("state")->malloc(count + 1);
             env.pools_by_tag.at("full")->incRef(full);
@@ -106,7 +269,7 @@ protected:
                     EXPECT_EQ(uris.size(), buffers.size());
                     kv_cache_manager::UriStrVec actual;
                     for (size_t i = 0; i < uris.size(); ++i) {
-                        const int key = uris[i][2] - '0', peer = uris[i][4] - '0';
+                        const int key = std::stoi(uris[i].substr(2)), peer = std::stoi(uris[i].substr(4));
                         EXPECT_EQ(tag, (uris[i][0] == 'F' ? "full#cp" : "state#cp") + std::to_string(peer));
                         const int expected = uris[i][0] == 'F' ? key * shards + (shards > 1 ? peer : 0) + 1 : 100 + key;
                         for (const auto& iov : buffers[i].iovs) {
@@ -139,17 +302,21 @@ protected:
             k.kvcm_instance_group   = "linshuo_decode_remote_eos_gpu_test";
             k.kvcm_instance_id_salt = "eos_native_gpu";
             k.kvcm_model_sdk_config = "[{\"type\":\"pace\"}]";
+            if (native_ssd_gdr) {
+                k.kvcm_model_sdk_config = "[{\"type\":\"pace_ssd\"}]";
+                k.kvcm_read_backend_type = 9;
+            }
             ParallelismConfig parallel;
             parallel.tp_size                            = 1;
-            parallel.dp_size                            = cp;
-            parallel.ep_size                            = cp;
+            parallel.dp_size                            = decode_dp;
+            parallel.ep_size                            = decode_dp;
             parallel.role_type                          = RoleType::DECODE;
             parallel.prefill_cp_config.prefill_cp_size  = cp;
             parallel.prefill_cp_config.kv_cache_sharded = sharded;
             RuntimeConfig rt;
             rt.model_name = "eos_gpu";
             backend       = std::make_unique<KVCMStorageBackend>(
-                env.cache_config, k, rt, parallel, SpeculativeExecutionConfig{}, nullptr, false, nullptr, client);
+                env.cache_config, k, rt, parallel, SpeculativeExecutionConfig{}, nullptr, true, nullptr, client);
             EXPECT_TRUE(initSingleRank(*backend, env));
         }
         ~Scenario() {
@@ -181,7 +348,7 @@ protected:
     };
 };
 TEST_P(EosGpuCompletionTest, NoProgressSnapshotAndNativePagesSurviveRequestRelease) {
-    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()));
+    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
     s.block_start = true;
     for (size_t i = 0; i < s.state.size(); ++i)
         s.fill(1, "state", s.state[i], 0xee);
@@ -213,7 +380,7 @@ TEST_P(EosGpuCompletionTest, NoProgressSnapshotAndNativePagesSurviveRequestRelea
         EXPECT_FALSE(s.env.pools_by_tag.at("state")->isAllocated(block));
 }
 TEST_P(EosGpuCompletionTest, PartialTailUsesEarlierImmutableCheckpointNotFinalState) {
-    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()));
+    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
     // Active, incomplete final slot intentionally differs from complete state.
     s.fill(1, "state", s.state.back(), 0xee);
     ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end() + 128 * s.shards - 1, true));
@@ -221,8 +388,26 @@ TEST_P(EosGpuCompletionTest, PartialTailUsesEarlierImmutableCheckpointNotFinalSt
     EXPECT_EQ(s.finishes, 1);
     EXPECT_EQ(s.aborts, 0);
 }
+TEST_P(EosGpuCompletionTest, NativeSsdGdrKeepsGpuPagesThroughEosTransfer) {
+    autil::EnvGuard native_ssd{"RTP_DTOP_PACE_SSD_NATIVE_GDR", "1"};
+    autil::EnvGuard packed_ssd{"RTP_DTOP_PACE_SSD_PACKED_IO", "0"};
+    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, true, std::get<2>(GetParam()));
+    s.block_start = true;
+    ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end(), true));
+    ASSERT_EQ(s.started.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    s.dropRequestRefs();
+    s.resource.clearBlocks();
+    for (int i = 0; i < s.count * s.shards; ++i)
+        EXPECT_TRUE(s.env.pools_by_tag.at("full")->isAllocated(s.full[i]));
+    s.unblock();
+    ASSERT_TRUE(waitForBackendOperationsForTest(*s.backend));
+    EXPECT_EQ(s.finishes, 1);
+    EXPECT_EQ(s.aborts, 0);
+    for (auto block : s.full)
+        EXPECT_FALSE(s.env.pools_by_tag.at("full")->isAllocated(block));
+}
 TEST_P(EosGpuCompletionTest, MissingStateBacksOffWithoutRelabeling) {
-    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()));
+    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
     auto     state = s.state;
     state[2]       = NULL_BLOCK_IDX;
     s.resource.setBatchBlocks(0, "state", state);
@@ -232,7 +417,7 @@ TEST_P(EosGpuCompletionTest, MissingStateBacksOffWithoutRelabeling) {
     EXPECT_EQ(s.aborts, 0);
 }
 TEST_P(EosGpuCompletionTest, UnknownSdkCompletionFreezesPagesAndKeepsAdmissionCharged) {
-    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()));
+    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
     s.fail_save = true;
     ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end(), true));
     ASSERT_TRUE(waitForBackendOperationsForTest(*s.backend));
@@ -257,7 +442,7 @@ TEST_P(EosGpuCompletionTest, UnknownSdkCompletionFreezesPagesAndKeepsAdmissionCh
     }
 }
 TEST_P(EosGpuCompletionTest, DuplicateEosAndFullAdmissionDoNotDoublePinOrPublish) {
-    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()));
+    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
     s.block_start = true;
     ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end(), true));
     ASSERT_EQ(s.started.wait_for(std::chrono::seconds(3)), std::future_status::ready);
@@ -274,7 +459,7 @@ TEST_P(EosGpuCompletionTest, DuplicateEosAndFullAdmissionDoNotDoublePinOrPublish
     EXPECT_EQ(s.finishes, 1);
 }
 TEST_P(EosGpuCompletionTest, LostCommitAckDoesNotAbortOrQuarantineCompletedGpuTransfer) {
-    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()));
+    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
     s.lose_commit = true;
     ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end(), true));
     ASSERT_TRUE(waitForBackendOperationsForTest(*s.backend));
@@ -285,7 +470,7 @@ TEST_P(EosGpuCompletionTest, LostCommitAckDoesNotAbortOrQuarantineCompletedGpuTr
         EXPECT_FALSE(s.env.pools_by_tag.at("full")->isAllocated(block));
 }
 TEST_P(EosGpuCompletionTest, UnboundedSwaNeverPretendsTwoTailPagesAreEnough) {
-    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), false);
+    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), false, false, std::get<2>(GetParam()));
     auto     state = s.state;
     state[0]       = NULL_BLOCK_IDX;
     s.resource.setBatchBlocks(0, "state", state);
@@ -294,8 +479,8 @@ TEST_P(EosGpuCompletionTest, UnboundedSwaNeverPretendsTwoTailPagesAreEnough) {
     EXPECT_EQ(s.starts, 0);
     EXPECT_FALSE(s.resource.decodeCompletionSubmitted());
 }
-INSTANTIATE_TEST_SUITE_P(CP2AndCP4ShardedAndReplicated,
+INSTANTIATE_TEST_SUITE_P(GenericCPAndIndependentDP,
                          EosGpuCompletionTest,
-                         ::testing::Combine(::testing::Values(2, 4), ::testing::Bool()));
+                         ::testing::Combine(::testing::Values(1, 2, 4, 8, 16), ::testing::Bool(), ::testing::Values(1, 3, 8)));
 }  // namespace
 }  // namespace rtp_llm
