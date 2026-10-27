@@ -105,7 +105,8 @@ createNativeSsdGpu(const std::string& config,
                    && cudaMemcpy(dst, src, size, cudaMemcpyDeviceToDevice) == cudaSuccess
                    && cudaStreamSynchronize(nullptr) == cudaSuccess;
         },
-        std::move(context));
+        std::move(context),
+        [device] { return cudaSetDevice(device) == cudaSuccess; });
 #else
     throw std::invalid_argument("native SSD GDR requires CUDA");
 #endif
