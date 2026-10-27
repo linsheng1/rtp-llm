@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DirectSubscriber.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PackedSsdTransferClient.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "autil/legacy/json.h"
 #include <map>
 #if USING_CUDA
@@ -12,7 +13,9 @@
 namespace rtp_llm {
 namespace kvcm {
 namespace {
-// Select the GPU packing implementation from the backend, never a second flag.
+// The feature gate belongs at the call site: when disabled, do not parse or
+// constrain the upstream SDK configuration or allocate our GPU packing arena.
+// Once enabled, select packing from the backend, never a second flag.
 bool isPaceSsd(const std::string& config) {
     using namespace autil::legacy;
     const auto fields = AnyCast<json::JsonMap>(json::ParseJson(config));
@@ -116,7 +119,7 @@ ClientFactory::createMetaClient(const std::string& config, const kv_cache_manage
 
 std::unique_ptr<kv_cache_manager::TransferClient>
 ClientFactory::createTransferClient(const std::string& config, const kv_cache_manager::InitParams& init_params) const {
-    if (isPaceSsd(config))
+    if (remoteCacheDecodePublicationEnabled() && isPaceSsd(config))
         throw std::invalid_argument("PACE SSD requires GPU memory registrations; CPU packing is unsupported");
     return kv_cache_manager::TransferClient::Create(config, init_params);
 }
@@ -126,7 +129,7 @@ ClientFactory::createTransferClientWithMemory(
     const std::string&                                config,
     const kv_cache_manager::InitParams&                init_params,
     const kv_cache_manager::ClientMemoryRegistrations& memory_registrations) const {
-    if (isPaceSsd(config))
+    if (remoteCacheDecodePublicationEnabled() && isPaceSsd(config))
         return createNativeSsdGpu(config, init_params, memory_registrations);
     return kv_cache_manager::TransferClient::Create(config, init_params, memory_registrations);
 }

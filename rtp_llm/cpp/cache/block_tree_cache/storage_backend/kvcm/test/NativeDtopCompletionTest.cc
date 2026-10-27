@@ -5,12 +5,53 @@
 #include <future>
 #include <map>
 #include <tuple>
+#include <typeinfo>
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientFactory.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PackedSsdTransferClient.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
 namespace rtp_llm {
 namespace {
+TEST(ClientFactoryFeatureBoundaryTest, DisabledAndUnsetDelegateConfigurationErrorsToTheSdk) {
+    using namespace kv_cache_manager;
+    // Invalid JSON cannot initiate network I/O. Compare against the SDK itself,
+    // whose legacy error/exception contract the disabled feature must preserve.
+    // Our SSD parser used to throw before the SDK was called, even when off.
+    const std::string config = "{";
+    InitParams params{};
+    ClientMemoryRegistrations registrations;
+    kvcm::ClientFactory factory;
+    const auto observe = [](auto call) -> std::pair<bool, std::string> {
+        try {
+            return {static_cast<bool>(call()), {}};
+        } catch (const std::exception& e) {
+            return {false, std::string(typeid(e).name()) + ":" + e.what()};
+        } catch (...) {
+            return {false, "non-standard exception"};
+        }
+    };
+    for (bool unset : {false, true}) {
+        autil::EnvGuard off("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+        if (unset)
+            ASSERT_EQ(unsetenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH"), 0);
+        EXPECT_EQ(observe([&] { return factory.createTransferClient(config, params); }),
+                  observe([&] { return TransferClient::Create(config, params); })) << unset;
+        EXPECT_EQ(observe([&] { return factory.createTransferClientWithMemory(config, params, registrations); }),
+                  observe([&] { return TransferClient::Create(config, params, registrations); })) << unset;
+    }
+}
+TEST(ClientFactoryFeatureBoundaryTest, EnabledSsdStillRejectsMissingGpuRegistrationAndMixedBackends) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    kvcm::ClientFactory factory;
+    kv_cache_manager::InitParams params{};
+    kv_cache_manager::ClientMemoryRegistrations registrations;
+    const std::string ssd = R"({"sdk_config":{"sdk_backend_configs":[{"type":"pace_ssd"}]}})";
+    const std::string mixed = R"({"sdk_config":{"sdk_backend_configs":[{"type":"pace"},{"type":"pace_ssd"}]}})";
+    EXPECT_THROW(factory.createTransferClient(ssd, params), std::invalid_argument);
+    EXPECT_THROW(factory.createTransferClientWithMemory(ssd, params, registrations), std::invalid_argument);
+    EXPECT_THROW(factory.createTransferClientWithMemory(mixed, params, registrations), std::invalid_argument);
+}
 TEST(DecodePublicationConfigTest, SingleSwitchNeedsNoCpSpecificFlag) {
     {
         autil::EnvGuard off("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
