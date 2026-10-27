@@ -224,6 +224,7 @@ void StorageBackend::shutdown() {
         quarantined_block_count_ = 0;
         quarantined_breakdown_   = {};
         quarantine_generation    = ++quarantine_generation_;
+        quarantined_completion_admissions_.clear();
     }
     onQuarantineChanged(quarantine_generation, /*task_count=*/0, /*block_count=*/0, {});
     // FROZEN references remain until the block pools are destroyed.
@@ -241,6 +242,8 @@ void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail
         return;
     }
     const size_t pinned_block_count = state->pins.size();
+    if (state->request.completion_admission)
+        state->request.completion_admission->onQuarantined();
     for (const auto& pin : state->pins) {
         pin.pool->freezeBlock(pin.block);
     }
@@ -251,6 +254,9 @@ void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail
     StorageQuarantineBreakdown breakdown;
     {
         std::lock_guard<std::mutex> lock(quarantine_mutex_);
+        if (state->request.completion_admission) {
+            quarantined_completion_admissions_.push_back(std::move(state->request.completion_admission));
+        }
         quarantined_block_count_ += pinned_block_count;
         task_count  = ++quarantined_task_count_;
         block_count = quarantined_block_count_;
@@ -275,15 +281,26 @@ std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepar
     state->request = std::move(request);
     RTP_LLM_CHECK(initialized_);
 
+    size_t pin_capacity = 0;
+    for (const auto& row : state->request.handles)
+        for (const auto& handle : row)
+            pin_capacity += 1 + handle.peer_blocks.size();
+    state->pins.reserve(pin_capacity);
     std::unordered_set<BlockKey, BlockKeyHash> pinned;
     for (const auto& key_handles : state->request.handles) {
         for (const StorageBlockHandle& handle : key_handles) {
             const auto&    pool = devicePool(handle.tag);
-            const BlockKey key{pool.get(), handle.block};
-            if (pinned.insert(key).second) {
-                pool->incRef(handle.block, DeviceBlockRefType::REMOTE_CONNECTOR);
-                state->pins.push_back({pool, handle.block});
-            }
+            auto           pin  = [&](BlockIdxType block) {
+                const BlockKey key{pool.get(), block};
+                if (pinned.insert(key).second) {
+                    pool->incRef(block, DeviceBlockRefType::REMOTE_CONNECTOR);
+                    // Capacity was reserved before acquiring any page reference.
+                    state->pins.push_back({pool, block});
+                }
+            };
+            pin(handle.block);
+            for (const auto peer : handle.peer_blocks)
+                pin(peer);
         }
     }
     return state;
@@ -308,6 +325,10 @@ void StorageBackend::validateRequest(const StorageRequest& request, bool allow_n
                                     "storage request has null block for tag=%s at key=%zu",
                                     handle.tag.c_str(),
                                     key_index);
+            RTP_LLM_CHECK_WITH_INFO(handle.peer_blocks.empty() || request.decode_completion,
+                                    "peer source pages require an EOS write");
+            for (const auto peer : handle.peer_blocks)
+                RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(peer), "null EOS peer source page");
         }
     }
 }
@@ -394,9 +415,13 @@ bool StorageBackend::write(StorageWriteTask task) {
     RTP_LLM_CHECK(initialized_);
     RTP_LLM_CHECK(task.state_ != nullptr);
     auto state = std::move(task.state_);
+    if (state->request.completion_admission)
+        state->request.completion_admission->onQueued();
     return dispatch([this, state](Lifecycle outcome) {
         std::optional<StorageQuarantineReason> quarantine_reason;
         if (outcome == Lifecycle::ACCEPTING) {
+            if (state->request.completion_admission)
+                state->request.completion_admission->onRunning();
             try {
                 writeImpl(state->request);
             } catch (const StorageOperationTimeout& error) {

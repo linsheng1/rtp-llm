@@ -167,33 +167,33 @@ def http_deps():
     http_file(
         name = "remote_kv_cache_manager_client_rpm_cuda130_x86",
         urls = [
-            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_10_13_22_33-79404320-cuda130.x86_64.rpm",
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_10_25_15_21-cuda130.x86_64.rpm",
         ],
-        sha256 = "24e3d6b828dc560d6c71d8ab3baae8727d8d2de74d63a5d425cc8c9f78081bae",
+        sha256 = "4c5b2a428993e1356e724e3648bbfeb105b2f8ad04c478cf5547e590e50113a0",
     )
 
     http_file(
         name = "remote_kv_cache_manager_client_rpm_cuda130_arm",
         urls = [
-            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_10_13_22_33-79404320-cuda130.aarch64.rpm",
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_10_25_15_21-cuda130.aarch64.rpm",
         ],
-        sha256 = "d4bfe547429c6f6d76f1278451a053e94bba570b7ecfc24c8eef152f749749a3",
+        sha256 = "5b382202aa716a850984ce2acfb03981b05875b5b014cc8e9bc215dee22ddae4",
     )
 
     http_file(
         name = "remote_kv_cache_manager_client_rpm_cuda12_x86",
         urls = [
-            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_10_13_22_33-79404320-cuda12.x86_64.rpm",
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_10_25_15_21-cuda12.x86_64.rpm",
         ],
-        sha256 = "0eceae95bf35805c3a299567794f8c2cbba3fe13661a7f58acf4124fafaf7aee",
+        sha256 = "2e85e5b4e9f784082a1e4ad6f19bb24729e07c9bbfe7ae87668a122e99875840",
     )
 
     http_file(
         name = "remote_kv_cache_manager_client_rpm_cuda129_x86",
         urls = [
-            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_10_13_22_33-79404320-cuda129.x86_64.rpm",
+            "https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/kv_cache_manager/client/kv-cache-manager-client-2026_10_25_15_21-cuda129.x86_64.rpm",
         ],
-        sha256 = "fdde24106e6a5418429058d8176a52e1fde03a455a820ddfcffb4d379df02ada",
+        sha256 = "46762b42c8308d59e89ee0b88093032f258d0a293ecf0fdfef63fdc1aad6d522",
     )
 
     http_archive(

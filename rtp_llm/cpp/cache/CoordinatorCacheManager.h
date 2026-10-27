@@ -126,6 +126,7 @@ public:
     }
 
     void attachBlockTreeCache(BlockTreeCachePtr block_tree_cache);
+    bool captureCompletedDecode(const BatchKVCacheResource&, size_t, bool = true) const;
 
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;
@@ -240,6 +241,7 @@ protected:
     std::mutex malloc_mutex_;
 
     struct PreparedKVCache {
+        DecodeReuseSourcesPtr          decode_sources;
         size_t                         matched_device_blocks = 0;
         size_t                         total_logical_blocks  = 0;
         std::vector<RequiredPositions> required_positions;

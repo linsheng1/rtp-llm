@@ -17,19 +17,28 @@
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/DecodeReuseSources.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageCompletionAdmission.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
+class BatchKVCacheResource;
 
 struct StorageBlockHandle {
     std::string  tag;
     BlockIdxType block{NULL_BLOCK_IDX};
+    // Optional same-pool sources for an EOS cross-layout write. Every unique
+    // page is pinned by prepareWrite, including peers other than the first.
+    std::vector<BlockIdxType> peer_blocks;
 };
 
 struct StorageBackendMatchMeta {
     virtual ~StorageBackendMatchMeta() = default;
+    // Written only after a successful aggregate GPU read; the completion
+    // callback publishes it to the owning load context. No KV payload here.
+    DecodeReuseSourcesPtr decode_sources;
 };
 
 enum class StorageQuarantineReason {
@@ -37,6 +46,7 @@ enum class StorageQuarantineReason {
     RPC_TIMEOUT,
     RPC_ERROR,
     INVALID_RESPONSE,
+    SDK_ERROR,
 };
 
 struct StorageQuarantineCounts {
@@ -45,7 +55,7 @@ struct StorageQuarantineCounts {
 };
 
 // Read/write rows and StorageQuarantineReason columns share one state snapshot.
-using StorageQuarantineBreakdown = std::array<std::array<StorageQuarantineCounts, 4>, 2>;
+using StorageQuarantineBreakdown = std::array<std::array<StorageQuarantineCounts, 5>, 2>;
 
 // The backend accepted an operation but cannot prove that DMA/RDMA has
 // stopped touching its buffers. StorageBackend replaces request pins with
@@ -84,6 +94,14 @@ struct StorageRequest {
     // boundary are already available from Device/Host/Disk.
     size_t                 local_matched_blocks_num{0};
     std::optional<int64_t> request_id;
+    // Internal EOS route; no RPC/API extension. The admission lease follows
+    // task lifetime, including completion-unknown quarantine.
+    bool   decode_completion{false};
+    size_t computed_tokens{0}, published_tokens{0};
+    // Validated P-to-D computed endpoint, only when explicitly supplied by the
+    // successful handoff. Unknown must not be inferred from D input length.
+    std::optional<int64_t>                      prefill_computed_tokens;
+    std::shared_ptr<StorageCompletionAdmission> completion_admission;
 
     bool empty() const {
         for (const auto& key_handles : handles) {
@@ -145,6 +163,11 @@ public:
     // Must not be called from backend I/O or completion callbacks.
     void shutdown();
 
+    // Called only at successful EOS, before source request references are freed.
+    virtual bool captureCompletedDecode(const BatchKVCacheResource&, size_t, bool = true) {
+        return false;
+    }
+
 protected:
     const CacheTopology&      topology() const;
     const DeviceBlockPoolPtr& devicePool(const std::string& tag) const;
@@ -200,6 +223,9 @@ private:
     size_t                     quarantined_block_count_{0};
     uint64_t                   quarantine_generation_{0};
     StorageQuarantineBreakdown quarantined_breakdown_{};
+    // Keep optional EOS admission charged while FROZEN pages are unavailable.
+    // No more publications can be admitted after backend shutdown.
+    std::vector<std::shared_ptr<StorageCompletionAdmission>> quarantined_completion_admissions_;
 
     friend class LoadAsyncContext;
 };
