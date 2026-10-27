@@ -276,38 +276,72 @@ TEST(KVCMLocalTest, GdrRegistrationUsesActualAllocationSpan) {
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
 }
 
-TEST(KVCMLocalTest, StrictGdrRejectsHostPinnedPoolBeforeSdkInitialization) {
-    auto environment = makeHybridBackendEnvironment("kvcm_storage_backend_mixed_gdr_span");
-    ASSERT_EQ(environment.cache_config.groupTags().size(), 2u);
+TEST(KVCMLocalTest, PublicationSwitchPreservesLegacyHostPoolFallbackAndRequiresGpuWhenEnabled) {
+    autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    for (const bool enabled : {false, true}) {
+        SCOPED_TRACE(enabled);
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        auto environment = makeHybridBackendEnvironment("kvcm_storage_backend_mixed_gdr_span");
+        ASSERT_EQ(environment.cache_config.groupTags().size(), 2u);
 
-    const auto& host_tag = environment.cache_config.groupTags().back();
-    ASSERT_NE(host_tag, environment.cache_config.groupTags().front());
-    auto old_pool = environment.pools_by_tag.at(host_tag);
-    old_pool->decRef(environment.block_id);
+        const auto& host_tag = environment.cache_config.groupTags().back();
+        ASSERT_NE(host_tag, environment.cache_config.groupTags().front());
+        auto old_pool = environment.pools_by_tag.at(host_tag);
+        old_pool->decRef(environment.block_id);
 
-    auto host_config = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfigForGroup(
-        environment.cache_config, environment.cache_config.topology().group(host_tag)));
-    host_config->pool_name                 = "mixed_gdr_host_pinned";
-    host_config->use_pinned_cpu_backing    = true;
-    host_config->use_device_malloc_backing = false;
-    auto host_pool                         = std::make_shared<DeviceBlockPool>(host_config);
-    ASSERT_TRUE(host_pool->init());
-    const auto host_block = host_pool->malloc();
-    ASSERT_TRUE(host_block.has_value());
-    ASSERT_EQ(*host_block, environment.block_id);
-    host_pool->incRef(*host_block);
-    environment.pools_by_tag[host_tag] = host_pool;
+        auto host_config = std::make_shared<DeviceBlockPoolConfig>(DeviceBlockPoolConfigHelper::createConfigForGroup(
+            environment.cache_config, environment.cache_config.topology().group(host_tag)));
+        host_config->pool_name                 = "mixed_gdr_host_pinned";
+        host_config->use_pinned_cpu_backing    = true;
+        host_config->use_device_malloc_backing = false;
+        auto host_pool                         = std::make_shared<DeviceBlockPool>(host_config);
+        ASSERT_TRUE(host_pool->init());
+        const auto host_block = host_pool->malloc();
+        ASSERT_TRUE(host_block.has_value());
+        ASSERT_EQ(*host_block, environment.block_id);
+        host_pool->incRef(*host_block);
+        environment.pools_by_tag[host_tag] = host_pool;
 
-    auto client_wrapper = std::make_shared<MockClientWrapper>();
-    EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).Times(0);
-    EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
-    auto backend = makeBackend(environment,
-                               singleRankConfig(),
-                               client_wrapper,
-                               /*broadcast_manager=*/nullptr,
-                               /*metrics_reporter=*/nullptr,
-                               /*gdr_enabled=*/true);
-    ASSERT_FALSE(initSingleRank(*backend.backend, environment));
+        auto client_wrapper = std::make_shared<MockClientWrapper>();
+        if (enabled) {
+            EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).Times(0);
+        } else {
+            EXPECT_CALL(*client_wrapper, initForPools(_, _, _, _)).WillOnce(Invoke(
+                [&](const auto&, auto, const auto& registrations, const auto& tags) {
+                    EXPECT_EQ(registrations.size(), 2u);
+                    EXPECT_EQ(registrations.size(), tags.size());
+                    bool saw_host = false;
+                    for (size_t i = 0; i < tags.size(); ++i) {
+                        if (tags[i] == host_tag) {
+                            saw_host = true;
+                            EXPECT_EQ(registrations[i].span.base, host_pool->getBaseAddress());
+                            EXPECT_EQ(registrations[i].span.size, host_pool->getTotalSizeBytes());
+                            EXPECT_FALSE(registrations[i].memory_registrations.has_value());
+                        }
+                    }
+                    EXPECT_TRUE(saw_host);
+                    return true;
+                }));
+        }
+        EXPECT_CALL(*client_wrapper, shutdown()).Times(1);
+        // Both branches use a valid P CP1 configuration. The enabled negative must
+        // reach actual pool-registration validation, not fail earlier on role/SDK.
+        KVCacheConfig config;
+        config.kvcm_server_address = "unused-test-address";
+        config.kvcm_instance_id_salt = "host-pool-fallback-contract";
+        config.kvcm_model_sdk_config = R"([{"type":"pace"}])";
+        config.kvcm_read_backend_type = 3;
+        auto parallel = singleRankConfig();
+        parallel.role_type = RoleType::PREFILL;
+        parallel.prefill_cp_config.prefill_cp_size = 1;
+        RuntimeConfig runtime;
+        runtime.model_name = "host_pool_fallback";
+        BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config,
+                                                                  config, runtime, parallel,
+                                                                  SpeculativeExecutionConfig{}, nullptr,
+                                                                  /*gdr_enabled=*/true, nullptr, client_wrapper));
+        EXPECT_EQ(initSingleRank(*backend.backend, environment), !enabled);
+    }
 }
 
 TEST(KVCMLocalTest, LegacyEmptyRemoteResponsePreservesOneofPresence) {

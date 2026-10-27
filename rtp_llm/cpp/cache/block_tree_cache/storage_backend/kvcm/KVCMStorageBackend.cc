@@ -965,7 +965,7 @@ private:
         const auto wire_tp = decode_publication_enabled_ ? target_prefill_tp_ : parallelism_config_.tp_size;
         const auto wire_dp = decode_publication_enabled_ ? 1 : parallelism_config_.dp_size;
         // Match the baseline P writer identity exactly. Canonical CP keys are
-        // selected by CPSlotMapper; the KVCM base block is still 128 tokens.
+        // selected by CPSlotMapper; the KVCM base block comes from CacheConfig.
         const auto        wire_block = cache_config_.seq_size_per_block;
         std::stringstream identity;
         identity << "instance_group: " << kv_cache_config_.kvcm_instance_group << ";block_size:" << wire_block
@@ -1090,8 +1090,18 @@ private:
 #endif
             }
             if (gdr_enabled_ && !use_gdr) {
-                RTP_LLM_LOG_ERROR("Requested GDR cannot register group %d tag=%s as dedicated GPU memory; refusing CPU fallback", group_id, tag.c_str());
-                return {};
+                if (decode_publication_enabled_) {
+                    RTP_LLM_LOG_ERROR("Requested GDR cannot register group %d tag=%s as dedicated GPU memory; refusing CPU fallback", group_id, tag.c_str());
+                    return {};
+                }
+                RTP_LLM_LOG_WARNING("RemoteCache GDR unavailable for group %d tag=%s; falling back to standard "
+                                    "registration, memory_type=%d dedicated=%d allocation_size=%zu device=%d",
+                                    group_id,
+                                    tag.c_str(),
+                                    static_cast<int>(pool->where()),
+                                    pool->usesDedicatedDeviceAllocation(),
+                                    pool->getAllocationSizeBytes(),
+                                    pool->deviceIndex());
             }
             RTP_LLM_LOG_INFO("KVCM pool registration group=%d tag=%s mode=%s span_size=%zu",
                              group_id,
