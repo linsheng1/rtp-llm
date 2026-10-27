@@ -1052,7 +1052,8 @@ private:
                 auto wire_registration               = registration;
                 wire_registration.location_spec_name = kvcm::genLocationSpecName(
                     decode_publication_enabled_ && file_decode_ ? peer : static_cast<int>(parallelism_config_.tp_rank),
-                    groups.at(group_id).group_name);
+                    groups.at(group_id).group_name,
+                    runtime_config_.model_name);
                 registration_tags.push_back(fileTag(tag, peer));
                 registrations.push_back(std::move(wire_registration));
             }
