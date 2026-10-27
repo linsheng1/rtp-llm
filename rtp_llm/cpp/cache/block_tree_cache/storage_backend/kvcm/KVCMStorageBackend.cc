@@ -811,6 +811,15 @@ public:
                                  transferred_bytes);
             }
         } catch (...) {
+            if (decode_publication_enabled_ && finish_attempted && collector.remote_write_fail_qps) {
+                // All payload calls have completed before FinishWrite. A lost
+                // metadata acknowledgement leaves publication uncertain, not
+                // the caller GPU buffer's DMA lifetime. Do not quarantine safe
+                // pages or retry an abort against a possibly committed session.
+                if (const auto lease = std::dynamic_pointer_cast<kvcm::DecodePublicationAccounting::Lease>(
+                        request.completion_admission))
+                    lease->recordOutcome("completion_unknown");
+            }
             if (decode_publication_enabled_ && transfer_attempted && !finish_attempted) {
                 // A BUFFER_SAFE failure permits releasing the caller's GPU
                 // pages, but does not prove detached Consumer writes stopped
