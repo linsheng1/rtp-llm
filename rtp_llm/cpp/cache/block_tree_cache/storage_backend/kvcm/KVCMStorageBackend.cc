@@ -166,12 +166,13 @@ public:
         }
         if (decode_publication_enabled_ && parallelism_config_.role_type == RoleType::PREFILL
             && parallelism_config_.tp_rank == 0) {
-            std::unordered_set<const DeviceBlockPool*> enabled;
             for (const auto& group : groups) {
                 if (!group.policy.enable_prefix_reuse)
                     continue;
                 const auto& pool = pool_resolver(group.tag);
-                if (pool && enabled.insert(pool.get()).second && !pool->enableDecodeOriginTracking())
+                // Enabling is idempotent, including shared packed pools. Avoid
+                // a separate allocating dedup table for optional provenance.
+                if (pool && !pool->enableDecodeOriginTracking())
                     RTP_LLM_LOG_WARNING("KVCM physical source tracking unavailable; cache data remains usable");
             }
         }

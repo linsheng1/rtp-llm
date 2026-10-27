@@ -68,6 +68,10 @@ class DecodeReuseUseState {
 public:
     void reset() { sources_.reset(); adopted_end_ = 0; consumed_ = false; }
     void adopt(DecodeReuseSourcesPtr sources, int64_t adopted_end) {
+        if (consumed_) {
+            sources_.reset();
+            return;
+        }
         sources_ = std::move(sources);
         adopted_end_ = adopted_end;
     }
