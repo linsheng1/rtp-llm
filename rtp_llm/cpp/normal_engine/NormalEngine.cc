@@ -3,7 +3,6 @@
 #include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
-#include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/utils/StatusUtil.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
@@ -721,7 +720,6 @@ absl::Status NormalEngine::stop() {
     if (!finalize_status.ok()) {
         RTP_LLM_LOG_ERROR("scheduler stop finalization failed: %s", finalize_status.ToString().c_str());
     }
-    LogitsProcessorFactory::shutdown();
     resource_context_.cache_manager->stopMetricsReporter();
     return scheduler_status.ok() ? finalize_status : scheduler_status;
 }

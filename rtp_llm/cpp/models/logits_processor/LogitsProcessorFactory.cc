@@ -83,9 +83,6 @@ void LogitsProcessorFactory::init(const ModelConfig&           model_config,
 }
 
 void LogitsProcessorFactory::shutdown() {
-    // The backend must join its compiler pool and drop its reporter while the
-    // KMonitor factory still owns the KMonitor pointer used by its deleter.
-    // Leaving this until static destruction dereferences a freed KMonitor.
     grammarBackend().reset();
 }
 
