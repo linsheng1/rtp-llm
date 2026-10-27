@@ -1330,6 +1330,21 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMRemoteCacheOutcomeMetricsCollector final {
+public:
+    const char* stage{"lookup"};
+    const char* outcome{"failed"};
+};
+
+class RtpLLMRemoteCacheOutcomeMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags*, RtpLLMRemoteCacheOutcomeMetricsCollector*);
+    kmonitor::MutableMetric* outcome_qps_metric{nullptr};
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMRemoteCacheMatchMetricsCollector final {
 public:
     bool    remote_match_qps             = true;

@@ -40,6 +40,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheSDKMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCachePayloadMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheQuarantineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMDecodePublicationMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheOutcomeMetrics);
 
 bool RtpLLMGrpcConnectFailureMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(connect_failed_qps_metric, "rtp_llm_rank_broadcast_grpc_connect_failed_qps");
@@ -930,6 +931,19 @@ void RtpLLMDecodePublicationMetrics::report(const kmonitor::MetricsTags* tags,
     all_tags.AddTag("le_us", "+Inf");
     eos_latency_bucket_qps_metric->Report(&all_tags, 1);
     eos_latency_sum_us_qps_metric->Report(tags, latency);
+}
+
+bool RtpLLMRemoteCacheOutcomeMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(outcome_qps_metric, "rtp_llm_remote_cache_outcome_qps");
+    return true;
+}
+
+void RtpLLMRemoteCacheOutcomeMetrics::report(const kmonitor::MetricsTags* tags,
+                                            RtpLLMRemoteCacheOutcomeMetricsCollector* collector) {
+    kmonitor::MetricsTags event_tags = tags ? *tags : kmonitor::MetricsTags{};
+    event_tags.AddTag("stage", collector->stage);
+    event_tags.AddTag("outcome", collector->outcome);
+    outcome_qps_metric->Report(&event_tags, 1);
 }
 
 bool RtpLLMRemoteCacheMatchMetrics::init(kmonitor::MetricsGroupManager* manager) {

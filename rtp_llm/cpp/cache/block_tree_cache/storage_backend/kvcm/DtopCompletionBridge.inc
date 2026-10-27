@@ -140,7 +140,8 @@ size_t fileWireBytes(const std::string& tag) const {
         return cache_config_.blockSizeBytesForGroup(tag);
     }
     RTP_LLM_CHECK_WITH_INFO(group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK
-                                && group.seqSizePerBlock() == 128 * target_physical_shards_,
+                                && group.seqSizePerBlock()
+                                       == cache_config_.seq_size_per_block * target_physical_shards_,
                             "DTOP_FILE requires matching canonical state/SWA span, tag=%s",
                             tag.c_str());
     size_t bytes = 0;

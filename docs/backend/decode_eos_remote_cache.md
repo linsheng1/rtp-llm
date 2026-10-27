@@ -121,7 +121,10 @@ copies kept outside the measured KV transfer interval.
 
 The enabled path currently rejects MTP/speculative decoding and asynchronous
 stream reservation explicitly. It requires a native single PACE backend, valid
-base-block geometry and a nonempty instance salt. Normal feature-off behavior
+base-block geometry and a nonempty instance salt. The supported sharded
+state/SWA span is the configured base block size times the physical shard count;
+it is not hard-coded to a 128-token base. Unsupported span/mapping geometry is
+rejected explicitly rather than silently repacked. Normal feature-off behavior
 remains available. Request errors/cancellation do not publish. Deployment-level
 cache-tier policy and the existing request reuse-cache/override policy retain
 their ordinary meaning. With publication enabled, D remote lookup is intentionally
@@ -173,6 +176,15 @@ being declared zero network traffic. Geometry rejected before calling the SDK is
 not a completion-unknown I/O. Observer failures cannot change the transfer result;
 shutdown drains SDK clients before releasing the optional observer. Feature-off
 uses the upstream unobserved direct call.
+
+`rtp_llm_remote_cache_outcome_qps{stage=lookup,outcome=...}` separates
+`failed`, `not_found`, `found_unusable` and `usable_found` for each logical remote
+lookup. Local-only hits do not enter its denominator; SDK/RPC-internal retries do
+not add logical lookup events. A usable location is not a successful restoration
+or actual request use. Stage `read` reports `failed` or `read_complete` only after
+the existing all-rank backend transfer boundary; it does not include allocator
+adoption or checkpoint-tail replay. The existing block-ratio metric is unchanged
+and is not a request hit rate.
 
 This telemetry does not infer D-origin token counts from a cache hit. Reliable
 D provenance and all-rank P restore including necessary checkpoint-tail replay

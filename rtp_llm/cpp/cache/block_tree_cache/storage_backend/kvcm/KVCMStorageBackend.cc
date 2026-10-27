@@ -340,10 +340,17 @@ public:
             return {request.local_matched_blocks_num, nullptr};
         }
         RtpLLMRemoteCacheMatchMetricsCollector collector;
+        const char* lookup_outcome = "failed";
         const auto                            start = Clock::now();
         block_tree_cache_detail::ScopeRollback report([&] {
             collector.remote_match_time_us = elapsedTimeUs(start);
             reportRemoteMetrics<RtpLLMRemoteCacheMatchMetrics>(collector);
+            if (decode_publication_enabled_) {
+                RtpLLMRemoteCacheOutcomeMetricsCollector result;
+                result.stage = "lookup";
+                result.outcome = lookup_outcome;
+                reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(result);
+            }
         });
         const auto trace_id       = nextTraceId("match", match_trace_sequence_);
         auto query_type = static_cast<kv_cache_manager::QueryType>(default_query_type_);
@@ -373,12 +380,20 @@ public:
         if (!success) {
             return {request.local_matched_blocks_num, nullptr};
         }
+        if (decode_publication_enabled_) {
+            const bool found_any = std::any_of(locations.begin(), locations.end(), [](const auto& row) {
+                return !row.empty();
+            });
+            lookup_outcome = found_any ? "found_unusable" : "not_found";
+        }
         if (positional) {
             auto meta = std::make_shared<KVCMMatchMeta>();
             meta->locations = reusableLocations(request, std::move(locations));
             meta->filtered = true;
             collector.remote_match_fail_qps        = false;
             collector.remote_match_reuse_block_num = static_cast<int64_t>(meta->locations.size());
+            if (!meta->locations.empty())
+                lookup_outcome = "usable_found";
             if (!meta->locations.empty()) {
                 collector.remote_valid_hit_ratio =
                     static_cast<double>(request.local_matched_blocks_num + meta->locations.size()) / keys.size();
@@ -396,6 +411,8 @@ public:
         meta->locations = std::move(locations);
         collector.remote_match_fail_qps        = false;
         collector.remote_match_reuse_block_num = static_cast<int64_t>(locations_view.size());
+        if (!locations_view.empty())
+            lookup_outcome = "usable_found";
         if (!locations_view.empty()) {
             collector.remote_valid_hit_ratio =
                 static_cast<double>(request.local_matched_blocks_num + locations_view.size()) / keys.size();
@@ -408,10 +425,17 @@ public:
                                 "KVCM metadata read must run on tp rank 0, got %ld",
                                 parallelism_config_.tp_rank);
         RtpLLMRemoteCacheReadMetricsCollector collector;
+        const char* read_outcome = "failed";
         const auto                           start = Clock::now();
         block_tree_cache_detail::ScopeRollback report([&] {
             collector.remote_read_task_cost_time_us = elapsedTimeUs(start);
             reportRemoteMetrics<RtpLLMRemoteCacheReadMetrics>(collector);
+            if (decode_publication_enabled_) {
+                RtpLLMRemoteCacheOutcomeMetricsCollector result;
+                result.stage = "read";
+                result.outcome = read_outcome;
+                reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(result);
+            }
         });
         const auto meta = std::dynamic_pointer_cast<KVCMMatchMeta>(match_meta);
         RTP_LLM_CHECK_WITH_INFO(meta != nullptr, "KVCM read received invalid match metadata");
@@ -461,6 +485,7 @@ public:
         collector.remote_read_token_num =
             static_cast<int64_t>(remote_blocks * topology_->groups().front().cacheKeyTokenStride());
         collector.remote_read_fail_qps = false;
+        read_outcome = "read_complete";
     }
 
     void write(const StorageRequest& request) {
