@@ -956,16 +956,17 @@ TEST(ClientWrapperTest, DisabledPublicationPreservesSdkCallAndTraceIdentity) {
     const auto saved = client->saveKvCachesForTagWithStatus("default", uris, buffers, trace);
     EXPECT_EQ(saved.first, ClientErrorCode::ER_OK);
     EXPECT_EQ(saved.second, actual);
-    EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).WillOnce(Invoke([&](const auto& u, auto& b, const auto& t) {
+    EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).WillOnce(Invoke([&](const auto& u, const auto& b, const auto& t) {
         EXPECT_EQ(&u, &actual);
         EXPECT_EQ(&b, &buffers);
         EXPECT_EQ(t, trace);
-        b[0].iovs[0].size = 2;
+        *static_cast<unsigned char*>(b[0].iovs[0].base) = 9;
         return ClientErrorCode::ER_SDK_TIMEOUT;
     }));
     EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", actual, buffers, trace),
               ClientErrorCode::ER_SDK_TIMEOUT);
-    EXPECT_EQ(buffers[0].iovs[0].size, 2u);
+    EXPECT_EQ(byte, 9u);
+    EXPECT_EQ(buffers[0].iovs[0].size, 1u);
     EXPECT_CALL(*mock, SaveKvCaches(_, _, _))
         .WillOnce(Return(std::make_pair(ClientErrorCode::ER_SDK_TIMEOUT, UriStrVec{"partial_uri"})));
     const auto failed = client->saveKvCachesForTag("default", uris, buffers, trace);
