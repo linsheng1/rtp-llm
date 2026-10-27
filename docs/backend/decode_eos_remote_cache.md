@@ -1,483 +1,204 @@
-# Decode EOS publication through the Prefill remote-cache pipeline
+# Decode EOS remote KV publication
 
-Status: **review-only**, targeting `feature/dsv41-dev-main-202161013`.
-No upstream or fork baseline has been merged. The current candidate generalizes
-P CP / D DP configuration and supplies dedicated GPU memory registrations to a
-matching PACE SDK. It retains native GPU pages after successful Decode completion;
-there is no early CPU KV snapshot. Actual RDMA/GDR is a property of the matching
-SDK, Consumer, Provider and transport configuration, and must be verified at both
-ends rather than inferred from an environment variable.
+Status: implementation and validation in progress against
+`alibaba/rtp-llm:feature/dsv41-dev-main-202161013`. Historical results from another
+revision do not qualify this candidate. See [performance validation](decode_remote_cache_performance.md)
+for the measurement protocol.
 
-The current functional and capacity qualification is maintained separately from
-the historical release-port results below. Native GPU/mock tests do not qualify
-physical CP8/CP16 model execution. Large synthetic backend payloads do not qualify
-large model KV histories or net session performance.
+## Behavior and supported layouts
 
-## Lifecycle and checkpoint selection
+After successful Decode completion, retain native GPU KV pages and publish a
+complete checkpoint through the existing Prefill remote-cache pipeline. A fresh
+Prefill process can restore that checkpoint and recompute its unpublished tail.
+There is no early CPU KV snapshot or second GPU KV history pool.
 
-1. `GenerateStream` submits once at successful completion, before the final block
-   remap; `StreamCacheResource` provides an idempotent release-time fallback.
-   Cancelled/failed requests and warmup requests without a cache manager do not
-   publish. The supported path is single-token autoregressive Decode, one beam,
-   with cache reuse enabled and asynchronous stream reservation disabled.
-2. The computed KV endpoint is `seqLength() - 1`: the last sampled token has not
-   been evaluated by the model. There is no per-token CPU payload capture or
-   additional per-token device fence.
-3. Select an actually resident complete checkpoint on the common boundary of
-   physical CP sharding and reusable state/SWA page spans. Validate every FULL
-   page and the required terminal state/SWA pages. If a page is absent, back off
-   to an earlier complete checkpoint; never relabel partial final state with an
-   earlier key. Leave the unpublished tail for the next Prefill to recompute.
-4. For replicated CP, write the same full blocks to each target P rank's baseline
-   spec. For sharded CP, use `CPSlotMapper` for round-robin FULL pages and native
-   state/SWA slices. Target P rank count and physical shard count are distinct.
-5. `StorageBackend::prepareWrite()` pins all unique source pages, including CP
-   peer pages, before request ownership is released. Reuse the existing executor,
-   Prefill `StartWrite`, key mask, tag batches, actual-URI handling and
-   `FinishWrite` transaction. Local hot-cache insertion remains enabled.
-6. Pins remain until transfer completion. If SDK completion is uncertain, preserve
-   the release branch's permanent `FROZEN` references until block-pool destruction.
-   Retain the EOS admission lease until backend shutdown so frozen pages continue
-   to count against publication admission while the service is accepting work.
-   SDK shutdown does **not** unfreeze these pages.
-   A lost commit acknowledgement must not abort a possibly committed
-   transaction or indefinitely retain payload whose transfer already completed.
+The supported route uses synchronous, single-token autoregressive Decode, one
+beam, reuse-cache enabled, and a single native PACE backend with dedicated GPU
+registrations and GDR. MTP/speculative decoding, asynchronous stream reservation
+and mixed SDK backends are rejected when this feature is enabled.
 
-One EOS device fence makes the final GPU writes visible before asynchronous
-publication. FULL pages and final state/SWA data are sent through the existing
-Prefill transaction and GPU IOV path. Dedicated GPU registration is mandatory
-when GDR is requested; an unsuitable host-pinned or non-dedicated pool fails
-initialization rather than silently switching to CPU payload staging.
+P uses TP equal to its target CP count and DP1. D uses TP1 and an independent
+positive DP count. Both roles use the same `prefill_cp_size` and
+`prefill_cp_kv_cache_sharded` setting. Sharded and replicated layouts use the same
+implementation; a shape accepted by the code is not proof of real-model
+qualification on every physical CP/DP topology.
 
-## General configuration
+Remote cache identity includes target CP, physical shard count and base block
+size. A layout change causes a cold miss. D retains its normal local hot-cache
+reuse and receives prompt KV through the existing P-to-D transfer; this feature
+does not implement remote-to-D reconstruction from the P-layout wire format.
 
-Use the same feature setting and target layout on P and D:
+## Configuration and feature-off behavior
+
+Enable on both P and D:
 
 ```sh
 export RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH=1
 export RTP_LLM_REMOTE_CACHE_ENABLE_GDR_ZERO_COPY=1
 ```
 
-`prefill_cp_size` is the target P CP count on both roles. P uses TP equal to
-that count and DP1; D uses TP1 and an independent positive `dp_size`. For example,
-P CP2 / D DP4 and P CP8 / D DP4 use exactly the same feature switch. There is no
-CP2/CP4 whitelist, instance-group name prefix requirement, or DP=CP requirement.
-The model's own shape, expert-parallel and hardware constraints still apply.
-
-Select replication with the existing `prefill_cp_kv_cache_sharded=0`, or sharding
-with `prefill_cp_kv_cache_sharded=1`. Both roles must agree. Cache identity includes
-target CP, physical shard count and base block size automatically. Do not reuse
-old-format remote keys across layouts; the identity change deliberately causes a
-cold miss rather than a potentially incorrect cross-layout hit.
-
-For DRAM select the existing `pace` SDK backend and read backend 3. For explicit
-SSD select `pace_ssd` and read backend 9. With Decode publication enabled, GPU packing is selected automatically and SDK
-calls are bounded by byte, block and IOV limits; individual SSD objects remain
-intact. Trace block IDs are sliced along with each SDK batch. No additional
-packing/batching feature switch is required. With publication off, initialization,
-registration and SDK calls preserve the upstream path; Decode-only configuration
-validation and accounting are bypassed. The old CPU packing/coalescing
-implementations have been removed from this candidate.
-
-The transport configuration must select RDMA without a TCP payload fallback.
-Configure the matching Consumer's GDR read/write and external-memory flags,
-`MC_DISABLE_GPU_DIRECT_RDMA=0`, and the real local rank count for
-`TAIR_MEMPOOL_EXPECTED_EXTERNAL_CLIENTS` (the actual local client-process count
-for that Consumer: CP/DP count in the single-host-per-role examples; per-node local
-rank count for multi-host roles). A Provider does not inherit the Consumer's rank count. GPU
-registration success alone does not prove that a closed-source Consumer avoided
-D2H/H2D: validate registered payload address ranges and Consumer CUDA activities
-with a working same-process positive control.
-
-There are no legacy CP-specific or duplicate publication enable flags. The
-single publication switch defaults to off. Backend and CP layout selection are
-independent existing configuration, not additional Decode feature flags.
-
-### Initial resource budgets
-
-Per D process, EOS publication defaults to **1/8 of the participating native KV
-pool capacity, capped at 4 GiB**, across at most **4** queued/in-flight jobs.
-Capacity is summed once per unique physical pool, excluding duplicate tags and
-CP wire replicas. A 4 GiB pool allows 512 MiB; a 24 GiB pool allows 3 GiB; a
-48 GiB pool is capped at 4 GiB. Pages are deduplicated within each
-job; shared pages across separate jobs are conservatively charged again.
-These are admission budgets,
-not a second preallocated KV pool. The fraction and cap are initial deployment
-policy, not a measured optimum or a maximum stable-pool result. Independent D
-processes each have their own limit; DP4 can therefore retain four times the
-per-process budget. Increasing this budget may delay reclamation and reduce
-available execution capacity.
-Advanced overrides are `RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB` (1–16384) and
-`RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS` (1–64), strictly parsed once at backend
-initialization. Refusal skips optional remote publication, retaining the normal
-response/local cache. Uncertain transfers keep admission charged through FROZEN
-references. Existing shared queue limits and the P/D quarantine mechanism remain.
-`RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO=0` remains the default: disabling
-threshold-triggered process abort does not disable page freezing.
-
-Payload checksum diagnostics are removed from business execution. Tests use
-external GPU/Consumer observers and byte comparisons, with their diagnostic
-copies kept outside the measured KV transfer interval.
-
-The enabled path currently rejects MTP/speculative decoding and asynchronous
-stream reservation explicitly. It requires a native single PACE backend, valid
-base-block geometry and a nonempty instance salt. The supported sharded
-state/SWA span is the configured base block size times the physical shard count;
-it is not hard-coded to a 128-token base. Unsupported span/mapping geometry is
-rejected explicitly rather than silently repacked. Normal feature-off behavior
-remains available. Request errors/cancellation do not publish. Deployment-level
-cache-tier policy and the existing request reuse-cache/override policy retain
-their ordinary meaning. With publication enabled, D remote lookup is intentionally
-local-only; D receives its prompt KV through the existing P-to-D mechanism and
-publishes completed additions for P. This does not add remote-to-D reconstruction
-from the P-layout wire format. D local hot-cache reuse remains enabled.
-
-## Publication telemetry
-
-Enabled D backends maintain a bounded admission lease for every retained source
-checkpoint. `rtp_llm_decode_publish_pending_charge_bytes`, `pending_jobs`,
-`queued_jobs`, `running_jobs`, `quarantined_jobs`, `pending_bytes_limit`,
-`pending_jobs_limit` and `oldest_pending_age_us` share the
-`rtp_llm_decode_publish_` prefix. Queued includes preparation before executor
-submission. Total pending includes quarantine; late/retried callbacks cannot
-turn quarantine back into a running or queued task. Source-page charges are
-conservative across separate jobs, not a measurement of extra allocated HBM.
-
-A CPU sampler reports once per second only for enabled D backends with a metrics
-reporter; no inference step, GPU operation or new per-step collective is needed.
-Age starts at first admission and includes idle or frozen time. Feature-off and
-P-only backends do not create this accounting/sampler. Shutdown joins the sampler
-before releasing its owner; frozen admission remains charged until the existing
-backend quarantine lifecycle ends.
-
-`rtp_llm_decode_publish_outcome_qps{outcome=...}` reports one terminal outcome per
-admission: `committed`, `already_present`, `completion_unknown`, or `failed`.
-`rtp_llm_decode_publish_budget_skip_qps` reports the first budget rejection
-once per logical EOS publication, separately from terminal admission outcomes.
-A later fallback may succeed; it keeps the original EOS clock and does not
-repeat the rejection event. Do not add this notification counter to terminal
-outcomes to derive a per-request denominator. Failed admission,
-cancellation, missing acknowledgement and uncertain completion never claim a
-successful commit. Internal SDK retries do not create additional logical commit
-outcomes.
-
-Acknowledged commits report `rtp_llm_decode_publish_eos_latency_bucket_qps`
-with a fixed low-cardinality `le_us` label (100 microseconds through 60 seconds,
-plus `+Inf`) and `rtp_llm_decode_publish_eos_latency_sum_us_qps`. Latency begins
-at the first actual successful `GenerateDone` event using a monotonic clock,
-before delayed planning/checkpoint scan/device fence/queueing, and ends at the
-successful FinishWrite acknowledgement. Retries and release-time fallback retain
-that immutable event timestamp. Direct low-level callers without a recorded EOS
-may publish, but do not fabricate a latency sample from their admission time. Ratios of cumulative bucket rates
-to the `+Inf` rate give a bounded approximate P50/P95; these are not averages or
-exact quantiles. Do not combine buckets across different deployment/configuration
-populations without preserving the ordinary instance/rank tags.
-
-`rtp_llm_remote_completed_payload_bytes_qps{mode=read|write}` records the
-requested IOV payload of each SDK chunk that returned success. It includes
-scale/state and actual CP wire copies, and counts neither D2D packing nor NIC
-retransmissions. Completed earlier chunks remain counted when a later chunk
-fails. `rtp_llm_remote_payload_completion_unknown_qps` counts attempted SDK calls
-that fail or throw; their possibly transferred bytes remain unknown, rather than
-being declared zero network traffic. Geometry rejected before calling the SDK is
-not a completion-unknown I/O. Observer failures cannot change the transfer result;
-shutdown drains SDK clients before releasing the optional observer. Feature-off
-uses the upstream unobserved direct call.
-
-`rtp_llm_remote_cache_outcome_qps{stage=lookup,outcome=...}` separates
-`failed`, `not_found`, `found_unusable` and `usable_found` for each logical remote
-lookup. Local-only hits do not enter its denominator; SDK/RPC-internal retries do
-not add logical lookup events. A usable location is not a successful restoration
-or actual request use. Stage `read` reports `failed` or `read_complete` only after
-the existing all-rank backend transfer boundary; it does not include allocator
-adoption or checkpoint-tail replay. The existing block-ratio metric is unchanged
-and is not a request hit rate.
-
-This telemetry does not infer D-origin token counts from a cache hit. Reliable
-D provenance and all-rank P restore including necessary checkpoint-tail replay
-require separate versioned protocol/execution validation. Existing read latency
-or generic remote-reuse length must not be renamed to imply those guarantees.
-
-## Admission and failure isolation
-
-No GPU shadow KV pool or request-owned early CPU payload snapshot is allocated.
-The cost is delayed reclamation of existing source GPU pages. Local hot-cache
-insertion and ordinary Prefill remote publication remain enabled.
+Use the existing `pace` / read backend 3 for DRAM, or `pace_ssd` / read backend 9
+for explicit SSD. The enabled SSD route automatically uses GPU packing and
+bounded SDK calls. No additional packing or CP-specific feature switch exists.
+State/SWA geometry must match the configured base block size and physical CP
+shards; unsupported geometry fails initialization or checkpoint validation.
+A nonempty instance salt is required.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH` | `0` | One opt-in switch for all supported P CP / independent D DP layouts. |
-| `RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB` | `min(native_pool_bytes / 8, 4 GiB)` | Per-D-process retained source-page charge, deduplicated per job and including quarantine; range 1–16384 MiB. |
-| `RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS` | `4` | Per-D-process publication jobs, including quarantine; range 1–64. |
+| `RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH` | `0` | Opt in to the supported P/D publication route. |
+| `RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB` | `min(native_pool_bytes / 8, 4 GiB)` | Optional override, 1-16384 MiB, per D process. |
+| `RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS` | `4` | Optional override, 1-64 retained publications per D process. |
 
-Admission accounts for the entire candidate checkpoint before the metadata mask
-is available; masked pages are not released early. Exhaustion skips optional
-remote publication while preserving the response and normal local cache. The
-retained-page limit is not an extra HBM allocation or a proof of zero capacity
-loss.
+When the publication switch is unset or `0`, Factory and ClientWrapper delegate
+to the upstream SDK path with its original call granularity and registration
+APIs. Decode-only backend/layout/budget validation, admission accounting,
+source-page holds, sampler and SSD packing arenas are bypassed. Existing Prefill
+remote caching and GDR keep their upstream behavior.
 
-The SSD adapter uses one shared registered 64 MiB GPU arena per process/device,
-with a 512 MiB per-process registered-arena cap. Operations lease disjoint ranges
-sized to their largest URI, not their entire logical batch. GPU writes gather one
-URI immediately before its SDK write; reads scatter its result before the next
-URI overwrites that range. This avoids starving concurrent cache tags when a
-replicated SWA batch approaches 64 MiB. The dedicated GPU copy callback explicitly waits for its
-default-stream D2D copy before returning, because external RDMA is not ordered
-by CUDA stream dependencies. This is a per-packing-copy completion guarantee,
-not a new per-token inference fence.
-Unknown SDK completion quarantines only that operation's range; independent tags
-can continue using other ranges. The affected client fails closed until shutdown,
-and its delegate drains before its quarantined memory is released. This protects
-pending DMA and can reduce available capacity; it does not make uncertain writes
-successful. The limits are transient-operation limits, not remote DRAM/SSD pool
-capacity limits. SSD uses D2D gather/scatter, not a CPU KV snapshot; this does not
-claim GPUDirect Storage on the remote SSD host.
+The transport must use matching SDK, Consumer, Provider and Manager versions.
+RDMA/GDR and absence of TCP or CPU payload fallback require runtime evidence;
+registration success or an environment flag alone does not establish them.
+Configure Consumer external-memory registration and its actual local client
+count using the transport's existing settings. Do not derive a remote Provider's
+client count from P CP or D DP.
 
-## Validation and limits
+## Checkpoints, ownership and shutdown
 
-### Historical v5 validation (before configuration cleanup)
+1. `GenerateStream` records the first successful `GenerateDone` and submits
+   before final block remap. `StreamCacheResource` supplies an idempotent
+   release-time fallback. Errors, cancellation and uncached warmup do not publish.
+2. Computed KV ends at `seqLength() - 1`; the final sampled token has not yet
+   been evaluated. Select a checkpoint on the common physical-CP/state/SWA
+   boundary, checking all required resident FULL and terminal state/SWA pages.
+   Missing pages cause backoff to an earlier complete checkpoint, never relabeling
+   final mutable state as an earlier checkpoint.
+3. Sharded layouts use the existing CP slot mapper and native state slices.
+   Replicated layouts write the same full pages to each target P rank's spec.
+4. Admission charges all unique physical source pages for the candidate before
+   the StartWrite mask is available. A successful admission performs one EOS
+   device fence, then `StorageBackend::prepareWrite()` pins all source/peer pages
+   before request ownership can end. There is no per-token device fence.
+5. Reuse the existing executor, StartWrite mask, tag batches, actual returned
+   URIs and FinishWrite transaction. Normal local hot-cache insertion continues.
+   Pins are released only when transfer completion is known.
+6. Unknown DMA completion preserves permanent FROZEN references until pool
+   destruction and retains its admission charge until backend shutdown. SDK
+   shutdown does not unfreeze pool pages. A missing commit acknowledgement cannot
+   be called a confirmed publication or trigger an unsafe abort of a possibly
+   committed transaction.
 
-Native GPU/mock coverage is CP1/2/4/8/16 × sharded/replicated × independent
-DP1/3/8. The historical v5 baseline's 377 executed tests passed with zero skips, including GPU
-packing/scatter ordering, concurrent large logical batches and unknown-completion
-range isolation. Real-model qualification includes CP2 P / DP4 D and CP4 P / DP4 D,
-with both layouts and DRAM/explicit SSD. Execution results, exact wheel/source
-hashes, actual pool budgets and Consumer observations must be taken from the
-matching test report. Unexecuted combinations are not passes.
+The per-process byte default sums participating unique physical pool capacities
+once, takes one eighth and caps at 4 GiB. A 4 GiB pool permits 512 MiB; a 48 GiB
+pool permits 4 GiB. CP wire copies do not multiply native capacity. Different jobs
+conservatively charge shared pages again. These are limits on delayed page
+reclamation, not a preallocated extra pool or a measured optimum. Exhaustion
+skips optional publication while preserving the response and local cache.
+Admission currently holds the full candidate checkpoint even if StartWrite later
+masks most of it; masked pages are not released early.
 
-The current large backend test generates distinct 32 MiB objects entirely on GPU,
-commits the actual writes, and uses an independent reader process to compare every
-64-bit word on GPU. The only readback is an 8-byte diagnostic mismatch count per
-object, outside the registered payload range. Target payloads are 128 GiB in a
-160 GiB DRAM pool and 512 GiB in a 640 GiB SSD backing file. Actual SSD allocation,
-process IO and O_DIRECT descriptors are recorded; sparse file length alone is not
-acceptance. These byte tests and the real-model tests are reported separately.
+The implementation retains upstream scheduler, CPU-TP broadcast and shutdown
+coordination. It adds explicit shutdown of the asynchronous cache-store writer
+and detaches surviving Python owners. Acceptance must inspect every native rank
+and owned helper exit, rather than the service root's exit code alone.
 
-### Current executed result (generalized v5)
+## SSD transfer bounds
 
-Full wheel SHA256: `628b4aa3c8c0cdaa29f49d28e2dbff1054a919c396edb2c4164b9136ce04eee2`;
-source overlay SHA256: `e8d5831fff2c5373bdfb9596e14c0008e4b2a4279f105d05fa721348716cc2bd`.
-All 377 native tests executed with zero failures or skips. All four actual-model
-paths below passed EOS publication, new-P cold recovery, local-hot/bypass exact
-token comparison, and normal model/Consumer shutdown:
+A process/device shares a registered 64 MiB GPU arena, with a 512 MiB
+process-wide arena cap and a 64 MiB operation limit. Reads use at most four
+objects and 256 KiB of live payload per window. One larger object can use a
+window alone within the operation limit. Each concurrent object has a disjoint
+GPU span; every sibling finishes before scatter or span reuse. Worker threads
+select the originating CUDA device. Callers without a worker initializer retain
+the single-object path; writes retain single-object completion ordering.
 
-| Backend | Layout | P CP | D DP | Published endpoints | Result |
-| --- | --- | --- | --- | --- | --- |
-| DRAM | sharded | 2 | 4 | 8192, 8192, 8192, 8448 | Passed |
-| DRAM | replicated | 4 | 4 | 8192, 8192, 8320, 8448 | Passed |
-| SSD | replicated | 2 | 4 | 8192, 8192, 8320, 8448 | Passed |
-| SSD | sharded | 4 | 4 | 8192, 8192, 8192, 8192 | Passed |
+Gather/scatter is D2D and completes before external RDMA uses or releases the
+span. Failure, exception or uncertain completion joins all workers and quarantines
+the operation's range until the delegate drains. Independent ranges can continue;
+quarantine consumes capacity. There is no CPU KV fallback and no claim of
+GPUDirect Storage on the remote SSD host. Actual SDK concurrency and DRAM/SSD URI
+compatibility still require validation against the deployed dependency versions.
 
-Both model and Consumer observations show zero KV-payload D2H/H2D in the
-qualified route. SSD GPU D2D packing is counted separately. Actual SSD cold
-reads were 19,292,160 and 9,449,472 bytes, with O_DIRECT descriptors observed.
-The model pools were 4 GiB/card; this is correctness qualification, not a maximum
-HBM-capacity or performance-frontier result. CP8/CP16 and DP3/DP8 have native
-GPU/mock coverage, without physical multi-node model qualification.
+## Eight monitoring categories
 
-Large backend verification separately passed 128 GiB DRAM and 512 GiB SSD
-full-word GPU checks, using the v3 single-URI probe. Its source revision and
-copy diagnostics remain distinct from final v5 model evidence. In v3, the last
-CP2-replicated model attempt revealed ordinary P write failures despite matching
-continuations. V4 switched GPU packing leases from logical-batch size to the
-largest URI; v5 explicitly completed D2D copies before external RDMA handoff.
-Failed and interrupted attempts are retained and not counted as final passes.
+Reuse existing metrics where their meaning matches. Request IDs, keys, URIs and
+individual objects belong in logs/timeline, never metric labels.
 
-### Historical qualification (different revisions)
+| Category | Required interpretation and implementation status |
+| --- | --- |
+| D new logical tokens | Confirmed publication, P restoration and actual P reuse are separate. Reliable version-bound D provenance is still pending. |
+| KV payload bytes | `rtp_llm_remote_completed_payload_bytes_qps{mode=read,write}` counts IOV bytes of successful SDK chunks, including scale/state and actual CP copies. Unknown completion is separate. |
+| P restore latency | Start at recovery and end after all required GPU KV and necessary checkpoint-tail replay are ready. Existing backend-read timing is only a subphase; full boundary is pending. |
+| EOS to publication | `rtp_llm_decode_publish_eos_latency_bucket_qps` and `eos_latency_sum_us_qps`, from first real GenerateDone through confirmed FinishWrite, including delayed planning, fence and queue. |
+| Held page budget | `rtp_llm_decode_publish_pending_charge_bytes`, `pending_bytes_limit`; includes frozen pages and conservative cross-job charging. |
+| Pending jobs | Same `rtp_llm_decode_publish_` prefix: `pending_jobs`, `queued_jobs`, `running_jobs`, `quarantined_jobs`, `pending_jobs_limit`. Total includes quarantine. |
+| Oldest pending age | `rtp_llm_decode_publish_oldest_pending_age_us`, from original admission; retries do not reset it. |
+| Operation results | Publication outcomes and stage-aware lookup/read outcomes below. Actual D-origin reuse remains pending. |
 
-### Initial release-port attempt (historical)
+An enabled D backend with a reporter samples state once per second, including
+idle/stuck work. P and feature-off backends create no publication sampler.
+Shutdown joins it before releasing its owner. Queued includes preparation before
+executor submission; a late callback cannot move quarantine back to running.
 
-Code under test: `badca4c96d70c0639afbb05ea66c1be9c87c4f0f`;
-feature implementation `8b9ee641`. The historical documentation-only update `565ca78` did not change that
-initial tested implementation. Subsequent source fixes are qualified separately below.
+`rtp_llm_decode_publish_outcome_qps{outcome=...}` records one terminal result per
+admission: `committed`, `already_present`, `completion_unknown` or `failed`.
+`rtp_llm_decode_publish_budget_skip_qps` records the first budget refusal per
+logical EOS, separately. A later retry may succeed without repeating that
+notification. Do not add budget notifications to terminal results for a request
+denominator. Direct low-level callers without an EOS event produce no invented
+EOS latency sample.
 
-| Layer | Result | Boundary |
-| --- | --- | --- |
-| Standalone C++17 coalescer | 79 assertions; ASan/UBSan passed | Public API headers + mock SDK; CPU only. |
-| Fresh ARM64 native build | Passed | Exact release-port tracked source; no old library substitution. |
-| `native_dtop_completion` | 28/28 | Real GPU pages + mock SDK, CP2/CP4 sharded/replicated. |
-| `client_wrapper` | 22/22 | No skips. |
-| `kvcm_config` | 9/9 | No skips. |
-| `kvcm_local` | 15/15 | Test-only baseline corrections below; no skips. |
-| `storage_backend` | 36/36 | No skips. |
-| GPU coalescer | 132 assertions | Real GPU allocations + mock delegate. |
-| Full ARM64 wheel and two-host loader | Passed with dependency supplement | Stock public target still lacks DeepGEMM. |
-| Real-model DRAM/SSD × CP layouts | **Failed overall: first DRAM/sharded functional cases passed, shutdown crashed; other three paths not run** | Conditional runtime dependency fix described below. |
+EOS buckets have fixed `le_us` values from 100 microseconds to 60 seconds and
+`+Inf`. Cumulative bucket rates divided by `+Inf` provide approximate P50/P95;
+a gauge average does not. Preserve deployment/configuration populations.
 
-The first KVCMLocal run's three failures reproduced on the exact upstream
-`a06c91abe` baseline. The test-only correction uses the observed failed-init
-shutdown contract, checks unchanged quarantine generation/task/block counters
-after a metrics snapshot consumes its samples, and scopes the CUDA death test
-to GTest's threadsafe re-execution mode. It still requires a real SIGABRT for
-the abort-threshold case. The adjacent invalid-topology expectation remains
-zero. Original failed attempts were preserved; these fixes do not change
-production behavior.
+`rtp_llm_remote_cache_outcome_qps{stage=lookup,outcome=...}` distinguishes
+`failed`, `not_found`, `found_unusable`, `usable_found` per logical remote lookup.
+Local-only hits are outside that denominator. Stage `read` reports `failed` or
+`read_complete` at the backend all-rank transfer boundary; this is not allocator
+adoption, tail replay, or actual request use. SDK-internal retries are not new
+logical lookups.
 
-The stock public complete-wheel target fails dependency analysis because its
-CUDA13 lock omits `@pip_cuda13_arm_torch//deep_gemm`; the requirements explicitly
-expect an internal overlay. The test environment supplies a separate, pinned
-DeepGEMM repository: `2.8.2+ad62a90.cu132`, SHA256
-`2e0e352bd2a07be8f6e3eb42edac0b57b423e8ddaaaffff1057ecb11438d20f9`.
-This is **not** an official internal overlay or a stock-public-build pass.
-Product wheel SHA256:
-`9f65dc24a0f4f169dca7ace9d986faf6b30355aa603b4f302e697f7a388ab3a5`.
+Payload counts exclude D2D and NIC retransmissions. Successful earlier chunks
+remain counted when a later chunk fails. An attempted failed/throwing SDK call
+increments `rtp_llm_remote_payload_completion_unknown_qps`; its partial bytes
+remain unknown. Pre-SDK geometry rejection is not unknown I/O.
 
-The first real P startup also reproduced the locked FA4 `4.0.0b21` / Quack
-`0.6.5` missing `quack.activation.sub_packed_f32x2` error. The loaded package
-paths and versions were verified. The independent second test runtime uses
-[upstream FlashAttention #2787](https://github.com/Dao-AILab/flash-attention/pull/2787)
-(commit `145b1010051dbfd4bdc41a0ae55d495b08d7a458`), replacing three call sites
-with the CuTe primitive and removing obsolete imports. Both hosts' 1112
-installed RTP files remain identical to the product wheel. Two SM100 BF16
-forward cases passed an FP32 SDPA reference (max absolute errors 0.00927 and
-0.00905). No shared runtime was changed. This dependency fix is an explicit
-acceptance condition, not a change silently included in the RTP PR.
+Logical D token counts must exclude the already-computed P prefix, CP replicas
+and duplicate retries; each real repeated use counts separately. Restoration is
+not actual use. Restoration/publication token ratios are not hit rates: one
+publication can serve multiple requests. Request hit rates use lookup requests
+as their denominator.
 
-The real model test used CP4 P, DP4 D, and a separate RDMA-staging DRAM
-Provider, with 36 GiB/card KV pools and local-hot caching enabled. Four independent
-7680-token inputs produced actual outputs of 513/530/641/777 tokens. Their
-computed endpoints were 8192/8209/8320/8456; the complete sharded checkpoint was
-8192 in all four cases (tails 0/17/128/264). After restarting P, local reuse was
-zero and remote reuse was 8192; hot-local reuse was 8192 and bypass reuse zero.
-All four cold/hot/bypass continuations matched for all eight actual tokens.
-These 512 additional KV positions include the first P-sampled output token
-whose KV had not yet been computed by P; do not call all 512 pure D-sampled tokens.
+A fresh-reader Manager probe found the current dependency ignores
+FinishWrite.locations, including changes to standard URI fields. An origin
+marker added to a submitted URI is therefore not a supported provenance
+contract. Version-bound persistence and SDK compatibility must be implemented
+and validated before enabling accurate D-origin counters; local maps, token
+lengths and request-role guesses are insufficient.
 
-**The run failed shutdown acceptance.** D rank 2 stopped its engine and destroyed
-the model while peers were still executing `NormalEngine::step()`. It then
-SIGSEGVed after BackendManager shutdown. Peers timed out in DeepGEMM grid sync
-and SIGABRTed. The D service root returned zero, but native logs and nonzero
-reaped helper exits expose the failure. During subsequent failure cleanup P
-exceeded the 600-second shutdown bound and required an identity-checked SIGKILL
-of its own private PID namespace; that is not a separate isolated P-only normal
-shutdown reproduction. All test model/Consumer/Provider processes and the private
-CPU weight keeper were subsequently released.
+Group dashboards into publication/reuse effect, latency/transfer efficiency,
+and backlog/errors. Reuse existing TTFT and overall throughput metrics.
 
-In that initial attempt, `NormalEngine.cc` was byte-identical to the release baseline. The older
-experimental branch's per-step collective stop-vote workaround was not ported.
-The observed ordering is a strong investigation lead, not a symbolized root cause
-for the first SIGSEGV or proof of EOS-publication causality. At that point no B-disabled model
-counterfactual had been run. The follow-up below supplies that evidence and adds
-an explicit shutdown-only RPC fence.
-DRAM/replicated and both explicit-SSD model configurations were not started after
-this blocker; native CP/layout coverage does not qualify those real model paths.
+## Delivery gates
 
-Official release dependency-overlay CI remains required before merge. This
-port does not establish GDR or maximum stable capacity/performance results.
-Native tests use a mock SDK; real-model token comparisons do not establish
-full-logit equivalence. Optional read fingerprints add diagnostic D2H, and the
-new EOS path does not emit a paired source fingerprint for every actual SDK
-write. Therefore no complete source/restore byte-fingerprint match is claimed.
-Active model cancellation and real-SDK error injection are not covered by the
-normal-EOF matrix; native failure/ownership tests do not replace those runs.
-Explicit SSD tests exclude automatic DRAM-to-SSD tiering and do not force MR
-cache eviction or establish physical SSD reads on every restore.
+The same committed source, complete wheel, Python models and fingerprinted
+SDK/Manager/Consumer/Provider dependencies must pass:
 
-### Shutdown follow-up on the same release baseline
+- Feature-off compatibility against upstream; targeted native regression,
+  resource admission, retries, quarantine, cancellation and shutdown checks.
+- Real Decode-generated KV publication, independent fresh-P recovery, local-hot
+  and bypass comparisons for DRAM/SSD by sharded/replicated CP. Compare actual
+  continuation tokens through natural EOS and required GPU bytes/state.
+- Runtime evidence for RDMA/GDR, absence of KV CPU snapshots and payload D2H/H2D,
+  and real SSD IO with cache state documented.
+- Eight metric semantics, including proven D provenance, complete P restore
+  timing, CP/retry deduplication, actual use and idle backlog age.
+- Paired performance with matched effective batch, pool budget and cache state,
+  plus D EOS/fence/held-page/queue/commit timeline. Report gains and remaining
+  SSD-versus-DRAM gaps without treating historical results as current passes.
+- Normal bounded exit of every owned rank/helper, clean resource audit, required
+  build/CI and upstream review against the exact Alibaba target branch.
 
-The B-disabled, idle DP4 Decode counterfactual also reproduced the first
-SIGSEGV. GDB and symbolization identify the KMonitor deleter in
-`MetricsReporter.cpp:78`: the process-wide grammar backend outlived
-`KMonitorFactory::Shutdown()`. Its metrics reporter then dereferenced a deleted
-KMonitor. The relevant baseline grammar/factory/metrics sources match a06;
-a complete pure-a06 model counterfactual was not run.
-
-The first fix released the grammar backend before the factory and coordinated
-engine-loop exit over RPC. A subsequent real DRAM/sharded run completed its
-cache data comparisons and same-step loop fence, but the first P still aborted
-in the ANet metrics thread. Its root returned zero while rank 0 exited by
-SIGABRT. Python attention metadata retained an async writer, whose allocator
-and active-store references kept the transport/reporting threads alive.
-
-The candidate now also explicitly shuts down the writer at native model
-teardown, joins submitted tasks, makes late completion callbacks terminal, and
-releases both the allocator and its aliasing configuration pointer. Python
-aliases may survive, but cannot reopen the closed writer. Source-page leases
-owned by outstanding underlying store callbacks keep their existing lifetime
-contract.
-
-The loop fence tracks completed/in-flight iterations on the CPU; shutdown RPCs
-advance lagging ranks to a common completed boundary and distribute an
-incarnation-bound certificate before peers close their RPC servers. There is
-no per-step GPU collective stop vote. CPU mutex/counter work is added to the
-normal loop; its isolated real-model performance impact is not measured here.
-
-Candidate source overlay SHA256:
-`e94d84cdae3108e5cf89e21e0731ce26a6d7b6705f9f658a951d749bd69e8407`;
-complete wheel SHA256:
-`61861e2a6b4b479ca5e2c20a64168026121085f3a1be522b757b306694c41518`.
-Fresh native results: 12 shutdown/loop coordinator + 3 real grammar/KMonitor
-ownership + 52 async-writer cases, all passed with zero skips. The initial
-110 EOS/backend cases and earlier 8 dispatcher-stop cases remain separately
-versioned evidence. The candidate product sources were committed as `29b6b66` (owner teardown) and
-`6bedc63` (same-step shutdown fence), byte-identical to the tested overlay.
-The four-path real-model matrix passed:
-
-| Backend | CP layout | Published endpoints (four histories) | Data and full lifecycle |
-| --- | --- | --- | --- |
-| DRAM | sharded | 8192, 8192, 8192, 8192 | Passed |
-| DRAM | replicated | 8192, 8192, 8320, 8448 | Passed |
-| SSD | sharded | 8192, 8192, 8192, 8192 | Passed |
-| SSD | replicated | 8192, 8192, 8320, 8448 | Passed |
-
-All 16 histories passed new-P cold/local-hot/bypass exact token comparisons;
-followups permit natural EOS and compare all actual outputs up to eight tokens.
-All 48 native rank exits were independently observed as exit code 0, with equal
-completed-step boundaries within each incarnation. No SIGSEGV/SIGABRT, forced
-termination or surviving own model/Consumer/Provider process was accepted.
-Original token outputs and checksums were copied to the local evidence bundle.
-The private CPU model-table keeper was released after the final audit.
-
-These are functional and normal-shutdown results under the dependency and
-explicit-SSD conditions above. Active cancellation, real-SDK error injection,
-GDR, physical SSD-read enforcement, automatic-tier CRC, capacity and performance
-are outside this follow-up. Official release-overlay CI remains required; the
-PR stays Draft for human review and has not been merged.
-
-### Historical evidence from the original experimental branch
-
-The original implementation revision was built into a complete ARM64 wheel and
-tested on GB200 before this release port. Historical wheel SHA256:
-`c7a8867cc6ab56c492ba2e9785ed1d89aa2ef02519dc49183194c1383dc2a762`.
-These results do **not** qualify the new release-branch port.
-
-The historical native GPU test suite passed **28/28**, with a mock SDK. It covers CP2/CP4
-and sharded/replicated layouts, source lifetime after request release, final
-state/SWA bytes, partial tails, missing state, non-reusable SWA, duplicate EOS,
-admission rejection, unknown SDK completion and lost commit acknowledgement.
-Relevant targets (append the environment's CUDA/remote-cache build configuration):
-
-```sh
-bazel test //rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test:native_dtop_completion_test
-bazel test //rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test:client_wrapper_test
-bazel run //rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test:coalesced_pace_write_test_bin
-# Optional real-GPU adapter checks:
-bazel run //rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test:coalesced_pace_write_test_bin -- gpu
-```
-
-The real-model check used CP4 P, DP4 D and a separate remote host, with the same
-36 GiB/card KV pool and D admission settings for both layouts. Each of four
-DRAM/direct-SSD × sharded/replicated configurations generated four independent
-7680-token prompts with actual Decode output lengths of 513, 530, 641 and 777.
-A newly started P, local-hot reuse and bypass were checked separately.
-
-| Layout | Computed endpoints | Published endpoints | Tail recomputed by P |
-| --- | --- | --- | --- |
-| Sharded CP4 | 8192 / 8209 / 8320 / 8456 | 8192 / 8192 / 8192 / 8192 | 0 / 17 / 128 / 264 |
-| Replicated CP4 | 8192 / 8209 / 8320 / 8456 | 8192 / 8192 / 8320 / 8448 | 0 / 17 / 0 / 8 |
-
-All 16 fresh-P remote hits equalled the published endpoint, with local reuse
-zero; hot-local hits matched it and bypass reuse was zero. All 16 cold/hot
-continuations matched. Strict three-way equality over the full actual output
-held for 12/16: DRAM naturally ended after two tokens; direct-SSD replicated
-matched eight tokens without EOS. Direct-SSD sharded was forced to eight tokens
-despite natural EOS at token two: bypass diverged **after EOS** in four cases.
-Those cases are not counted as strict eight-token passes, and no SDK corruption
-or floating-point root cause is asserted. All tested P/D/Consumer processes
-drained normally, with no SIGSEGV/SIGABRT or forced termination.
-
-The direct-SSD check used an 8 GiB Provider pool, a 10% MR cache and a 256 GiB
-backing file. It did not force MR eviction and does not prove every restore read
-physical SSD. It does not cover the older automatic DRAM-to-SSD tiering CRC issue.
-Long-output/full-logit equivalence, performance gain and maximum stable KV pool
-capacity have not been established for this EOS-retention implementation.
+Native mocks, standalone CPU checks and historical four-path runs establish
+only their stated scope. They cannot substitute for these final-candidate gates.
