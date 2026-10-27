@@ -307,7 +307,12 @@ TEST(ClientWrapperTest, TagRoutingUsesRegistrationOrderAndFailedInitPublishesNoR
             EXPECT_CALL(*clients[0], SaveKvCaches(kv_cache_manager::UriStrVec{"zeta_uri"}, _, _))
                 .WillOnce(Return(
                     std::make_pair(kv_cache_manager::ClientErrorCode::ER_OK, kv_cache_manager::UriStrVec{"actual"})));
+            // Exercise routing with a valid one-object transfer now that
+            // bounded batching always checks URI/buffer geometry first.
+            buffers.emplace_back();
+            buffers.back().iovs.push_back({kv_cache_manager::MemoryType::CPU, data.data() + 16, 16, false});
             EXPECT_TRUE(wrapper.loadKvCachesForTag("alpha", {"alpha_uri"}, buffers));
+            buffers.back().iovs.front().base = data.data();
             EXPECT_EQ(wrapper.saveKvCachesForTag("zeta", {"zeta_uri"}, buffers).second,
                       (kv_cache_manager::UriStrVec{"actual"}));
             EXPECT_FALSE(wrapper.loadKvCachesForTag("missing", {}, buffers));
@@ -497,8 +502,9 @@ TEST(ClientWrapperTest, ShutdownInterruptsFailedReRegistrationBeforeCreatingNewS
 
     EXPECT_CALL(*initial_transfer_client, LoadKvCaches(_, _, _))
         .WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
-    kv_cache_manager::UriStrVec    uris;
-    kv_cache_manager::BlockBuffers buffers;
+    kv_cache_manager::UriStrVec    uris{"old_uri"};
+    kv_cache_manager::BlockBuffers buffers(1);
+    buffers.front().iovs.push_back({kv_cache_manager::MemoryType::CPU, old_pool.data(), old_pool.size(), false});
     std::promise<bool>             transfer_result_promise;
     auto                           transfer_result = transfer_result_promise.get_future();
     std::thread                    transfer_thread(

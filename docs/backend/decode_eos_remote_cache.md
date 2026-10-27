@@ -93,8 +93,10 @@ independent existing configuration, not additional Decode feature flags.
 
 ### Initial resource budgets
 
-Per D rank, EOS publication retains at most **512 MiB** of unique GPU source
-pages across at most **4** queued/in-flight jobs. These are admission budgets,
+Per D rank, EOS publication charges at most **512 MiB** of GPU source pages
+across at most **4** queued/in-flight jobs. Pages are deduplicated within each
+job; shared pages across separate jobs are conservatively charged again.
+These are admission budgets,
 not a second preallocated KV pool. Against the present 4 GiB/rank test pool the
 byte budget is 12.5%; this is a deployment starting point, not a measured optimum.
 Advanced overrides are `RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB` (1–16384) and
@@ -128,7 +130,7 @@ insertion and ordinary Prefill remote publication remain enabled.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH` | `0` | One opt-in switch for all supported P CP / independent D DP layouts. |
-| `RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB` | `512` | Per-D-process unique retained source-page budget, including quarantine; range 1–16384 MiB. |
+| `RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB` | `512` | Per-D-process retained source-page charge, deduplicated per job and including quarantine; range 1–16384 MiB. |
 | `RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS` | `4` | Per-D-process publication jobs, including quarantine; range 1–64. |
 
 Admission accounts for the entire candidate checkpoint before the metadata mask

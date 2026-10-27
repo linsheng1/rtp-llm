@@ -100,7 +100,9 @@ TEST(KVCMLocalTest, DirectClientRoutesMetadataAndPayload) {
     EXPECT_EQ(locations.size(), expected_locations.size());
 
     kv_cache_manager::UriStrVec    uris{"uri"};
-    kv_cache_manager::BlockBuffers buffers;
+    kv_cache_manager::BlockBuffers buffers(1);
+    buffers.front().iovs.push_back(
+        {kv_cache_manager::MemoryType::CPU, registration.data(), registration.size(), false});
     EXPECT_CALL(*transfer_ptr, LoadKvCaches(uris, _, _)).WillOnce(Return(kv_cache_manager::ClientErrorCode::ER_OK));
     EXPECT_TRUE(wrapper.loadKvCachesForTag("default", uris, buffers));
 
