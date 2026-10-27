@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 
 namespace rtp_llm {
 namespace {
@@ -443,14 +444,22 @@ BackendHandle makeCompletionProofBackend(const BackendEnvironment&              
                                                               client));
 }
 
+template<typename Code>
+std::vector<std::pair<Code, bool>> failedCompletionCases(bool write = false) {
+    std::vector<std::pair<Code, bool>> cases{{write ? Code::ER_SDKWRITE_ERROR : Code::ER_SDKREAD_ERROR, false},
+                                           {Code::ER_INVALID_PARAMS, false}};
+    if constexpr (kvcm::detail::HasExplicitBufferSafeCodes<Code>::value) {
+        cases.emplace_back(Code::ER_SDK_TIMEOUT_BUFFER_SAFE, true);
+        cases.emplace_back(Code::ER_SDK_ERROR_BUFFER_SAFE, true);
+    }
+    return cases;
+}
+
 TEST(KVCMLocalTest, EnabledReadQuarantinesUnprovenSdkErrorsButNotExplicitSafeResults) {
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
     using EC = kv_cache_manager::ClientErrorCode;
     for (const bool enabled : {false, true}) {
-        for (const auto ec : {EC::ER_SDKREAD_ERROR,
-                              EC::ER_INVALID_PARAMS,
-                              EC::ER_SDK_TIMEOUT_BUFFER_SAFE,
-                              EC::ER_SDK_ERROR_BUFFER_SAFE}) {
+        for (const auto& [ec, safe] : failedCompletionCases<EC>()) {
             SCOPED_TRACE(::testing::Message() << "enabled=" << enabled << " ec=" << static_cast<int>(ec));
             autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
             auto            environment = makeBackendEnvironment("kvcm_completion_proof");
@@ -469,7 +478,7 @@ TEST(KVCMLocalTest, EnabledReadQuarantinesUnprovenSdkErrorsButNotExplicitSafeRes
             const auto error    = readResult(*backend.backend, request, std::move(observation.match_meta));
             EXPECT_FALSE(error.ok());
             ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-            const bool unknown = enabled && ec != EC::ER_SDK_TIMEOUT_BUFFER_SAFE && ec != EC::ER_SDK_ERROR_BUFFER_SAFE;
+            const bool unknown = enabled && !safe;
             EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), unknown);
             EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), unknown ? 1u : 0u);
             std::lock_guard<std::mutex> lock(backend.backend->quarantine_mutex_);
@@ -485,7 +494,7 @@ TEST(KVCMLocalTest, UnknownWriteDoesNotImmediatelyAbortRemoteAllocationWhileSafe
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
     using EC = kv_cache_manager::ClientErrorCode;
     for (const bool enabled : {false, true}) {
-        for (const auto ec : {EC::ER_SDKWRITE_ERROR, EC::ER_SDK_ERROR_BUFFER_SAFE}) {
+        for (const auto& [ec, safe] : failedCompletionCases<EC>(/*write=*/true)) {
             autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
             auto environment = makeBackendEnvironment("kvcm_write_completion_proof");
             auto client = std::make_shared<MockClientWrapper>();
@@ -499,7 +508,7 @@ TEST(KVCMLocalTest, UnknownWriteDoesNotImmediatelyAbortRemoteAllocationWhileSafe
             allocation.locations = {{{"tp0_Fdefault", "write_uri"}}};
             EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
                 .WillOnce(Return(std::make_pair(true, allocation)));
-            const bool unknown = enabled && ec == EC::ER_SDKWRITE_ERROR;
+            const bool unknown = enabled && !safe;
             if (unknown) {
                 EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).Times(0);
             } else {
@@ -525,7 +534,7 @@ TEST(KVCMLocalTest, EnabledReadAndWriteResponsesCarryExplicitCompletionProof) {
     auto backend = makeCompletionProofBackend(environment, client);
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
     using EC = kv_cache_manager::ClientErrorCode;
-    for (const auto ec : {EC::ER_SDKREAD_ERROR, EC::ER_SDK_ERROR_BUFFER_SAFE}) {
+    for (const auto& [ec, safe] : failedCompletionCases<EC>()) {
         client->load_status = ec;
         client->save_status = ec;
         for (const auto op : {REMOTE_OPERATION_READ, REMOTE_OPERATION_WRITE}) {
@@ -537,8 +546,7 @@ TEST(KVCMLocalTest, EnabledReadAndWriteResponsesCarryExplicitCompletionProof) {
             RemoteOperationResponsePB response;
             EXPECT_FALSE(backend->execute(request, response));
             EXPECT_EQ(response.transfer_status(),
-                      ec == EC::ER_SDK_ERROR_BUFFER_SAFE ? REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE :
-                                                           REMOTE_TRANSFER_STATUS_COMPLETION_UNKNOWN);
+                      safe ? REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE : REMOTE_TRANSFER_STATUS_COMPLETION_UNKNOWN);
         }
     }
     RemoteOperationRequestPB local_reject;

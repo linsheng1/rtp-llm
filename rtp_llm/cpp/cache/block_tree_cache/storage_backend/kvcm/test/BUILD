@@ -1,6 +1,17 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
 
 cc_test(
+    name = "sdk_buffer_safety_test",
+    srcs = ["SdkBufferSafetyTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:sdk_buffer_safety",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "decode_publication_accounting_test",
     srcs = ["DecodePublicationAccountingTest.cc"],
     copts = copts(),

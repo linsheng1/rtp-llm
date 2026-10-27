@@ -13,6 +13,12 @@ config_setting(
     values = {"copt": "-DKVCM_INTERNAL=1"},
 )
 
+cc_library(
+    name = "sdk_buffer_safety",
+    hdrs = ["SdkBufferSafety.h"],
+    visibility = ["//visibility:public"],
+)
+
 config_setting(
     name = "RECO_INTERNAL",
     values = {"copt": "-DRECO_INTERNAL=1"},
@@ -84,6 +90,7 @@ cc_library(
     deps = [
         ":config",
         ":subscriber",
+        ":sdk_buffer_safety",
         "@havenask//aios/autil:env_util",
         "@havenask//aios/autil:json",
         "@local_config_cuda//cuda:cuda_headers",

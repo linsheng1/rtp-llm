@@ -1,4 +1,5 @@
 #include "ClientWrapper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "kvcm_client/HostCacheStateCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/Subscriber.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -656,11 +657,7 @@ void ClientWrapper::observeTransfer(bool is_read, size_t completed_bytes, bool c
 }
 
 ClientWrapper::TransferCompletion ClientWrapper::sdkResultCompletion(kv_cache_manager::ClientErrorCode ec) {
-    return ec == kv_cache_manager::ClientErrorCode::ER_OK
-                   || ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT_BUFFER_SAFE
-                   || ec == kv_cache_manager::ClientErrorCode::ER_SDK_ERROR_BUFFER_SAFE ?
-               TransferCompletion::BUFFER_SAFE :
-               TransferCompletion::UNKNOWN;
+    return sdkCodeProvesBufferSafety(ec) ? TransferCompletion::BUFFER_SAFE : TransferCompletion::UNKNOWN;
 }
 
 bool ClientWrapper::waitForRetry(int sleep_time_ms) {

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/MockKVCMClient.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "kvcm_client/HostCacheStateCompat.h"
@@ -1295,6 +1296,17 @@ TEST(ClientWrapperTest, FeatureOffDoesNotInstallAnInnerSdkObserver) {
     client->shutdown();
 }
 
+template<typename Code>
+std::vector<std::pair<Code, bool>> completionProofCases() {
+    std::vector<std::pair<Code, bool>> cases{{Code::ER_OK, true}, {Code::ER_INVALID_PARAMS, false},
+                                           {Code::ER_SDKREAD_ERROR, false}, {Code::ER_SDK_TIMEOUT, false}};
+    if constexpr (detail::HasExplicitBufferSafeCodes<Code>::value) {
+        cases.emplace_back(Code::ER_SDK_TIMEOUT_BUFFER_SAFE, true);
+        cases.emplace_back(Code::ER_SDK_ERROR_BUFFER_SAFE, true);
+    }
+    return cases;
+}
+
 TEST(ClientWrapperTest, CompletionProofDistinguishesLocalRejectionFromActualSdkError) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     using namespace kv_cache_manager;
@@ -1315,17 +1327,10 @@ TEST(ClientWrapperTest, CompletionProofDistinguishesLocalRejectionFromActualSdkE
     EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", {"uri", "extra"}, buffers, nullptr, &completion),
               ClientErrorCode::ER_INVALID_PARAMS);
     EXPECT_EQ(completion, Completion::NOT_STARTED);
-    for (const auto ec : {ClientErrorCode::ER_OK,
-                          ClientErrorCode::ER_INVALID_PARAMS,
-                          ClientErrorCode::ER_SDKREAD_ERROR,
-                          ClientErrorCode::ER_SDK_TIMEOUT,
-                          ClientErrorCode::ER_SDK_TIMEOUT_BUFFER_SAFE,
-                          ClientErrorCode::ER_SDK_ERROR_BUFFER_SAFE}) {
+    for (const auto& [ec, safe] : completionProofCases<ClientErrorCode>()) {
         SCOPED_TRACE(static_cast<int>(ec));
         EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).WillOnce(Return(ec));
         EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", {"uri"}, buffers, nullptr, &completion), ec);
-        const bool safe = ec == ClientErrorCode::ER_OK || ec == ClientErrorCode::ER_SDK_TIMEOUT_BUFFER_SAFE
-                          || ec == ClientErrorCode::ER_SDK_ERROR_BUFFER_SAFE;
         EXPECT_EQ(completion, safe ? Completion::BUFFER_SAFE : Completion::UNKNOWN);
         EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).WillOnce(Return(std::make_pair(ec, UriStrVec{})));
         EXPECT_EQ(client->saveKvCachesForTagWithStatus("default", {"uri"}, buffers, nullptr, &completion).first, ec);
