@@ -80,6 +80,22 @@ TEST(DecodePublicationConfigTest, PendingBudgetsHaveBoundedDefaultsAndStrictOver
     autil::EnvGuard too_many("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS", "65");
     EXPECT_FALSE(remoteCacheDecodePublicationLimits().has_value());
 }
+TEST(DecodePublicationConfigTest, DefaultBudgetTracksPhysicalPoolWithoutRoundingSmallPoolsUp) {
+    autil::EnvGuard mib("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB", "1");
+    autil::EnvGuard jobs("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS", "4");
+    ASSERT_EQ(unsetenv("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB"), 0);
+    ASSERT_EQ(unsetenv("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS"), 0);
+    EXPECT_FALSE(remoteCacheDecodePublicationLimits(0).has_value());
+    for (const auto& sample : std::vector<std::pair<size_t, size_t>>{
+             {8, 1}, {8192, 1024},
+             {4ULL * 1024 * 1024 * 1024, 512ULL * 1024 * 1024},
+             {64ULL * 1024 * 1024 * 1024, 4ULL * 1024 * 1024 * 1024}}) {
+        const auto limits = remoteCacheDecodePublicationLimits(sample.first);
+        ASSERT_TRUE(limits.has_value());
+        EXPECT_EQ(limits->bytes, sample.second);
+        EXPECT_EQ(limits->jobs, 4u);
+    }
+}
 
 TEST(NativeSsdGpuPackingTest, GathersAndScattersDifferentGpuIovsWithoutHostPayloadStaging) {
     using namespace kv_cache_manager;
@@ -392,7 +408,11 @@ TEST_F(NativeSsdGpuReadWindowTest, DeviceInitializationFailureProtectsTheEntireW
 class EosGpuCompletionTest: public ::testing::TestWithParam<std::tuple<int, bool, int>> {
 protected:
     autil::EnvGuard enable{"RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1"},
-        pending{"RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS", "1"};
+        pending{"RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS", "1"},
+        // This tiny fixture intentionally holds most of its synthetic pool.
+        // Production's 1/8 default is covered separately; allow these positive
+        // lifetime/projection cases to reach transfer rather than admission.
+        pending_bytes{"RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB", "1"};
     // Failure cases deliberately freeze a large fraction of these tiny pools.
     autil::EnvGuard quarantine_abort{"RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", "0"};
     struct Scenario {
