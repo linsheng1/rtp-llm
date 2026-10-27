@@ -655,6 +655,14 @@ void ClientWrapper::observeTransfer(bool is_read, size_t completed_bytes, bool c
     }
 }
 
+ClientWrapper::TransferCompletion ClientWrapper::sdkResultCompletion(kv_cache_manager::ClientErrorCode ec) {
+    return ec == kv_cache_manager::ClientErrorCode::ER_OK
+                   || ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT_BUFFER_SAFE
+                   || ec == kv_cache_manager::ClientErrorCode::ER_SDK_ERROR_BUFFER_SAFE ?
+               TransferCompletion::BUFFER_SAFE :
+               TransferCompletion::UNKNOWN;
+}
+
 bool ClientWrapper::waitForRetry(int sleep_time_ms) {
     std::unique_lock<std::mutex> lock(reinit_worker_mutex_);
     return !reinit_worker_cv_.wait_for(
@@ -669,11 +677,14 @@ bool ClientWrapper::loadKvCachesForTag(const std::string&                       
            == kv_cache_manager::ClientErrorCode::ER_OK;
 }
 
-kv_cache_manager::ClientErrorCode ClientWrapper::loadKvCachesForTagWithStatus(
-    const std::string&                                          tag,
-    const kv_cache_manager::UriStrVec&                          uri_str_vec,
-    kv_cache_manager::BlockBuffers&                             block_buffers,
-    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
+kv_cache_manager::ClientErrorCode
+ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                                          tag,
+                                            const kv_cache_manager::UriStrVec&                          uri_str_vec,
+                                            kv_cache_manager::BlockBuffers&                             block_buffers,
+                                            const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
+                                            TransferCompletion*                                         completion) {
+    if (completion)
+        *completion = TransferCompletion::NOT_STARTED;
     std::shared_lock read_guard(transfer_mutex_);
     const auto       slot = tag_to_index_.find(tag);
     if (slot == tag_to_index_.end()) {
@@ -681,7 +692,11 @@ kv_cache_manager::ClientErrorCode ClientWrapper::loadKvCachesForTagWithStatus(
         return kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS;
     }
     if (!remoteCacheDecodePublicationEnabled()) {
+        if (completion)
+            *completion = TransferCompletion::UNKNOWN;
         const auto ec = transfer_clients_[slot->second]->LoadKvCaches(uri_str_vec, block_buffers, trace_info);
+        if (completion)
+            *completion = sdkResultCompletion(ec);
         if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
             RTP_LLM_LOG_ERROR("kvcm client loadKvCaches fail, ec [%d]", ec);
         }
@@ -705,12 +720,16 @@ kv_cache_manager::ClientErrorCode ClientWrapper::loadKvCachesForTagWithStatus(
         const auto                     began = std::chrono::steady_clock::now();
         const auto part_trace = traceForRange(trace_info, range);
         try {
+            if (completion)
+                *completion = TransferCompletion::UNKNOWN;
             ec = transfer_clients_[slot->second]->LoadKvCaches(uris, buffers, part_trace);
         } catch (...) {
             if (!inner_observation)
                 observeTransfer(/*is_read=*/true, 0, /*completion_unknown=*/true);
             throw;
         }
+        if (completion)
+            *completion = sdkResultCompletion(ec);
         if (!inner_observation) {
             observeTransfer(/*is_read=*/true,
                             ec == kv_cache_manager::ClientErrorCode::ER_OK ? range.bytes : 0,
@@ -765,11 +784,13 @@ ClientWrapper::saveKvCachesForTag(const std::string&                            
 }
 
 std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
-ClientWrapper::saveKvCachesForTagWithStatus(
-    const std::string&                                          tag,
-    const kv_cache_manager::UriStrVec&                          uri_str_vec,
-    const kv_cache_manager::BlockBuffers&                       block_buffers,
-    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
+ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                                          tag,
+                                            const kv_cache_manager::UriStrVec&                          uri_str_vec,
+                                            const kv_cache_manager::BlockBuffers&                       block_buffers,
+                                            const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
+                                            TransferCompletion*                                         completion) {
+    if (completion)
+        *completion = TransferCompletion::NOT_STARTED;
     std::shared_lock read_guard(transfer_mutex_);
     const auto       slot = tag_to_index_.find(tag);
     if (slot == tag_to_index_.end()) {
@@ -777,7 +798,11 @@ ClientWrapper::saveKvCachesForTagWithStatus(
         return {kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS, {}};
     }
     if (!remoteCacheDecodePublicationEnabled()) {
+        if (completion)
+            *completion = TransferCompletion::UNKNOWN;
         auto result = transfer_clients_[slot->second]->SaveKvCaches(uri_str_vec, block_buffers, trace_info);
+        if (completion)
+            *completion = sdkResultCompletion(result.first);
         if (result.first != kv_cache_manager::ClientErrorCode::ER_OK) {
             RTP_LLM_LOG_ERROR("kvcm client saveKvCaches fail, ec [%d]", result.first);
         }
@@ -803,6 +828,8 @@ ClientWrapper::saveKvCachesForTagWithStatus(
         const auto part_trace = traceForRange(trace_info, range);
         auto saved = [&] {
             try {
+                if (completion)
+                    *completion = TransferCompletion::UNKNOWN;
                 return transfer_clients_[slot->second]->SaveKvCaches(uris, buffers, part_trace);
             } catch (...) {
                 if (!inner_observation)
@@ -811,6 +838,8 @@ ClientWrapper::saveKvCachesForTagWithStatus(
             }
         }();
         ec         = saved.first;
+        if (completion)
+            *completion = sdkResultCompletion(ec);
         if (!inner_observation) {
             observeTransfer(/*is_read=*/false,
                             ec == kv_cache_manager::ClientErrorCode::ER_OK ? range.bytes : 0,

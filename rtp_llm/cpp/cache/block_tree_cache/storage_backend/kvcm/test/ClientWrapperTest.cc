@@ -1168,22 +1168,26 @@ TEST(ClientWrapperTest, BoundedSdkStopsOnFailureAndRejectsUnsafeGeometry) {
         EXPECT_CALL(*mock, SaveKvCaches(_, _, _))
             .WillOnce(Return(std::make_pair(ClientErrorCode::ER_INVALID_PARAMS, UriStrVec{})));
     }
-    auto result = client->saveKvCachesForTagWithStatus("default", uris, buffers);
+    auto completion = ClientWrapper::TransferCompletion::NOT_STARTED;
+    auto result     = client->saveKvCachesForTagWithStatus("default", uris, buffers, nullptr, &completion);
     EXPECT_EQ(result.first, ClientErrorCode::ER_INVALID_PARAMS);
     EXPECT_TRUE(result.second.empty());
     EXPECT_GT(confirmed, 0u);
     EXPECT_EQ(confirmed, expected_confirmed);
     EXPECT_EQ(unknown_calls, 1u);
+    EXPECT_EQ(completion, ClientWrapper::TransferCompletion::UNKNOWN);
     ::testing::Mock::VerifyAndClearExpectations(mock);
     EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).Times(0);
     EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).Times(0);
-    EXPECT_EQ(client->saveKvCachesForTagWithStatus("default", UriStrVec{"one"}, buffers).first,
+    EXPECT_EQ(client->saveKvCachesForTagWithStatus("default", UriStrVec{"one"}, buffers, nullptr, &completion).first,
               ClientErrorCode::ER_INVALID_PARAMS);
+    EXPECT_EQ(completion, ClientWrapper::TransferCompletion::NOT_STARTED);
     BlockBuffers unsafe(1);
     for (int j = 0; j < 1025; ++j)
         unsafe[0].iovs.push_back({MemoryType::CPU, &byte, 1, false});
-    EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", UriStrVec{"one"}, unsafe),
+    EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", UriStrVec{"one"}, unsafe, nullptr, &completion),
               ClientErrorCode::ER_INVALID_PARAMS);
+    EXPECT_EQ(completion, ClientWrapper::TransferCompletion::NOT_STARTED);
     EXPECT_EQ(unknown_calls, 1u);  // Rejected geometry never attempted SDK I/O.
     client->shutdown();
 }
@@ -1288,6 +1292,52 @@ TEST(ClientWrapperTest, FeatureOffDoesNotInstallAnInnerSdkObserver) {
     client->setTransferObserver([](bool, size_t, bool) {});
     EXPECT_EQ(observed->setter_calls, 0u);
     EXPECT_FALSE(static_cast<bool>(observed->observer));
+    client->shutdown();
+}
+
+TEST(ClientWrapperTest, CompletionProofDistinguishesLocalRejectionFromActualSdkError) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    using namespace kv_cache_manager;
+    using Completion         = ClientWrapper::TransferCompletion;
+    unsigned char       byte = 7;
+    RegistSpan          span{&byte, 1};
+    InitObservation     observation;
+    MockTransferClient* mock   = nullptr;
+    auto                client = initializeClient(
+        false, "completion_proof", span, observation, std::make_shared<int>(0), nullptr, nullptr, &mock);
+    ASSERT_NE(client, nullptr);
+    BlockBuffers buffers(1);
+    buffers[0].iovs.push_back({MemoryType::CPU, &byte, 1, false});
+    auto completion = Completion::UNKNOWN;
+    EXPECT_EQ(client->loadKvCachesForTagWithStatus("missing", {"uri"}, buffers, nullptr, &completion),
+              ClientErrorCode::ER_CLIENT_NOT_EXISTS);
+    EXPECT_EQ(completion, Completion::NOT_STARTED);
+    EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", {"uri", "extra"}, buffers, nullptr, &completion),
+              ClientErrorCode::ER_INVALID_PARAMS);
+    EXPECT_EQ(completion, Completion::NOT_STARTED);
+    for (const auto ec : {ClientErrorCode::ER_OK,
+                          ClientErrorCode::ER_INVALID_PARAMS,
+                          ClientErrorCode::ER_SDKREAD_ERROR,
+                          ClientErrorCode::ER_SDK_TIMEOUT,
+                          ClientErrorCode::ER_SDK_TIMEOUT_BUFFER_SAFE,
+                          ClientErrorCode::ER_SDK_ERROR_BUFFER_SAFE}) {
+        SCOPED_TRACE(static_cast<int>(ec));
+        EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).WillOnce(Return(ec));
+        EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", {"uri"}, buffers, nullptr, &completion), ec);
+        const bool safe = ec == ClientErrorCode::ER_OK || ec == ClientErrorCode::ER_SDK_TIMEOUT_BUFFER_SAFE
+                          || ec == ClientErrorCode::ER_SDK_ERROR_BUFFER_SAFE;
+        EXPECT_EQ(completion, safe ? Completion::BUFFER_SAFE : Completion::UNKNOWN);
+        EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).WillOnce(Return(std::make_pair(ec, UriStrVec{})));
+        EXPECT_EQ(client->saveKvCachesForTagWithStatus("default", {"uri"}, buffers, nullptr, &completion).first, ec);
+        EXPECT_EQ(completion, safe ? Completion::BUFFER_SAFE : Completion::UNKNOWN);
+    }
+    EXPECT_CALL(*mock, LoadKvCaches(_, _, _))
+        .WillOnce(Invoke([](const auto&, const auto&, const auto&) -> ClientErrorCode {
+            throw std::runtime_error("SDK may retain caller buffers");
+        }));
+    EXPECT_THROW(client->loadKvCachesForTagWithStatus("default", {"uri"}, buffers, nullptr, &completion),
+                 std::runtime_error);
+    EXPECT_EQ(completion, Completion::UNKNOWN);
     client->shutdown();
 }
 

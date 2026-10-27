@@ -420,6 +420,128 @@ TEST(KVCMLocalTest, ExecuteFunctionPropagatesMetadataErrorsAndPreservesTransferS
     }
 }
 
+BackendHandle makeCompletionProofBackend(const BackendEnvironment&                 environment,
+                                         const std::shared_ptr<MockClientWrapper>& client) {
+    KVCacheConfig config;
+    config.kvcm_server_address                 = "unused-test-address";
+    config.kvcm_instance_id_salt               = "completion-proof";
+    config.kvcm_model_sdk_config               = R"([{"type":"pace"}])";
+    config.kvcm_read_backend_type              = 0;
+    auto parallel                              = singleRankConfig();
+    parallel.role_type                         = RoleType::PREFILL;
+    parallel.prefill_cp_config.prefill_cp_size = 1;
+    RuntimeConfig runtime;
+    runtime.model_name = "kvcm_test_model";
+    return BackendHandle(std::make_unique<KVCMStorageBackend>(environment.cache_config,
+                                                              config,
+                                                              runtime,
+                                                              parallel,
+                                                              SpeculativeExecutionConfig{},
+                                                              nullptr,
+                                                              true,
+                                                              nullptr,
+                                                              client));
+}
+
+TEST(KVCMLocalTest, EnabledReadQuarantinesUnprovenSdkErrorsButNotExplicitSafeResults) {
+    autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    using EC = kv_cache_manager::ClientErrorCode;
+    for (const bool enabled : {false, true}) {
+        for (const auto ec : {EC::ER_SDKREAD_ERROR,
+                              EC::ER_INVALID_PARAMS,
+                              EC::ER_SDK_TIMEOUT_BUFFER_SAFE,
+                              EC::ER_SDK_ERROR_BUFFER_SAFE}) {
+            SCOPED_TRACE(::testing::Message() << "enabled=" << enabled << " ec=" << static_cast<int>(ec));
+            autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+            auto            environment = makeBackendEnvironment("kvcm_completion_proof");
+            auto            client      = std::make_shared<MockClientWrapper>();
+            EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+            EXPECT_CALL(*client, shutdown()).Times(1);
+            auto backend = makeCompletionProofBackend(environment, client);
+            ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+            kv_cache_manager::Locations locations{{{"tp0_Fdefault", "read_uri"}}};
+            EXPECT_CALL(*client, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
+            auto request     = makeStorageRequest(environment);
+            auto observation = match(*backend.backend, request);
+            ASSERT_TRUE(observation.success);
+            ASSERT_NE(observation.match_meta, nullptr);
+            client->load_status = ec;
+            const auto error    = readResult(*backend.backend, request, std::move(observation.match_meta));
+            EXPECT_FALSE(error.ok());
+            ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+            const bool unknown = enabled && ec != EC::ER_SDK_TIMEOUT_BUFFER_SAFE && ec != EC::ER_SDK_ERROR_BUFFER_SAFE;
+            EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), unknown);
+            EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), unknown ? 1u : 0u);
+            std::lock_guard<std::mutex> lock(backend.backend->quarantine_mutex_);
+            EXPECT_EQ(
+                backend.backend->quarantined_breakdown_[0][static_cast<size_t>(StorageQuarantineReason::SDK_ERROR)]
+                    .task_count,
+                unknown ? 1u : 0u);
+        }
+    }
+}
+
+TEST(KVCMLocalTest, EnabledReadAndWriteResponsesCarryExplicitCompletionProof) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    auto            environment = makeBackendEnvironment("kvcm_response_completion_proof");
+    auto            client      = std::make_shared<MockClientWrapper>();
+    EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client, shutdown()).Times(1);
+    auto backend = makeCompletionProofBackend(environment, client);
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+    using EC = kv_cache_manager::ClientErrorCode;
+    for (const auto ec : {EC::ER_SDKREAD_ERROR, EC::ER_SDK_ERROR_BUFFER_SAFE}) {
+        client->load_status = ec;
+        client->save_status = ec;
+        for (const auto op : {REMOTE_OPERATION_READ, REMOTE_OPERATION_WRITE}) {
+            RemoteOperationRequestPB request;
+            request.set_op(op);
+            request.add_group_tags("default");
+            request.add_block_ids(environment.block_id);
+            request.add_uris("uri");
+            RemoteOperationResponsePB response;
+            EXPECT_FALSE(backend->execute(request, response));
+            EXPECT_EQ(response.transfer_status(),
+                      ec == EC::ER_SDK_ERROR_BUFFER_SAFE ? REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE :
+                                                           REMOTE_TRANSFER_STATUS_COMPLETION_UNKNOWN);
+        }
+    }
+    RemoteOperationRequestPB local_reject;
+    local_reject.set_op(REMOTE_OPERATION_READ);
+    local_reject.add_group_tags("foreign");
+    local_reject.add_block_ids(environment.block_id);
+    local_reject.add_uris("uri");
+    RemoteOperationResponsePB response;
+    EXPECT_FALSE(backend->execute(local_reject, response));
+    EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE);
+}
+
+TEST(KVCMLocalTest, EarlierCompletedGroupDoesNotHideALaterUnknownGroup) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    auto            environment = makeHybridBackendEnvironment("kvcm_group_completion_proof");
+    auto            client      = std::make_shared<MockClientWrapper>();
+    EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client, shutdown()).Times(1);
+    auto backend = makeCompletionProofBackend(environment, client);
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+    kv_cache_manager::Locations locations{{{"tp0_Ffull1", "full_uri"}, {"tp0_Llinear", "linear_uri"}}};
+    EXPECT_CALL(*client, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
+    auto request     = makeGroupedStorageRequest(environment, {101}, 0, {environment.block_id});
+    auto observation = match(*backend.backend, request);
+    ASSERT_TRUE(observation.success);
+    ASSERT_NE(observation.match_meta, nullptr);
+    EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _)).WillOnce(Return(true)).WillOnce(Return(false));
+    const auto error = readResult(*backend.backend, request, std::move(observation.match_meta));
+    EXPECT_FALSE(error.ok());
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+    for (const auto& [tag, pool] : environment.pools_by_tag) {
+        SCOPED_TRACE(tag);
+        EXPECT_TRUE(pool->isFrozen(environment.block_id));
+    }
+}
+
 TEST(KVCMLocalTest, MatchAndReadUseReturnedLocation) {
     auto environment    = makeBackendEnvironment("kvcm_storage_backend_match_read");
     auto client_wrapper = std::make_shared<MockClientWrapper>();

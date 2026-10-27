@@ -345,12 +345,16 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
                 executeTagTransfers(REMOTE_OPERATION_WRITE, b.tags, b.blocks, b.uris, b.buffers, response);
             if (result == TransferResult::TIMEOUT)
                 throw StorageOperationTimeout("EOS SDK transfer timeout", StorageQuarantineReason::SDK_TIMEOUT);
-            if (result != TransferResult::SUCCESS)
+            if (result == TransferResult::COMPLETION_UNKNOWN)
                 throw StorageOperationCompletionUnknown("EOS SDK failure cannot prove DMA completion",
-                                                        StorageQuarantineReason::INVALID_RESPONSE);
+                                                        StorageQuarantineReason::SDK_ERROR);
+            if (result != TransferResult::SUCCESS)
+                throw BufferSafeTransferFailure("EOS SDK failure is buffer-safe");
             response.set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
         }
     } catch (const StorageOperationCompletionUnknown&) {
+        throw;
+    } catch (const BufferSafeTransferFailure&) {
         throw;
     } catch (const std::exception& error) {
         throw StorageOperationCompletionUnknown(error.what(), StorageQuarantineReason::INVALID_RESPONSE);

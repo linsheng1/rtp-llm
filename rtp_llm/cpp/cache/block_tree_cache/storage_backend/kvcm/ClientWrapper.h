@@ -44,6 +44,14 @@ public:
     // observer must be thread-safe and must not reenter this wrapper.
     using TransferObserver = SdkTransferObserver;
     void setTransferObserver(TransferObserver observer);
+    // Internal outcome proof, not an SDK ABI extension. NOT_STARTED is set
+    // only by local pre-I/O checks. A normal SDK error is not DMA completion.
+    enum class TransferCompletion {
+        NOT_STARTED,
+        BUFFER_SAFE,
+        UNKNOWN
+    };
+    static TransferCompletion sdkResultCompletion(kv_cache_manager::ClientErrorCode ec);
     // for meta client
     virtual std::pair<bool, kv_cache_manager::Locations> match(const std::string&                      unique_id,
                                                                const std::string&                      trace_id,
@@ -90,18 +98,19 @@ public:
     loadKvCachesForTagWithStatus(const std::string&                                          tag,
                                  const kv_cache_manager::UriStrVec&                          uris,
                                  kv_cache_manager::BlockBuffers&                             buffers,
-                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr,
+                                 TransferCompletion*                                         completion = nullptr);
     virtual std::pair<bool, kv_cache_manager::UriStrVec>
     saveKvCachesForTag(const std::string&                                          tag,
                        const kv_cache_manager::UriStrVec&                          uris,
                        const kv_cache_manager::BlockBuffers&                       buffers,
                        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
     virtual std::pair<kv_cache_manager::ClientErrorCode, kv_cache_manager::UriStrVec>
-    saveKvCachesForTagWithStatus(
-        const std::string&                                          tag,
-        const kv_cache_manager::UriStrVec&                          uris,
-        const kv_cache_manager::BlockBuffers&                       buffers,
-        const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
+    saveKvCachesForTagWithStatus(const std::string&                                          tag,
+                                 const kv_cache_manager::UriStrVec&                          uris,
+                                 const kv_cache_manager::BlockBuffers&                       buffers,
+                                 const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr,
+                                 TransferCompletion*                                         completion = nullptr);
 
 private:
     bool initImpl(const ConfigMap&                     config_map,

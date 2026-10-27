@@ -42,6 +42,7 @@ enum class StorageQuarantineReason {
     RPC_TIMEOUT,
     RPC_ERROR,
     INVALID_RESPONSE,
+    SDK_ERROR,
 };
 
 struct StorageQuarantineCounts {
@@ -50,7 +51,7 @@ struct StorageQuarantineCounts {
 };
 
 // Read/write rows and StorageQuarantineReason columns share one state snapshot.
-using StorageQuarantineBreakdown = std::array<std::array<StorageQuarantineCounts, 4>, 2>;
+using StorageQuarantineBreakdown = std::array<std::array<StorageQuarantineCounts, 5>, 2>;
 
 // The backend accepted an operation but cannot prove that DMA/RDMA has
 // stopped touching its buffers. StorageBackend replaces request pins with

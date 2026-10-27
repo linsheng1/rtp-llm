@@ -48,8 +48,13 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-constexpr std::array<const char*, 4> kQuarantineReasons{
-    "sdk_timeout", "rpc_timeout", "rpc_error", "invalid_response"};
+constexpr std::array<const char*, 5> kQuarantineReasons{
+    "sdk_timeout", "rpc_timeout", "rpc_error", "invalid_response", "sdk_error"};
+
+class BufferSafeTransferFailure: public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
 
 int64_t elapsedTimeUs(Clock::time_point start) {
     return std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - start).count();
@@ -97,6 +102,7 @@ public:
         SUCCESS,
         FAILED,
         TIMEOUT,
+        COMPLETION_UNKNOWN,
     };
 
     Impl(const CacheConfig&                            cache_config,
@@ -680,7 +686,8 @@ public:
         const kv_cache_manager::UriStrVec uris(request.uris().begin(), request.uris().end());
         if (tags.size() != blocks.size() || blocks.size() != uris.size()) {
             RTP_LLM_LOG_WARNING("KVCM transfer tag/block/URI count mismatch");
-            response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
+            response.set_transfer_status(decode_publication_enabled_ ? REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE :
+                                                                       REMOTE_TRANSFER_STATUS_FAILED);
             return false;
         }
         if (tags.empty()) {
@@ -693,20 +700,32 @@ public:
         for (const auto& tag : tags) {
             if (pools_by_tag_.find(tag) == pools_by_tag_.end()) {
                 RTP_LLM_LOG_ERROR("KVCM transfer contains unregistered tag [%s]", tag.c_str());
-                response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
+                response.set_transfer_status(decode_publication_enabled_ ? REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE :
+                                                                           REMOTE_TRANSFER_STATUS_FAILED);
                 return false;
             }
         }
-        setCudaDevice();
         kv_cache_manager::BlockBuffers buffers;
-        if (!group_policy_->genBlockBuffers(tags, blocks, buffers)) {
-            response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
+        try {
+            setCudaDevice();
+            if (!group_policy_->genBlockBuffers(tags, blocks, buffers)) {
+                response.set_transfer_status(decode_publication_enabled_ ? REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE :
+                                                                           REMOTE_TRANSFER_STATUS_FAILED);
+                return false;
+            }
+        } catch (...) {
+            if (!decode_publication_enabled_)
+                throw;
+            response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE);
             return false;
         }
         const auto result = executeTagTransfers(request.op(), tags, blocks, uris, buffers, response);
         response.set_transfer_status(result == TransferResult::SUCCESS ? REMOTE_TRANSFER_STATUS_SUCCESS :
                                      result == TransferResult::TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
-                                                                         REMOTE_TRANSFER_STATUS_FAILED);
+                                     result == TransferResult::COMPLETION_UNKNOWN ?
+                                                                         REMOTE_TRANSFER_STATUS_COMPLETION_UNKNOWN :
+                                     decode_publication_enabled_ ? REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE :
+                                                                   REMOTE_TRANSFER_STATUS_FAILED);
         return result == TransferResult::SUCCESS;
     }
 
@@ -739,6 +758,9 @@ public:
                 break;
             case StorageQuarantineReason::INVALID_RESPONSE:
                 collector.reason = "invalid_response";
+                break;
+            case StorageQuarantineReason::SDK_ERROR:
+                collector.reason = "sdk_error";
                 break;
         }
         reportRemoteMetrics<RtpLLMRemoteCacheQuarantineMetrics>(collector);
@@ -1166,28 +1188,48 @@ private:
                 reportRemoteMetrics<RtpLLMRemoteCacheSDKMetrics>(
                     collector, operation == REMOTE_OPERATION_READ ? "read" : "write");
             });
-            if (operation == REMOTE_OPERATION_READ) {
-                const auto ec =
-                    client_wrapper_->loadKvCachesForTagWithStatus(tag, batch_uris, batch_buffers, trace_info);
-                if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
-                    return TransferResult::TIMEOUT;
+            auto                                   completion    = kvcm::ClientWrapper::TransferCompletion::UNKNOWN;
+            const auto                             failed_result = [&] {
+                return decode_publication_enabled_ && completion == kvcm::ClientWrapper::TransferCompletion::UNKNOWN ?
+                                                       TransferResult::COMPLETION_UNKNOWN :
+                                                       TransferResult::FAILED;
+            };
+            try {
+                if (operation == REMOTE_OPERATION_READ) {
+                    const auto ec = client_wrapper_->loadKvCachesForTagWithStatus(
+                        tag,
+                        batch_uris,
+                        batch_buffers,
+                        trace_info,
+                        decode_publication_enabled_ ? &completion : nullptr);
+                    if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
+                        return TransferResult::TIMEOUT;
+                    }
+                    if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
+                        return failed_result();
+                    }
+                } else {
+                    auto [ec, result] = client_wrapper_->saveKvCachesForTagWithStatus(
+                        tag,
+                        batch_uris,
+                        batch_buffers,
+                        trace_info,
+                        decode_publication_enabled_ ? &completion : nullptr);
+                    if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
+                        return TransferResult::TIMEOUT;
+                    }
+                    if (ec != kv_cache_manager::ClientErrorCode::ER_OK
+                        || (!result.empty() && result.size() != batch_uris.size())) {
+                        return failed_result();
+                    }
+                    for (size_t index = 0; index < result.size(); ++index) {
+                        actual_uris[indices[index]] = std::move(result[index]);
+                    }
                 }
-                if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
-                    return TransferResult::FAILED;
-                }
-            } else {
-                auto [ec, result] =
-                    client_wrapper_->saveKvCachesForTagWithStatus(tag, batch_uris, batch_buffers, trace_info);
-                if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
-                    return TransferResult::TIMEOUT;
-                }
-                if (ec != kv_cache_manager::ClientErrorCode::ER_OK
-                    || (!result.empty() && result.size() != batch_uris.size())) {
-                    return TransferResult::FAILED;
-                }
-                for (size_t index = 0; index < result.size(); ++index) {
-                    actual_uris[indices[index]] = std::move(result[index]);
-                }
+            } catch (...) {
+                if (!decode_publication_enabled_)
+                    throw;
+                return failed_result();
             }
             collector.remote_sdk_fail_qps = false;
             indices_by_tag.erase(found);
@@ -1259,7 +1301,7 @@ private:
             // Keep the original untagged totals for existing dashboards.
             report({lease_count, block_count}, nullptr);
             report_bucket("total", "total", {lease_count, block_count});
-            std::array<StorageQuarantineCounts, 4> reason_totals{};
+            std::array<StorageQuarantineCounts, kQuarantineReasons.size()> reason_totals{};
             for (size_t op = 0; op < breakdown.size(); ++op) {
                 const char* operation = op == 0 ? "read" : "write";
                 StorageQuarantineCounts operation_total;
@@ -1376,12 +1418,27 @@ private:
                                                         StorageQuarantineReason::INVALID_RESPONSE);
             }
             switch (response.remote_response().transfer_status()) {
-                case REMOTE_TRANSFER_STATUS_UNSPECIFIED:  // successful legacy worker
+                case REMOTE_TRANSFER_STATUS_UNSPECIFIED:  // successful legacy worker, feature off only
+                    if (decode_publication_enabled_) {
+                        throw StorageOperationCompletionUnknown("KVCM worker provided no DMA completion proof",
+                                                                StorageQuarantineReason::INVALID_RESPONSE);
+                    }
+                    break;
                 case REMOTE_TRANSFER_STATUS_SUCCESS:
                     break;
                 case REMOTE_TRANSFER_STATUS_FAILED:
+                    if (decode_publication_enabled_) {
+                        throw StorageOperationCompletionUnknown("KVCM legacy failure has no buffer-safety proof",
+                                                                StorageQuarantineReason::SDK_ERROR);
+                    }
                     failed = true;
                     break;
+                case REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE:
+                    failed = true;
+                    break;
+                case REMOTE_TRANSFER_STATUS_COMPLETION_UNKNOWN:
+                    throw StorageOperationCompletionUnknown("KVCM SDK error has no DMA completion proof",
+                                                            StorageQuarantineReason::SDK_ERROR);
                 case REMOTE_TRANSFER_STATUS_TIMEOUT:
                     throw StorageOperationTimeout("KVCM transfer timed out", StorageQuarantineReason::SDK_TIMEOUT);
                 default:
