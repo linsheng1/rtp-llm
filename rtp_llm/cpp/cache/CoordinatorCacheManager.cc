@@ -1830,6 +1830,16 @@ void CoordinatorCacheManager::blockBatchCopyForForward(const torch::Tensor&     
                                 tag.c_str());
     }
     if (gpu_block_copy_ && group_tags.size() == 1 && group_tags.front() == config_.groupTags().front()) {
+        if (remoteCacheDecodePublicationEnabled()) {
+            const auto& pool = group_block_pools_.front();
+            const auto* rows = copy_mapping.data_ptr<int32_t>();
+            for (int64_t i = 0; i < copy_mapping.size(0); ++i) {
+                if (rows[3 * i + 1] != rows[3 * i + 2]) {
+                    const auto target = rows[3 * i + 2];
+                    pool->bindDecodeOrigin(target, pool->decodeOriginIncarnation(target), group_tags.front(), nullptr);
+                }
+            }
+        }
         gpu_block_copy_->copy(copy_mapping);
         return;
     }
@@ -1859,6 +1869,10 @@ void CoordinatorCacheManager::blockBatchCopyByGroup(const std::vector<TaggedBloc
         const auto copy_type =
             BatchCopyParams::get_copy_type(group_block_pools_[static_cast<size_t>(group_id)]->where(),
                                            group_block_pools_[static_cast<size_t>(group_id)]->where());
+        if (mapping.src != mapping.dst && remoteCacheDecodePublicationEnabled()) {
+            const auto& pool = group_block_pools_[static_cast<size_t>(group_id)];
+            pool->bindDecodeOrigin(mapping.dst, pool->decodeOriginIncarnation(mapping.dst), mapping.tag, nullptr);
+        }
         for (int layer_id : config_.layerIdsForGroup(mapping.tag)) {
             const auto& physical_group = config_.physicalGroupForLayer(layer_id, mapping.tag);
             copy_nums[copy_type] += physical_group.kvScaleStrideBytes() > 0 ? 2 : 1;

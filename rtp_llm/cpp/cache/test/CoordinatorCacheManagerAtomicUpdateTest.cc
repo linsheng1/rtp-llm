@@ -67,6 +67,28 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, RecomputeInvalidatesOnlyItsWrita
     }
 }
 
+TEST_F(CoordinatorCacheManagerAtomicUpdateTest, CopySubmissionDoesNotPreserveTheDestinationsOldOrigin) {
+    for (const bool enabled : {false, true}) {
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        auto config = createSingleTypeTestConfig(1, 5, 4);
+        allocator_ = std::make_shared<TestAllocator>(config, AllocationType::HOST);
+        ASSERT_TRUE(allocator_->init());
+        const auto pool = allocator_->groupBlockPools().front();
+        const auto blocks = allocateRequestBlocks(pool, 2);
+        ASSERT_EQ(blocks.size(), 2u);
+        ASSERT_TRUE(pool->enableDecodeOriginTracking());
+        auto origin = std::make_shared<const DecodeCacheOrigin>(DecodeCacheOrigin{std::string(32, 'a'), 0, 0, 4, 4, 5});
+        for (const auto block : blocks)
+            ASSERT_TRUE(pool->bindDecodeOrigin(block, pool->decodeOriginIncarnation(block), "default", origin));
+        allocator_->blockBatchCopyByGroup({{"default", blocks[0], blocks[1]}});
+        EXPECT_EQ(static_cast<bool>(pool->decodeOrigin(blocks[1], "default")), !enabled);
+        EXPECT_EQ(pool->decodeOrigin(blocks[0], "default"), origin);
+        allocator_->blockBatchCopyByGroup({{"default", blocks[0], blocks[0]}});
+        EXPECT_EQ(pool->decodeOrigin(blocks[0], "default"), origin);
+        pool->decRef(blocks);
+    }
+}
+
 TEST_F(CoordinatorCacheManagerAtomicUpdateTest, AtomicRemapPreservesRequestEosAndPublicationIdempotency) {
     auto config = createSingleTypeTestConfig(1, 5, 4);
     allocator_ = std::make_shared<TestAllocator>(config, AllocationType::HOST);
