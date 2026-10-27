@@ -18,10 +18,34 @@ bool remoteCacheGdrEnabled() {
 
 bool remoteCacheDecodePublicationEnabled() {
     const char* value = std::getenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH");
-    if (value != nullptr)
-        return std::string_view(value) == "1";
-    const char* legacy = std::getenv("RTP_DTOP_FILE_CP2");
-    return legacy != nullptr && std::string_view(legacy) == "1";
+    return value != nullptr && std::string_view(value) == "1";
+}
+
+std::optional<DecodePublicationLimits> remoteCacheDecodePublicationLimits() {
+    auto positive = [](const char* name, size_t fallback, size_t maximum) -> std::optional<size_t> {
+        const char* value = std::getenv(name);
+        if (!value)
+            return fallback;
+        if (*value == '\0')
+            return std::nullopt;
+        for (const char* p = value; *p; ++p)
+            if (*p < '0' || *p > '9')
+                return std::nullopt;
+        errno = 0;
+        char* end = nullptr;
+        const auto parsed = std::strtoull(value, &end, 10);
+        if (errno == ERANGE || *end || parsed == 0 || parsed > maximum)
+            return std::nullopt;
+        return static_cast<size_t>(parsed);
+    };
+    DecodePublicationLimits limits;
+    auto mib = positive("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB", limits.bytes / (1024 * 1024), 16384);
+    auto jobs = positive("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS", limits.jobs, 64);
+    if (!mib || !jobs)
+        return std::nullopt;
+    limits.bytes = *mib * 1024 * 1024;
+    limits.jobs = *jobs;
+    return limits;
 }
 
 std::optional<double> remoteCacheQuarantineAbortRatio() {

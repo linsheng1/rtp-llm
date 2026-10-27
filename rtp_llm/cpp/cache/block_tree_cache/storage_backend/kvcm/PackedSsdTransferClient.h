@@ -12,10 +12,8 @@
 
 namespace rtp_llm::kvcm {
 
-// Explicit SSD compatibility candidate. One complete SDK IOV per URI, followed
-// by ordered scatter to the original destinations. The legacy constructor uses
-// CPU staging. Native SSD GDR supplies a separately registered GPU arena and
-// performs only D2D gather/scatter; it never allocates a host payload snapshot.
+// One complete GPU IOV per SSD URI, with ordered D2D gather/scatter into a
+// separately registered arena. No CPU payload allocation or fallback exists.
 class PackedSsdTransferClient final: public kv_cache_manager::TransferClient {
     using Code    = kv_cache_manager::ClientErrorCode;
     using Buffers = kv_cache_manager::BlockBuffers;
@@ -46,10 +44,10 @@ public:
 
     PackedSsdTransferClient(std::unique_ptr<kv_cache_manager::TransferClient> inner,
                            Copy copy,
-                           std::shared_ptr<GpuPackingContext> gpu_context = {}):
+                           std::shared_ptr<GpuPackingContext> gpu_context):
         inner_(std::move(inner)), copy_(std::move(copy)), gpu_context_(std::move(gpu_context)),
-        staging_type_(gpu_context_ ? kv_cache_manager::MemoryType::GPU : kv_cache_manager::MemoryType::CPU) {
-        if (!inner_ || !copy_ || (gpu_context_ && !gpu_context_->memory))
+        staging_type_(kv_cache_manager::MemoryType::GPU) {
+        if (!inner_ || !copy_ || (!gpu_context_ || !gpu_context_->memory))
             throw std::invalid_argument("missing SSD delegate/copy operation");
     }
     ~PackedSsdTransferClient() override {
@@ -99,17 +97,9 @@ public:
             }
             // The single GPU range can be reused only after this URI has
             // completed and its result has reached the original GPU pages.
-            if (gpu_context_ && !scatter(block)) {
+            if (!scatter(block)) {
                 quarantine(operation);
                 return kv_cache_manager::ER_CUDAMEMCPY_ERROR;
-            }
-        }
-        if (!gpu_context_) {
-            for (size_t block = 0; block < destination.size(); ++block) {
-                if (!scatter(block)) {
-                    quarantine(operation);
-                    return kv_cache_manager::ER_CUDAMEMCPY_ERROR;
-                }
             }
         }
         return kv_cache_manager::ER_OK;
@@ -136,19 +126,11 @@ public:
             }
             return true;
         };
-        if (!gpu_context_) {
-            for (size_t block = 0; block < source.size(); ++block) {
-                if (!gather(block)) {
-                    quarantine(operation);
-                    return {kv_cache_manager::ER_CUDAMEMCPY_ERROR, {}};
-                }
-            }
-        }
         auto actual = uris;
         for (size_t block = 0; block < uris.size(); ++block) {
             // The delegate consumes one URI at a time. Pack just that URI,
             // and never overwrite its range before confirmed completion.
-            if (gpu_context_ && !gather(block)) {
+            if (!gather(block)) {
                 quarantine(operation);
                 return {kv_cache_manager::ER_CUDAMEMCPY_ERROR, {}};
             }
@@ -237,8 +219,7 @@ private:
             size_t size = 0;
             for (const auto& iov : block.iovs) {
                 if (!iov.size || (write && iov.ignore) || (!iov.ignore && !iov.base)
-                    || (iov.type != kv_cache_manager::MemoryType::CPU && iov.type != kv_cache_manager::MemoryType::GPU)
-                    || (gpu_context_ && !iov.ignore && iov.type != kv_cache_manager::MemoryType::GPU)
+                    || iov.type != kv_cache_manager::MemoryType::GPU
                     || iov.size > max_operation_bytes - size)
                     return {};
                 size += iov.size;
@@ -251,7 +232,7 @@ private:
         // Bound the logical batch as before, but charge only simultaneously
         // live GPU packing memory. Reserving the whole batch can starve other
         // healthy cache tags even though their SDK calls are per URI.
-        const size_t charge = gpu_context_ ? *std::max_element(sizes.begin(), sizes.end()) : total;
+        const size_t charge = *std::max_element(sizes.begin(), sizes.end());
         auto   operation = std::make_shared<Operation>();
         size_t previous  = process_bytes_.load();
         do {
@@ -262,7 +243,7 @@ private:
         operation->bytes.resize(sizes.size());
         operation->buffers.resize(sizes.size());
         size_t offset = 0;
-        if (gpu_context_) {
+        {
             auto lease = std::make_shared<GpuRangeLease>();
             {
                 std::lock_guard<std::mutex> guard(gpu_context_->mutex);
@@ -285,17 +266,11 @@ private:
             operation->gpu_lease = std::move(lease);
         }
         for (size_t i = 0; i < sizes.size(); ++i) {
-            if (gpu_context_) {
-                operation->bytes[i] = std::shared_ptr<void>(
-                    gpu_context_->memory, static_cast<unsigned char*>(gpu_context_->memory.get()) + offset);
-            } else {
-                operation->bytes[i] = std::shared_ptr<void>(
-                    new unsigned char[sizes[i]], [](void* p) { delete[] static_cast<unsigned char*>(p); });
-            }
+            operation->bytes[i] = std::shared_ptr<void>(
+                gpu_context_->memory, static_cast<unsigned char*>(gpu_context_->memory.get()) + offset);
             operation->buffers[i].iovs.push_back(
                 {staging_type_, operation->bytes[i].get(), sizes[i], false});
-            // GPU blocks alias this operation's single-URI range. CPU
-            // compatibility buffers remain distinct allocations.
+            // Reuse this operation's GPU range only after each URI completes.
         }
         return operation;
     }

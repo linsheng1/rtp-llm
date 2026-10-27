@@ -721,8 +721,7 @@ private:
 
     static bool isPayloadBackend(int type) {
         return type == 1 || type == 2 || type == 3 || type == 4 || type == 5
-               || (type == 9 && (autil::EnvUtil::getEnv("RTP_DTOP_PACE_SSD_PACKED_IO", false)
-                                || autil::EnvUtil::getEnv("RTP_DTOP_PACE_SSD_NATIVE_GDR", false)));
+               || type == 9;
     }
 
     kv_cache_manager::Locations selectBackendLocations(const kv_cache_manager::BackendLocations& result) const {
@@ -930,7 +929,7 @@ private:
         }
         instance_id += std::to_string(hashString(identity.str()));
 
-        if (decode_publication_enabled_ || autil::EnvUtil::getEnv("RTP_DTOP_FILE_AUDIT_BASELINE_P", false)) {
+        if (decode_publication_enabled_) {
             RTP_LLM_LOG_INFO("DTOP_FILE identity instance=%s tp=%ld dp=%ld base_tokens=%zu",
                              instance_id.c_str(),
                              static_cast<long>(wire_tp),
@@ -1113,7 +1112,6 @@ private:
                 if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
                     return TransferResult::FAILED;
                 }
-                logFileRead(tag, batch_blocks, batch_uris);
             } else {
                 auto [ec, result] =
                     client_wrapper_->saveKvCachesForTagWithStatus(tag, batch_uris, batch_buffers, trace_info);
@@ -1361,9 +1359,8 @@ private:
     int                            target_prefill_cp_{1}, target_prefill_tp_{1}, target_physical_shards_{1}, file_capture_blocks_{1};
     bool                           decode_publication_enabled_{false}, pace_backend_{false}, file_decode_{false};
     StorageBackend::BufferResolver file_resolver_;
-    mutable std::mutex             file_mutex_;
     std::shared_ptr<CompletionAccounting>   completion_accounting_ = std::make_shared<CompletionAccounting>();
-    mutable std::unordered_set<std::string> file_verified_uris_;
+    DecodePublicationLimits completion_limits_;
     CacheConfig                          cache_config_;
     KVCacheConfig                        kv_cache_config_;
     RuntimeConfig                        runtime_config_;

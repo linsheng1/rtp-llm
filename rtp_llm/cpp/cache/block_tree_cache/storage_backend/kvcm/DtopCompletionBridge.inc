@@ -31,30 +31,20 @@ bool configureDecodePublication(StorageBackend::BufferResolver resolver) {
     // GDR and B/C toggles need no second experimental PACE enable flag.
     pace_backend_ = backend_config == "[{\"type\":\"pace\"}]"
                     || backend_config == "[{\"type\":\"pace_ssd\"}]";
-    const bool packed_ssd = autil::EnvUtil::getEnv("RTP_DTOP_PACE_SSD_PACKED_IO", false);
-    // Native SSD delegates GPU IOVs and registrations to the SDK. Keep this
-    // explicit until its matching SDK/Consumer has passed model acceptance.
-    const bool native_ssd = autil::EnvUtil::getEnv("RTP_DTOP_PACE_SSD_NATIVE_GDR", false);
-    if (native_ssd
-        && (!pace_backend_ || !gdr_enabled_ || packed_ssd
-            || backend_config != "[{\"type\":\"pace_ssd\"}]"
-            || kv_cache_config_.kvcm_read_backend_type != 9)) {
-        RTP_LLM_LOG_ERROR("native SSD requires PACE backend9/pace_ssd, GDR, and no packed CPU wrapper");
+    const bool ssd = backend_config == "[{\"type\":\"pace_ssd\"}]";
+    if (pace_backend_ && ((ssd && (kv_cache_config_.kvcm_read_backend_type != 9 || !gdr_enabled_))
+                         || (!ssd && kv_cache_config_.kvcm_read_backend_type == 9))) {
+        RTP_LLM_LOG_ERROR("PACE SSD requires backend9/pace_ssd and GDR; DRAM cannot use backend9");
         return false;
     }
-    if (packed_ssd
-        && (!pace_backend_ || gdr_enabled_ || backend_config != "[{\"type\":\"pace_ssd\"}]"
-            || kv_cache_config_.kvcm_read_backend_type != 9)) {
-        RTP_LLM_LOG_ERROR("explicit SSD compatibility requires backend9/pace_ssd and CPU staging, GDR disabled");
-        return false;
-    }
-    if (!decode_publication_enabled_) {
+    if (!decode_publication_enabled_)
         return true;
-    }
-    const int gpu_mib  = autil::EnvUtil::getEnv("RTP_DTOP_GPU_PENDING_MIB", 4096);
-    const int gpu_jobs = autil::EnvUtil::getEnv("RTP_DTOP_GPU_PENDING_JOBS", 2);
-    if (gpu_mib < 1 || gpu_mib > 16384 || gpu_jobs < 1 || gpu_jobs > 64)
+    const auto limits = remoteCacheDecodePublicationLimits();
+    if (!limits) {
+        RTP_LLM_LOG_ERROR("invalid Decode publication pending byte/job budget");
         return false;
+    }
+    completion_limits_ = *limits;
     file_decode_ = parallelism_config_.role_type == RoleType::DECODE;
     const bool prefill = parallelism_config_.role_type == RoleType::PREFILL;
     const auto& cp = parallelism_config_.prefill_cp_config;
@@ -70,7 +60,7 @@ bool configureDecodePublication(StorageBackend::BufferResolver resolver) {
         || !cache_config_.mtp_sub_configs.empty() || sp_config_.type != SP_TYPE_NONE
         || autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false)
         || !kv_cache_config_.kvcm_client_config.empty() || kv_cache_config_.kvcm_instance_id_salt.empty()
-        || (pace_backend_ && backend_config != ((packed_ssd || native_ssd) ? "[{\"type\":\"pace_ssd\"}]" : "[{\"type\":\"pace\"}]"))
+        || (pace_backend_ && backend_config != (ssd ? "[{\"type\":\"pace_ssd\"}]" : "[{\"type\":\"pace\"}]"))
         || (file_decode_ && (parallelism_config_.tp_size != 1 || parallelism_config_.dp_size < 1))
         || (prefill && (parallelism_config_.tp_size != target_prefill_cp_ || parallelism_config_.dp_size != 1))) {
         RTP_LLM_LOG_ERROR("Decode publication requires matching target P CP layout, positive D DP, synchronous single-token decoding, and native PACE");
@@ -136,106 +126,12 @@ std::string fileTag(const std::string& tag, int peer) const {
     return file_decode_ ? tag + "#cp" + std::to_string(peer) : tag;
 }
 
-void logFileRead(const std::string&                 tag,
-                 const std::vector<int32_t>&        blocks,
-                 const kv_cache_manager::UriStrVec& uris) const {
-    if (pace_backend_ && !autil::EnvUtil::getEnv("RTP_DTOP_PAYLOAD_AUDIT", false)) {
-        return;
-    }
-    if (!decode_publication_enabled_ && !autil::EnvUtil::getEnv("RTP_DTOP_FILE_AUDIT_BASELINE_P", false)) {
-        return;
-    }
-    const auto                  diagnostic_started_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    std::lock_guard<std::mutex> verification_lock(file_mutex_);
-    for (size_t index = 0; index < blocks.size(); ++index) {
-        // Each actual SDK Load still runs. Only the extra D2H diagnostic is
-        // skipped for immutable private URIs already verified by this P rank.
-        if (autil::EnvUtil::getEnv("RTP_DTOP_FILE_VERIFY_ONCE", false) && file_verified_uris_.count(uris.at(index))) {
-            continue;
-        }
-        size_t   bytes    = 0;
-        uint64_t checksum = 14695981039346656037ULL;
-        for (const int layer : cache_config_.layerIdsForGroup(tag)) {
-            for (const auto& part : file_resolver_(layer, tag, blocks[index])) {
-                RTP_LLM_CHECK_WITH_INFO(part.is_cuda && part.addr && part.size_bytes > 0
-                                            && part.size_bytes <= 32 * 1024 * 1024,
-                                        "DTOP_FILE invalid read destination");
-                std::vector<unsigned char> host(part.size_bytes);
-                check_cuda_value(cudaMemcpy(host.data(), part.addr, part.size_bytes, cudaMemcpyDeviceToHost));
-                for (const auto byte : host) {
-                    checksum ^= byte;
-                    checksum *= 1099511628211ULL;
-                }
-                bytes += part.size_bytes;
-            }
-        }
-        RTP_LLM_CHECK_WITH_INFO(bytes == fileWireBytes(tag), "DTOP_FILE destination byte mismatch");
-        file_verified_uris_.insert(uris.at(index));
-        RTP_LLM_LOG_INFO("DTOP_FILE restored tag=%s rank=%ld bytes=%zu fnv64=%lu uri=%s",
-                         tag.c_str(),
-                         parallelism_config_.tp_rank,
-                         bytes,
-                         checksum,
-                         uris.at(index).c_str());
-    }
-    RTP_LLM_LOG_INFO("DTOP_FILE read_diagnostic_us=%ld tag=%s blocks=%zu",
-                     autil::TimeUtility::currentTimeInMicroSeconds() - diagnostic_started_us,
-                     tag.c_str(),
-                     blocks.size());
-}
-
-// Optional source audit for the existing Prefill write path.
-void logPrefillFileWrite(const std::string&                 tag,
-                         const std::vector<int32_t>&        blocks,
-                         const kv_cache_manager::UriStrVec& uris) const {
-    if (pace_backend_ && !autil::EnvUtil::getEnv("RTP_DTOP_PAYLOAD_AUDIT", false)) {
-        return;
-    }
-    if (!decode_publication_enabled_ && !autil::EnvUtil::getEnv("RTP_DTOP_FILE_AUDIT_BASELINE_P", false)) {
-        return;
-    }
-    const auto                  diagnostic_started_us = autil::TimeUtility::currentTimeInMicroSeconds();
-    std::lock_guard<std::mutex> verification_lock(file_mutex_);
-    for (size_t index = 0; index < blocks.size(); ++index) {
-        // This diagnostic does not replace the SDK write.
-        size_t   bytes    = 0;
-        uint64_t checksum = 14695981039346656037ULL;
-        for (const int layer : cache_config_.layerIdsForGroup(tag)) {
-            for (const auto& part : file_resolver_(layer, tag, blocks[index])) {
-                RTP_LLM_CHECK_WITH_INFO(part.is_cuda && part.addr && part.size_bytes > 0
-                                            && part.size_bytes <= 32 * 1024 * 1024,
-                                        "DTOP_FILE invalid read destination");
-                std::vector<unsigned char> host(part.size_bytes);
-                check_cuda_value(cudaMemcpy(host.data(), part.addr, part.size_bytes, cudaMemcpyDeviceToHost));
-                for (const auto byte : host) {
-                    checksum ^= byte;
-                    checksum *= 1099511628211ULL;
-                }
-                bytes += part.size_bytes;
-            }
-        }
-        RTP_LLM_CHECK_WITH_INFO(bytes == fileWireBytes(tag), "DTOP_FILE destination byte mismatch");
-        RTP_LLM_LOG_INFO("PREFILL_FILE source tag=%s rank=%ld bytes=%zu fnv64=%lu uri=%s",
-                         tag.c_str(),
-                         parallelism_config_.tp_rank,
-                         bytes,
-                         checksum,
-                         uris.at(index).c_str());
-    }
-    RTP_LLM_LOG_INFO("DTOP_FILE read_diagnostic_us=%ld tag=%s blocks=%zu",
-                     autil::TimeUtility::currentTimeInMicroSeconds() - diagnostic_started_us,
-                     tag.c_str(),
-                     blocks.size());
-}
-
 // Select completed native checkpoints, not the final mutable slot. In
 // particular, floor(E/unit) is only a candidate: all FULL pages and every
 // required terminal STATE/SWA page must still be present at that exact key.
 StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end) {
     StorageRequest request;
     if (!decode_publication_enabled_ || !file_decode_ || parallelism_config_.tp_rank != 0
-        || (!std::getenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH")
-            && !autil::EnvUtil::getEnv("RTP_DTOP_DECODE_PUBLISH", true))
         || resource.decodeCompletionSubmitted())
         return request;
     if (resource.batchSize() != 1 || computed_end == 0)
@@ -329,8 +225,8 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
             request.handles[key].push_back(std::move(handle));
         }
     }
-    const size_t limit = static_cast<size_t>(autil::EnvUtil::getEnv("RTP_DTOP_GPU_PENDING_MIB", 4096)) * 1024 * 1024;
-    const size_t jobs  = autil::EnvUtil::getEnv("RTP_DTOP_GPU_PENDING_JOBS", 2);
+    const size_t limit = completion_limits_.bytes;
+    const size_t jobs  = completion_limits_.jobs;
     {
         std::lock_guard<std::mutex> guard(completion_accounting_->mutex);
         if (bytes > limit || completion_accounting_->bytes > limit - bytes || completion_accounting_->jobs >= jobs) {

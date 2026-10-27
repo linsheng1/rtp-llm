@@ -58,6 +58,15 @@ bool boundedSdkRanges(const kv_cache_manager::UriStrVec&    uris,
     return true;
 }
 
+std::shared_ptr<kv_cache_manager::TransferTraceInfo> traceForRange(
+    const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace, const SdkRange& range) {
+    if (!trace || trace->block_ids.empty())
+        return trace;
+    auto result = std::make_shared<kv_cache_manager::TransferTraceInfo>(*trace);
+    result->block_ids = {trace->block_ids.begin() + range.begin, trace->block_ids.begin() + range.end};
+    return result;
+}
+
 class ReinitPolicy {
 public:
     ReinitPolicy(): rd_(), gen_(rd_()), jitter_dist_(jitter_min_, jitter_max_) {}
@@ -646,36 +655,33 @@ kv_cache_manager::ClientErrorCode ClientWrapper::loadKvCachesForTagWithStatus(
     }
     const auto io_started = std::chrono::steady_clock::now();
     auto       ec         = kv_cache_manager::ClientErrorCode::ER_OK;
-    if (!autil::EnvUtil::getEnv("RTP_KVCM_BOUNDED_SDK_BATCH", false)) {
-        ec = transfer_clients_[slot->second]->LoadKvCaches(uri_str_vec, block_buffers, trace_info);
-    } else {
-        std::vector<SdkRange> ranges;
-        if (!boundedSdkRanges(uri_str_vec, block_buffers, ranges)) {
-            RTP_LLM_LOG_ERROR("KVCM bounded SDK rejects malformed or oversized block geometry");
-            return kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS;
+    std::vector<SdkRange> ranges;
+    if ((trace_info && !trace_info->block_ids.empty() && trace_info->block_ids.size() != uri_str_vec.size())
+        || !boundedSdkRanges(uri_str_vec, block_buffers, ranges)) {
+        RTP_LLM_LOG_ERROR("KVCM bounded SDK rejects malformed or oversized block geometry");
+        return kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS;
+    }
+    for (const auto& range : ranges) {
+        kv_cache_manager::UriStrVec uris(uri_str_vec.begin() + range.begin, uri_str_vec.begin() + range.end);
+        // Shallow pointer descriptors; caller pins own all payloads for the whole operation.
+        kv_cache_manager::BlockBuffers buffers(block_buffers.begin() + range.begin,
+                                               block_buffers.begin() + range.end);
+        const auto                     began = std::chrono::steady_clock::now();
+        ec = transfer_clients_[slot->second]->LoadKvCaches(uris, buffers, traceForRange(trace_info, range));
+        const auto us =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
+        RTP_LLM_LOG_INFO("KV_SDK_CHUNK op=read pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
+                         static_cast<int>(getpid()),
+                         tag.c_str(),
+                         uris.size(),
+                         range.iovs,
+                         range.bytes,
+                         static_cast<long>(us),
+                         static_cast<int>(ec));
+        if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
+            break;
         }
-        for (const auto& range : ranges) {
-            kv_cache_manager::UriStrVec uris(uri_str_vec.begin() + range.begin, uri_str_vec.begin() + range.end);
-            // Shallow pointer descriptors; caller pins own all payloads for the whole operation.
-            kv_cache_manager::BlockBuffers buffers(block_buffers.begin() + range.begin,
-                                                   block_buffers.begin() + range.end);
-            const auto                     began = std::chrono::steady_clock::now();
-            ec = transfer_clients_[slot->second]->LoadKvCaches(uris, buffers, trace_info);
-            const auto us =
-                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
-            RTP_LLM_LOG_INFO("KV_SDK_CHUNK op=read pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
-                             static_cast<int>(getpid()),
-                             tag.c_str(),
-                             uris.size(),
-                             range.iovs,
-                             range.bytes,
-                             static_cast<long>(us),
-                             static_cast<int>(ec));
-            if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
-                break;
-            }
-            std::copy(buffers.begin(), buffers.end(), block_buffers.begin() + range.begin);
-        }
+        std::copy(buffers.begin(), buffers.end(), block_buffers.begin() + range.begin);
     }
     const auto io_us =
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - io_started).count();
@@ -725,45 +731,42 @@ ClientWrapper::saveKvCachesForTagWithStatus(
     const auto                  io_started = std::chrono::steady_clock::now();
     auto                        ec         = kv_cache_manager::ClientErrorCode::ER_OK;
     kv_cache_manager::UriStrVec result;
-    if (!autil::EnvUtil::getEnv("RTP_KVCM_BOUNDED_SDK_BATCH", false)) {
-        std::tie(ec, result) = transfer_clients_[slot->second]->SaveKvCaches(uri_str_vec, block_buffers, trace_info);
-    } else {
-        std::vector<SdkRange> ranges;
-        if (!boundedSdkRanges(uri_str_vec, block_buffers, ranges)) {
-            RTP_LLM_LOG_ERROR("KVCM bounded SDK rejects malformed or oversized block geometry");
-            return {kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS, {}};
-        }
-        for (const auto& range : ranges) {
-            kv_cache_manager::UriStrVec uris(uri_str_vec.begin() + range.begin, uri_str_vec.begin() + range.end);
-            // Shallow pointer descriptors; caller pins own all payloads for the whole operation.
-            kv_cache_manager::BlockBuffers buffers(block_buffers.begin() + range.begin,
-                                                   block_buffers.begin() + range.end);
-            const auto                     began = std::chrono::steady_clock::now();
-            auto saved = transfer_clients_[slot->second]->SaveKvCaches(uris, buffers, trace_info);
-            ec         = saved.first;
-            const auto us =
-                std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
-            RTP_LLM_LOG_INFO("KV_SDK_CHUNK op=write pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
-                             static_cast<int>(getpid()),
-                             tag.c_str(),
-                             uris.size(),
-                             range.iovs,
-                             range.bytes,
-                             static_cast<long>(us),
-                             static_cast<int>(ec));
-            if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
-                break;
-            }
-            if (!saved.second.empty() && saved.second.size() != uris.size()) {
-                ec = kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS;
-                break;
-            }
-            const auto& actual = saved.second.empty() ? uris : saved.second;
-            result.insert(result.end(), actual.begin(), actual.end());
-        }
+    std::vector<SdkRange> ranges;
+    if ((trace_info && !trace_info->block_ids.empty() && trace_info->block_ids.size() != uri_str_vec.size())
+        || !boundedSdkRanges(uri_str_vec, block_buffers, ranges)) {
+        RTP_LLM_LOG_ERROR("KVCM bounded SDK rejects malformed or oversized block geometry");
+        return {kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS, {}};
+    }
+    for (const auto& range : ranges) {
+        kv_cache_manager::UriStrVec uris(uri_str_vec.begin() + range.begin, uri_str_vec.begin() + range.end);
+        // Shallow pointer descriptors; caller pins own all payloads for the whole operation.
+        kv_cache_manager::BlockBuffers buffers(block_buffers.begin() + range.begin,
+                                               block_buffers.begin() + range.end);
+        const auto                     began = std::chrono::steady_clock::now();
+        auto saved = transfer_clients_[slot->second]->SaveKvCaches(uris, buffers, traceForRange(trace_info, range));
+        ec         = saved.first;
+        const auto us =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
+        RTP_LLM_LOG_INFO("KV_SDK_CHUNK op=write pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
+                         static_cast<int>(getpid()),
+                         tag.c_str(),
+                         uris.size(),
+                         range.iovs,
+                         range.bytes,
+                         static_cast<long>(us),
+                         static_cast<int>(ec));
         if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
-            result.clear();
+            break;
         }
+        if (!saved.second.empty() && saved.second.size() != uris.size()) {
+            ec = kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS;
+            break;
+        }
+        const auto& actual = saved.second.empty() ? uris : saved.second;
+        result.insert(result.end(), actual.begin(), actual.end());
+    }
+    if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
+        result.clear();
     }
     const auto io_us =
         std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - io_started).count();

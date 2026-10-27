@@ -56,7 +56,6 @@ Use the same feature setting and target layout on P and D:
 ```sh
 export RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH=1
 export RTP_LLM_REMOTE_CACHE_ENABLE_GDR_ZERO_COPY=1
-export RTP_KVCM_BOUNDED_SDK_BATCH=1
 ```
 
 `prefill_cp_size` is the target P CP count on both roles. P uses TP equal to
@@ -72,11 +71,11 @@ old-format remote keys across layouts; the identity change deliberately causes a
 cold miss rather than a potentially incorrect cross-layout hit.
 
 For DRAM select the existing `pace` SDK backend and read backend 3. For explicit
-SSD select `pace_ssd`, read backend 9, and
-`RTP_DTOP_PACE_SSD_NATIVE_GDR=1`. Backend selection is independent of Decode
+SSD select `pace_ssd` and read backend 9. GPU packing is selected automatically. Backend selection is independent of Decode
 publication, so ordinary Prefill GDR does not require a second experimental PACE
-flag. The old packed-SSD CPU wrapper and CPU coalescer are incompatible with GDR
-registrations and must remain disabled for the direct GPU path.
+flag. The old CPU packing/coalescing implementations have been removed from this candidate.
+SDK calls are always bounded by byte, block and IOV limits; individual SSD objects
+remain intact. Trace block IDs are sliced along with each SDK batch.
 
 The transport configuration must select RDMA without a TCP payload fallback.
 Configure the matching Consumer's GDR read/write and external-memory flags,
@@ -88,11 +87,27 @@ registration success alone does not prove that a closed-source Consumer avoided
 D2H/H2D: validate registered payload address ranges and Consumer CUDA activities
 with a working same-process positive control.
 
-Legacy `RTP_DTOP_FILE_CP2` is read only when the new feature switch is absent.
-An explicit new value 0 overrides that legacy enable, and an explicit value 1
-also overrides `RTP_DTOP_DECODE_PUBLISH=0`. New deployments need none of the old
-CP-specific target/count flags. Obsolete BENCH flags no longer change normal
-Prefill publication or request-level local cache policy.
+There are no legacy CP-specific or duplicate publication enable flags. The
+single publication switch defaults to off. Backend and CP layout selection are
+independent existing configuration, not additional Decode feature flags.
+
+### Initial resource budgets
+
+Per D rank, EOS publication retains at most **512 MiB** of unique GPU source
+pages across at most **4** queued/in-flight jobs. These are admission budgets,
+not a second preallocated KV pool. Against the present 4 GiB/rank test pool the
+byte budget is 12.5%; this is a deployment starting point, not a measured optimum.
+Advanced overrides are `RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB` (1–16384) and
+`RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS` (1–64), strictly parsed once at backend
+initialization. Refusal skips optional remote publication, retaining the normal
+response/local cache. Uncertain transfers keep admission charged through FROZEN
+references. Existing shared queue limits and the P/D quarantine mechanism remain.
+`RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO=0` remains the default: disabling
+threshold-triggered process abort does not disable page freezing.
+
+Payload checksum diagnostics are removed from business execution. Tests use
+external GPU/Consumer observers and byte comparisons, with their diagnostic
+copies kept outside the measured KV transfer interval.
 
 The enabled path currently rejects MTP/speculative decoding and asynchronous
 stream reservation explicitly. It requires a native single PACE backend, valid
@@ -113,10 +128,8 @@ insertion and ordinary Prefill remote publication remain enabled.
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH` | `0` | One opt-in switch for all supported P CP / independent D DP layouts. |
-| `RTP_DTOP_GPU_PENDING_MIB` | `4096` | Per-D-process unique retained source-page budget, including quarantine; range 1–16384 MiB. |
-| `RTP_DTOP_GPU_PENDING_JOBS` | `2` | Per-D-process publication jobs, including quarantine; range 1–64. |
-| `RTP_KVCM_BOUNDED_SDK_BATCH` | `0` | Split SDK calls at 64 MiB, 256 blocks or 1024 IOVs; preserve trace and actual-URI order. |
-| `RTP_DTOP_PACE_SSD_NATIVE_GDR` | `0` | Explicit SSD GPU IOV compatibility using a pre-registered GPU D2D packing arena. |
+| `RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB` | `512` | Per-D-process unique retained source-page budget, including quarantine; range 1–16384 MiB. |
+| `RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS` | `4` | Per-D-process publication jobs, including quarantine; range 1–64. |
 
 Admission accounts for the entire candidate checkpoint before the metadata mask
 is available; masked pages are not released early. Exhaustion skips optional
@@ -129,8 +142,7 @@ with a 512 MiB per-process registered-arena cap. Operations lease disjoint range
 sized to their largest URI, not their entire logical batch. GPU writes gather one
 URI immediately before its SDK write; reads scatter its result before the next
 URI overwrites that range. This avoids starving concurrent cache tags when a
-replicated SWA batch approaches 64 MiB. The legacy CPU adapter retains separate
-per-object buffers. The dedicated GPU copy callback explicitly waits for its
+replicated SWA batch approaches 64 MiB. The dedicated GPU copy callback explicitly waits for its
 default-stream D2D copy before returning, because external RDMA is not ordered
 by CUDA stream dependencies. This is a per-packing-copy completion guarantee,
 not a new per-token inference fence.
@@ -144,10 +156,10 @@ claim GPUDirect Storage on the remote SSD host.
 
 ## Validation and limits
 
-### Current generalized candidate
+### Historical v5 validation (before configuration cleanup)
 
 Native GPU/mock coverage is CP1/2/4/8/16 × sharded/replicated × independent
-DP1/3/8. The current 377 executed tests passed with zero skips, including GPU
+DP1/3/8. The historical v5 baseline's 377 executed tests passed with zero skips, including GPU
 packing/scatter ordering, concurrent large logical batches and unknown-completion
 range isolation. Real-model qualification includes CP2 P / DP4 D and CP4 P / DP4 D,
 with both layouts and DRAM/explicit SSD. Execution results, exact wheel/source

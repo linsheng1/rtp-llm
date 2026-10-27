@@ -11,8 +11,7 @@
 
 namespace rtp_llm {
 namespace {
-TEST(DecodePublicationConfigTest, GenericSwitchOverridesLegacyAndNeedsNoCpSpecificFlag) {
-    autil::EnvGuard legacy("RTP_DTOP_FILE_CP2", "1");
+TEST(DecodePublicationConfigTest, SingleSwitchNeedsNoCpSpecificFlag) {
     {
         autil::EnvGuard off("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
         EXPECT_FALSE(remoteCacheDecodePublicationEnabled());
@@ -22,6 +21,23 @@ TEST(DecodePublicationConfigTest, GenericSwitchOverridesLegacyAndNeedsNoCpSpecif
         EXPECT_TRUE(remoteCacheDecodePublicationEnabled());
     }
 }
+TEST(DecodePublicationConfigTest, PendingBudgetsHaveBoundedDefaultsAndStrictOverrides) {
+    EXPECT_EQ(DecodePublicationLimits{}.bytes, 512ULL * 1024 * 1024);
+    EXPECT_EQ(DecodePublicationLimits{}.jobs, 4u);
+    autil::EnvGuard mib("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB", "256");
+    autil::EnvGuard jobs("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS", "8");
+    auto limits = remoteCacheDecodePublicationLimits();
+    ASSERT_TRUE(limits.has_value());
+    EXPECT_EQ(limits->bytes, 256ULL * 1024 * 1024);
+    EXPECT_EQ(limits->jobs, 8u);
+    for (const char* invalid : {"", "0", "-1", "1.5", " 8", "8x", "18446744073709551616"}) {
+        autil::EnvGuard bad("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB", invalid);
+        EXPECT_FALSE(remoteCacheDecodePublicationLimits().has_value()) << invalid;
+    }
+    autil::EnvGuard too_many("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS", "65");
+    EXPECT_FALSE(remoteCacheDecodePublicationLimits().has_value());
+}
+
 TEST(NativeSsdGpuPackingTest, GathersAndScattersDifferentGpuIovsWithoutHostPayloadStaging) {
     using namespace kv_cache_manager;
     using M = kv_cache_manager::MemoryType;
@@ -175,8 +191,8 @@ TEST(NativeSsdGpuPackingTest, UnknownCompletionRetainsItsRangeButOtherTagsContin
 // implementation must pass native GPU IOVs through the Prefill transfer path.
 class EosGpuCompletionTest: public ::testing::TestWithParam<std::tuple<int, bool, int>> {
 protected:
-    autil::EnvGuard enable{"RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1"}, pace{"RTP_DTOP_PACE", "0"}, audit{"RTP_DTOP_PAYLOAD_AUDIT", "0"},
-        pending{"RTP_DTOP_GPU_PENDING_JOBS", "1"}, obsolete_disable{"RTP_DTOP_DECODE_PUBLISH", "0"};
+    autil::EnvGuard enable{"RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1"},
+        pending{"RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS", "1"};
     // Failure cases deliberately freeze a large fraction of these tiny pools.
     autil::EnvGuard quarantine_abort{"RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", "0"};
     struct Scenario {
@@ -389,8 +405,6 @@ TEST_P(EosGpuCompletionTest, PartialTailUsesEarlierImmutableCheckpointNotFinalSt
     EXPECT_EQ(s.aborts, 0);
 }
 TEST_P(EosGpuCompletionTest, NativeSsdGdrKeepsGpuPagesThroughEosTransfer) {
-    autil::EnvGuard native_ssd{"RTP_DTOP_PACE_SSD_NATIVE_GDR", "1"};
-    autil::EnvGuard packed_ssd{"RTP_DTOP_PACE_SSD_PACKED_IO", "0"};
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, true, std::get<2>(GetParam()));
     s.block_start = true;
     ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end(), true));
