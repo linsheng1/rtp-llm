@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
@@ -1239,6 +1240,16 @@ TEST_F(StreamCacheResourceTest, RemoteTimeoutAllocationRetryKeepsLocalLookupAndS
         auto  backend  = prepareStorageBackendResource(false, true, RoleType::PREFILL, resident);
         auto& resource = stream_->streamCacheResource();
         initCacheKeys(resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), 2);
+        auto cache = cache_manager_->block_tree_cache_;
+        ASSERT_EQ(cache->groupSets().size(), 1u);
+        const auto group_id = cache->groupSets().front()->groupSetId();
+        const auto prefix_key = resource.batch_kv_cache_resource_->cacheKeys(0).front();
+        const auto prefix = cache->tree()->findNode({prefix_key});
+        ASSERT_EQ(prefix.size(), 1u);
+        ASSERT_TRUE(prefix.back()->group_set_resources[group_id].hasTier(Tier::HOST));
+        // The helper seeds the tree directly. Register its HOST candidate as
+        // a production insertion would, rather than silently omitting the heap.
+        BlockTreeCacheTestPeer::refreshCandidateForTest(*cache, prefix.back(), group_id);
         backend->blockReads();
         block_tree_cache_detail::ScopeRollback release_read([&] { backend->releaseReads(); });
         backend->timeoutNextRead();
@@ -1259,13 +1270,30 @@ TEST_F(StreamCacheResourceTest, RemoteTimeoutAllocationRetryKeepsLocalLookupAndS
         EXPECT_TRUE(absl::IsUnavailable(resource.waitForAllocatorLoad()));
         EXPECT_EQ(resource.curBlocksNum(), 0);
         EXPECT_EQ(stream_->reuseLength(), 0);
+        EXPECT_TRUE(resource.skip_remote_cache_);
+        // Finished loads may still own source tickets through this inspection
+        // reference. Release them before exercising production eviction.
+        context.reset();
+        BlockTreeCacheTestPeer::waitForTaskPoolIdleForTest(*cache);
+        for (const auto tier : {Tier::DEVICE, Tier::HOST}) {
+            const bool dropped = BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(
+                *cache, group_id, tier, /*force_drop=*/true);
+            if (resident)
+                EXPECT_FALSE(dropped);
+        }
+        const auto remaining = cache->tree()->findNode({prefix_key});
+        const bool local_prefix_available = !remaining.empty()
+            && (remaining.back()->group_set_resources[group_id].hasTier(Tier::DEVICE)
+                || remaining.back()->group_set_resources[group_id].hasTier(Tier::HOST)
+                || remaining.back()->group_set_resources[group_id].hasTier(Tier::DISK));
+        ASSERT_EQ(local_prefix_available, resident);
         pool->decRef(*held);
         release_held.dismiss();
         ASSERT_TRUE(resource.initKVBlock().ok());
         ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
         EXPECT_EQ(backend->matchCalls(), 1u);
-        // Detaching under pressure may evict an ordinary prefix. A resident
-        // prefix survives and must remain eligible for local lookup on retry.
+        // Retry sees the explicitly evicted ordinary prefix or the preserved
+        // resident prefix. DEVICE pressure alone need not remove the HOST copy.
         EXPECT_EQ(stream_->reuseLength(), resident ? 2 : 0);
         EXPECT_EQ(stream_->deviceReuseLength(), resident ? 2 : 0);
         EXPECT_EQ(stream_->remoteReuseLength(), 0);
