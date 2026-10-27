@@ -442,17 +442,17 @@ TEST(DeviceBlockPoolTest, DonorReuseChangesOriginIncarnationButAnUnchangedRefere
     ASSERT_TRUE(parsed);
     const auto source = std::make_shared<const DecodeCacheOrigin>(*parsed);
     const auto first = pool.decodeOriginIncarnation(donor);
-    ASSERT_TRUE(pool.bindDecodeOrigin(donor, first, source));
+    ASSERT_TRUE(pool.bindDecodeOrigin(donor, first, "full", source));
     BlockIndicesType replacements;
     int required_free = 0;
     ASSERT_TRUE(pool.tryReplaceRequestReferences({{donor, 1, 1}}, 0, replacements, required_free));
     EXPECT_EQ(pool.decodeOriginIncarnation(donor), first);
-    EXPECT_EQ(pool.decodeOrigin(donor), source);
+    EXPECT_EQ(pool.decodeOrigin(donor, "full"), source);
     ASSERT_TRUE(pool.tryReplaceRequestReferences({{donor, 1, 0}}, 1, replacements, required_free));
     ASSERT_EQ(replacements, (BlockIndicesType{donor}));
     EXPECT_NE(pool.decodeOriginIncarnation(donor), first);
-    EXPECT_FALSE(pool.decodeOrigin(donor));
-    EXPECT_FALSE(pool.bindDecodeOrigin(donor, first, source));
+    EXPECT_FALSE(pool.decodeOrigin(donor, "full"));
+    EXPECT_FALSE(pool.bindDecodeOrigin(donor, first, "full", source));
     pool.decRef(donor);
     EXPECT_EQ(pool.freeBlocksNum(), pool.totalBlocksNum());
 }

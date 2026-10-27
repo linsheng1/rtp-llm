@@ -8,6 +8,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/Types.h"
@@ -82,8 +83,9 @@ public:
     // operations use mutex_; callers never hold a raw pointer into this table.
     bool enableDecodeOriginTracking();
     uint64_t decodeOriginIncarnation(BlockIdxType block) const;
-    PhysicalDecodeOrigins::Origin decodeOrigin(BlockIdxType block) const;
-    bool bindDecodeOrigin(BlockIdxType block, uint64_t expected_incarnation, PhysicalDecodeOrigins::Origin origin);
+    PhysicalDecodeOrigins::Origin decodeOrigin(BlockIdxType block, std::string_view region) const;
+    bool bindDecodeOrigin(BlockIdxType block, uint64_t expected_incarnation, std::string_view region,
+                          PhysicalDecodeOrigins::Origin origin);
 
     size_t totalBlocksNum() const;
     size_t freeBlocksNum() const;

@@ -4,6 +4,9 @@
 #include <limits>
 #include <memory>
 #include <new>
+#include <map>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -36,30 +39,45 @@ public:
     uint64_t incarnation(size_t block) const {
         return incarnations_.at(block);
     }
-    bool bind(size_t block, uint64_t expected, Origin origin) {
-        if (expected == 0 || incarnation(block) != expected)
+    bool bind(size_t block, uint64_t expected, std::string_view region, Origin origin) {
+        if (expected == 0 || incarnation(block) != expected || region.empty() || region.size() > 256)
             return false;
         if (origin) {
             try {
-                origins_[block] = std::move(origin);
+                origins_[block][std::string(region)] = std::move(origin);
             } catch (const std::bad_alloc&) {
                 return false;  // Missing telemetry must not fail a completed read.
             }
-        } else
-            origins_.erase(block);
+        } else {
+            const auto found = origins_.find(block);
+            if (found != origins_.end()) {
+                const auto tag = found->second.find(region);
+                if (tag != found->second.end())
+                    found->second.erase(tag);
+                if (found->second.empty())
+                    origins_.erase(found);
+            }
+        }
         return true;
     }
-    Origin get(size_t block) const {
+    Origin get(size_t block, std::string_view region) const {
         if (incarnation(block) == 0)
             return {};
         const auto found = origins_.find(block);
-        return found == origins_.end() ? Origin{} : found->second;
+        if (found == origins_.end())
+            return {};
+        const auto tag = found->second.find(region);
+        return tag == found->second.end() ? Origin{} : tag->second;
     }
 
 private:
-    uint64_t                           next_{0};
-    std::vector<uint64_t>              incarnations_;
-    std::unordered_map<size_t, Origin> origins_;
+    uint64_t              next_{0};
+    std::vector<uint64_t> incarnations_;
+    // A packed physical page can hold several groups with different logical
+    // positions. They share an incarnation but never overwrite each other's
+    // provenance. Region identities come from validated model group tags.
+    using Regions = std::map<std::string, Origin, std::less<>>;
+    std::unordered_map<size_t, Regions> origins_;
 };
 
 }  // namespace rtp_llm
