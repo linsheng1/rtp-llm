@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DecodePublicationAccounting.h"
+#include "rtp_llm/cpp/utils/DecodePublicationLifecycle.h"
 #include <gtest/gtest.h>
 #include <future>
 #include <atomic>
@@ -137,6 +138,47 @@ TEST(DecodePublicationAccountingTest, ConcurrentAdmissionCannotOversubscribeBudg
     EXPECT_EQ(accepted.load(), 3u);
     EXPECT_EQ(state->snapshot().jobs, 0u);
     EXPECT_EQ(state->snapshot().bytes, 0u);
+}
+
+TEST(DecodePublicationAccountingTest, DelayedRetryAfterBudgetRefusalKeepsOriginalEosAndReportsSkipOnce) {
+    std::vector<std::pair<std::string, std::optional<int64_t>>> events;
+    auto state = std::make_shared<Accounting>(100, 1, Accounting::SnapshotObserver{},
+        [&](const char* result, auto latency) { events.emplace_back(result, latency); });
+    auto occupied = state->tryAcquire(100, std::nullopt);
+    ASSERT_NE(occupied, nullptr);
+    DecodePublicationLifecycle lifecycle;
+    const auto eos = Clock::now() - std::chrono::seconds(2);
+    lifecycle.recordEos(eos);
+    for (size_t retry = 0; retry < 2; ++retry) {
+        EXPECT_EQ(state->tryAcquire(10, lifecycle.eosAt()), nullptr);
+        if (lifecycle.recordFirstBudgetSkip())
+            state->recordBudgetSkip();
+        lifecycle.recordEos(Clock::now());  // Duplicate/fallback cannot reset EOS.
+    }
+    ASSERT_EQ(events.size(), 1u);
+    EXPECT_EQ(events[0].first, "budget_skipped");
+    EXPECT_EQ(lifecycle.eosAt(), eos);
+    occupied.reset();
+    auto retried = state->tryAcquire(10, lifecycle.eosAt());
+    ASSERT_NE(retried, nullptr);
+    retried->recordOutcome("committed", true);
+    retried.reset();
+    ASSERT_EQ(events.size(), 3u);  // skip, unrelated cancelled occupant, commit.
+    EXPECT_EQ(events.back().first, "committed");
+    ASSERT_TRUE(events.back().second);
+    EXPECT_GE(*events.back().second, 2000000);
+}
+
+TEST(DecodePublicationAccountingTest, MissingActualEosNeverFabricatesLatencyAtAdmission) {
+    std::optional<int64_t> observed;
+    bool acknowledged = false;
+    auto state = std::make_shared<Accounting>(100, 1, Accounting::SnapshotObserver{},
+        [&](const char* result, auto latency) { acknowledged = std::string(result) == "committed"; observed = latency; });
+    auto lease = state->tryAcquire(10, std::nullopt);
+    ASSERT_NE(lease, nullptr);
+    lease->recordOutcome("committed", true);
+    EXPECT_TRUE(acknowledged);
+    EXPECT_FALSE(observed);
 }
 }  // namespace
 }  // namespace rtp_llm::kvcm

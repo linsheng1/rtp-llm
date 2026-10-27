@@ -1324,6 +1324,7 @@ public:
     kmonitor::MutableMetric* job_limit_metric{nullptr};
     kmonitor::MutableMetric* oldest_age_us_metric{nullptr};
     kmonitor::MutableMetric* outcome_qps_metric{nullptr};
+    kmonitor::MutableMetric* budget_skip_qps_metric{nullptr};
     kmonitor::MutableMetric* eos_latency_bucket_qps_metric{nullptr};
     kmonitor::MutableMetric* eos_latency_sum_us_qps_metric{nullptr};
 private:

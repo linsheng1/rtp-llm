@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPrompt.h"
 #include "rtp_llm/cpp/models/position_ids/PositionIdsGenerator.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include <atomic>
 #include <condition_variable>
 #include <iterator>
@@ -337,6 +338,10 @@ public:
         if (event == StreamEvents::GenerateDone && !generation_done_) {
             generation_done_         = true;
             generation_done_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+            if (remoteCacheDecodePublicationEnabled() && resourceContext().role_type == RoleType::DECODE
+                && stream_cache_resource_ && stream_cache_resource_->reuseCache() && !hasErrorWithoutLock()) {
+                kvCache().decodeCompletionLifecycle().recordEos();
+            }
         }
         if (event == StreamEvents::Error || event == StreamEvents::GenerateDone
             || event == StreamEvents::NeedRemoteGenerate) {

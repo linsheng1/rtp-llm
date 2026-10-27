@@ -178,7 +178,7 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
         return request;
     if (resource.batchSize() != 1 || computed_end == 0)
         return request;
-    const auto eos_at = Clock::now();
+    const auto& lifecycle = resource.decodeCompletionLifecycle();
     const size_t base           = cache_config_.seq_size_per_block;
     const size_t canonical_unit = base * target_physical_shards_;
     const size_t completed_full = computed_end / base;
@@ -275,9 +275,10 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
             request.handles[key].push_back(std::move(handle));
         }
     }
-    request.completion_admission = completion_accounting_->tryAcquire(bytes, eos_at);
+    request.completion_admission = completion_accounting_->tryAcquire(bytes, lifecycle.eosAt());
     if (!request.completion_admission) {
-        completion_accounting_->recordBudgetSkip();
+        if (lifecycle.recordFirstBudgetSkip())
+            completion_accounting_->recordBudgetSkip();
         const auto pending = completion_accounting_->snapshot();
         RTP_LLM_LOG_WARNING("DTOP_GPU admission=rejected retained_bytes=%zu pending_bytes=%zu pending_jobs=%zu",
                             bytes, pending.bytes, pending.jobs);

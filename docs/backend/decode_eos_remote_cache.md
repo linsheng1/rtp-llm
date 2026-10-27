@@ -152,7 +152,11 @@ backend quarantine lifecycle ends.
 
 `rtp_llm_decode_publish_outcome_qps{outcome=...}` reports one terminal outcome per
 admission: `committed`, `already_present`, `completion_unknown`, or `failed`.
-`budget_skipped` counts rejected admission attempts separately. Failed admission,
+`rtp_llm_decode_publish_budget_skip_qps` reports the first budget rejection
+once per logical EOS publication, separately from terminal admission outcomes.
+A later fallback may succeed; it keeps the original EOS clock and does not
+repeat the rejection event. Do not add this notification counter to terminal
+outcomes to derive a per-request denominator. Failed admission,
 cancellation, missing acknowledgement and uncertain completion never claim a
 successful commit. Internal SDK retries do not create additional logical commit
 outcomes.
@@ -160,8 +164,11 @@ outcomes.
 Acknowledged commits report `rtp_llm_decode_publish_eos_latency_bucket_qps`
 with a fixed low-cardinality `le_us` label (100 microseconds through 60 seconds,
 plus `+Inf`) and `rtp_llm_decode_publish_eos_latency_sum_us_qps`. Latency begins
-at the EOS planning entry, before checkpoint scan/device fence/queueing, and ends
-at the successful FinishWrite acknowledgement. Ratios of cumulative bucket rates
+at the first actual successful `GenerateDone` event using a monotonic clock,
+before delayed planning/checkpoint scan/device fence/queueing, and ends at the
+successful FinishWrite acknowledgement. Retries and release-time fallback retain
+that immutable event timestamp. Direct low-level callers without a recorded EOS
+may publish, but do not fabricate a latency sample from their admission time. Ratios of cumulative bucket rates
 to the `+Inf` rate give a bounded approximate P50/P95; these are not averages or
 exact quantiles. Do not combine buckets across different deployment/configuration
 populations without preserving the ordinary instance/rank tags.

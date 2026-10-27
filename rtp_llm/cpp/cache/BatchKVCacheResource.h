@@ -7,6 +7,7 @@
 
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/DecodePublicationLifecycle.h"
 
 namespace rtp_llm {
 class BatchKVCacheResource {
@@ -18,8 +19,10 @@ public:
     }
 
     void resetBatchSize(size_t batch_size) {
-        if (batch_size != batch_resource.size())
+        if (batch_size != batch_resource.size()) {
             decode_completion_submitted_ = false;
+            decode_completion_lifecycle_.reset();
+        }
         batch_resource.resize(batch_size);
         cache_keys_initialized_ = false;
     }
@@ -94,6 +97,7 @@ public:
 
     void clearBlocks() {
         decode_completion_submitted_ = false;
+        decode_completion_lifecycle_.reset();
         resizeBlocks(0, 0);
     }
 
@@ -179,6 +183,7 @@ public:
 
     void swap(BatchKVCacheResource& other) noexcept {
         std::swap(decode_completion_submitted_, other.decode_completion_submitted_);
+        std::swap(decode_completion_lifecycle_, other.decode_completion_lifecycle_);
         batch_resource.swap(other.batch_resource);
         std::swap(cache_keys_initialized_, other.cache_keys_initialized_);
     }
@@ -242,9 +247,13 @@ public:
     bool& decodeCompletionSubmitted() const {
         return decode_completion_submitted_;
     }
+    const DecodePublicationLifecycle& decodeCompletionLifecycle() const {
+        return decode_completion_lifecycle_;
+    }
 
 private:
     mutable bool                 decode_completion_submitted_{false};
+    DecodePublicationLifecycle decode_completion_lifecycle_;
     std::vector<KVCacheResource> batch_resource;  // [batch_size]
     bool                         cache_keys_initialized_{false};
 };

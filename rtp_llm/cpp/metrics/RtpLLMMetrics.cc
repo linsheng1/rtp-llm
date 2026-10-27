@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "kmonitor/client/KMonitorFactory.h"
 #include "rtp_llm/cpp/metrics/KmonParam.h"
+#include <string_view>
 
 namespace rtp_llm {
 
@@ -893,6 +894,7 @@ bool RtpLLMDecodePublicationMetrics::init(kmonitor::MetricsGroupManager* manager
     REGISTER_GAUGE_MUTABLE_METRIC(job_limit_metric, "rtp_llm_decode_publish_pending_jobs_limit");
     REGISTER_GAUGE_MUTABLE_METRIC(oldest_age_us_metric, "rtp_llm_decode_publish_oldest_pending_age_us");
     REGISTER_QPS_MUTABLE_METRIC(outcome_qps_metric, "rtp_llm_decode_publish_outcome_qps");
+    REGISTER_QPS_MUTABLE_METRIC(budget_skip_qps_metric, "rtp_llm_decode_publish_budget_skip_qps");
     REGISTER_QPS_MUTABLE_METRIC(eos_latency_bucket_qps_metric, "rtp_llm_decode_publish_eos_latency_bucket_qps");
     REGISTER_QPS_MUTABLE_METRIC(eos_latency_sum_us_qps_metric, "rtp_llm_decode_publish_eos_latency_sum_us_qps");
     return true;
@@ -912,6 +914,10 @@ void RtpLLMDecodePublicationMetrics::report(const kmonitor::MetricsTags* tags,
 
 void RtpLLMDecodePublicationMetrics::report(const kmonitor::MetricsTags* tags,
                                            RtpLLMDecodePublicationEventMetricsCollector* collector) {
+    if (std::string_view(collector->outcome) == "budget_skipped") {
+        budget_skip_qps_metric->Report(tags, 1);
+        return;
+    }
     kmonitor::MetricsTags outcome_tags = tags ? *tags : kmonitor::MetricsTags{};
     outcome_tags.AddTag("outcome", collector->outcome);
     outcome_qps_metric->Report(&outcome_tags, 1);

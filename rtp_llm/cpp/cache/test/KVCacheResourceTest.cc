@@ -441,6 +441,28 @@ TEST(CacheTopologyTest, GroupDerivesKernelBlocksFromSpec) {
     ASSERT_EQ(group.kernelBlocksPerKvBlock(), 4u);
 }
 
+TEST(BatchKVCacheResourceTest, DecodeEosMetadataFollowsResourceSwapAndResetsForNewResource) {
+    BatchKVCacheResource first, second;
+    first.resetBatchSize(1);
+    second.resetBatchSize(1);
+    const auto eos = DecodePublicationLifecycle::Clock::now();
+    first.decodeCompletionLifecycle().recordEos(eos);
+    EXPECT_TRUE(first.decodeCompletionLifecycle().recordFirstBudgetSkip());
+    first.decodeCompletionSubmitted() = true;
+    first.swap(second);
+    EXPECT_FALSE(first.decodeCompletionLifecycle().eosAt());
+    EXPECT_FALSE(first.decodeCompletionSubmitted());
+    EXPECT_EQ(second.decodeCompletionLifecycle().eosAt(), eos);
+    EXPECT_FALSE(second.decodeCompletionLifecycle().recordFirstBudgetSkip());
+    EXPECT_TRUE(second.decodeCompletionSubmitted());
+    second.resetBatchSize(1);  // Same request geometry is not a new lifecycle.
+    EXPECT_EQ(second.decodeCompletionLifecycle().eosAt(), eos);
+    second.clearBlocks();
+    EXPECT_FALSE(second.decodeCompletionLifecycle().eosAt());
+    EXPECT_FALSE(second.decodeCompletionSubmitted());
+    EXPECT_TRUE(second.decodeCompletionLifecycle().recordFirstBudgetSkip());
+}
+
 TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     BatchKVCacheResource batch;
     batch.resetBatchSize(2);

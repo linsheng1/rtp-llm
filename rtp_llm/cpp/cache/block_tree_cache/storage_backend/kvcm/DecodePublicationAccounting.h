@@ -35,7 +35,8 @@ private:
     enum class State { RESERVED, QUEUED, RUNNING, QUARANTINED };
     struct Entry {
         size_t bytes;
-        Clock::time_point admitted_at, eos_at;
+        Clock::time_point admitted_at;
+        std::optional<Clock::time_point> eos_at;
         State state{State::RESERVED};
         bool outcome_recorded{false};
     };
@@ -65,7 +66,8 @@ public:
         byte_limit_(byte_limit), job_limit_(job_limit), snapshots_(std::move(snapshots)), events_(std::move(events)) {}
     ~DecodePublicationAccounting() { stopSampling(); }
 
-    std::shared_ptr<Lease> tryAcquire(size_t bytes, Clock::time_point eos_at, Clock::time_point now = Clock::now()) {
+    std::shared_ptr<Lease> tryAcquire(size_t bytes, std::optional<Clock::time_point> eos_at,
+                                      Clock::time_point now = Clock::now()) {
         std::lock_guard<std::mutex> guard(mutex_);
         if (bytes > byte_limit_ || bytes_ > byte_limit_ - bytes || entries_.size() >= job_limit_
             || next_id_ == std::numeric_limits<uint64_t>::max())
@@ -153,9 +155,9 @@ private:
             if (it == entries_.end() || it->second.outcome_recorded)
                 return;
             it->second.outcome_recorded = true;
-            if (acknowledged)
+            if (acknowledged && it->second.eos_at)
                 latency = std::max<int64_t>(0, std::chrono::duration_cast<std::chrono::microseconds>(
-                    Clock::now() - it->second.eos_at).count());
+                    Clock::now() - *it->second.eos_at).count());
         }
         if (events_) {
             try { events_(outcome, latency); } catch (...) {}
