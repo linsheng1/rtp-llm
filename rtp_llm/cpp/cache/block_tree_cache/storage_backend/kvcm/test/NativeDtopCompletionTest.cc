@@ -35,8 +35,9 @@ TEST(ClientFactoryFeatureBoundaryTest, DisabledAndUnsetDelegateConfigurationErro
     };
     for (bool unset : {false, true}) {
         autil::EnvGuard off("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
-        if (unset)
+        if (unset) {
             ASSERT_EQ(unsetenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH"), 0);
+        }
         EXPECT_EQ(observe([&] { return factory.createTransferClient(config, params); }),
                   observe([&] { return TransferClient::Create(config, params); })) << unset;
         EXPECT_EQ(observe([&] { return factory.createTransferClientWithMemory(config, params, registrations); }),
