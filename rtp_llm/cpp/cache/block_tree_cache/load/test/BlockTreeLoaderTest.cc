@@ -100,8 +100,9 @@ TEST(BlockTreeLoaderTest, DeviceHotOriginsRequirePhysicalRequiredMemberConsensus
             auto result = environment->cache->match(environment->keys);
             ASSERT_EQ(result.matched_device_blocks, 1u);  // payload reuse remains usable
             EXPECT_EQ(static_cast<bool>(result.matched_device_decode_sources), enabled && consensus);
-            if (result.matched_device_decode_sources)
+            if (result.matched_device_decode_sources) {
                 EXPECT_EQ(countDecodeReuse(*result.matched_device_decode_sources, unit).total(), unit);
+            }
             for (const auto& resource : result.matched_device_resources)
                 environment->groups[resource.group_set_id]->unreferenceBlocks(resource);
         }
