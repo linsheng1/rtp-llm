@@ -3,6 +3,7 @@
 #include <array>
 #include <csignal>
 #include <cstdint>
+#include <stdexcept>
 #include <unistd.h>
 
 #include "kmonitor/client/MetricsReporter.h"
@@ -13,6 +14,7 @@
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DecodePublicationAccounting.h"
 
 namespace rtp_llm {
 namespace {
@@ -575,6 +577,61 @@ TEST(KVCMLocalTest, CallerBufferSafetyDoesNotProveRemoteAllocationQuiescence) {
             ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
             EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), unknown);
         }
+    }
+}
+
+TEST(KVCMLocalTest, CommitAckFailureIsUnknownPublicationWithoutUnknownDma) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    for (const bool throws : {false, true}) {
+        auto environment = makeBackendEnvironment("kvcm_commit_ack_failure");
+        auto client      = std::make_shared<MockClientWrapper>();
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        auto backend = makeCompletionProofBackend(environment, client);
+        ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+        kv_cache_manager::WriteLocation allocation;
+        allocation.write_session_id = "pending-session";
+        allocation.block_mask       = kv_cache_manager::BlockMaskOffset{0};
+        allocation.locations        = {{{"tp0_Fdefault", "write_uri"}}};
+        EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0)).WillOnce(Return(std::make_pair(true, allocation)));
+        // Exactly one attempted commit; no second mask-zero abort.
+        EXPECT_CALL(*client, finishWrite(_, _, "pending-session", _, _))
+            .WillOnce(Invoke([throws](const auto&, const auto&, const auto&, const auto&, const auto&) -> bool {
+                if (throws)
+                    throw std::runtime_error("lost commit acknowledgement");
+                return false;
+            }));
+        client->save_status = kv_cache_manager::ClientErrorCode::ER_OK;
+        std::mutex               events_mutex;
+        std::vector<std::string> outcomes;
+        auto                     accounting = std::make_shared<kvcm::DecodePublicationAccounting>(
+            1024,
+            1,
+            kvcm::DecodePublicationAccounting::SnapshotObserver{},
+            [&](const char* outcome, std::optional<int64_t> latency) {
+                std::lock_guard<std::mutex> lock(events_mutex);
+                outcomes.emplace_back(outcome);
+                EXPECT_FALSE(latency.has_value());
+            });
+        auto request                 = makeStorageRequest(environment);
+        request.completion_admission = accounting->tryAcquire(128, kvcm::DecodePublicationAccounting::Clock::now());
+        ASSERT_TRUE(request.completion_admission);
+        const auto refs_before = environment.device_pool->refCount(environment.block_id);
+        auto       task        = backend.backend->prepareWrite(std::move(request));
+        ASSERT_TRUE(static_cast<bool>(task));
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), refs_before + 1);
+        ASSERT_TRUE(backend.backend->write(std::move(task)));
+        ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+        EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+        EXPECT_EQ(accounting->snapshot().quarantined, 0u);
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), refs_before);
+        // Join the worker before inspecting ownership of its retired closure.
+        backend.backend->shutdown();
+        EXPECT_EQ(accounting->snapshot().bytes, 0u);
+        EXPECT_EQ(accounting->snapshot().jobs, 0u);
+        std::lock_guard<std::mutex> lock(events_mutex);
+        EXPECT_EQ(outcomes, std::vector<std::string>{"completion_unknown"});
     }
 }
 
