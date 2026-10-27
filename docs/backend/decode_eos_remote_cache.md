@@ -152,7 +152,7 @@ individual objects belong in logs/timeline, never metric labels.
 
 | Category | Required interpretation and implementation status |
 | --- | --- |
-| D new logical tokens | The accompanying Manager reports whole-session completed publication; RTP reports `rtp_llm_decode_cache_logical_tokens_qps{stage=restored,used;tier=DEVICE,HOST,DISK,REMOTE}`. See the boundaries below. Final native/model qualification is pending. |
+| D new logical tokens | The accompanying Manager reports `manager.completed_decode_publish_tokens_qps` for whole-session completed publication; RTP reports `rtp_llm_decode_cache_logical_tokens_qps{stage=restored,used;tier=DEVICE,HOST,DISK,REMOTE}`. See the boundaries below. Final native/model qualification is pending. |
 | KV payload bytes | `rtp_llm_remote_completed_payload_bytes_qps{mode=read,write}` counts IOV bytes of successful SDK chunks, including scale/state and actual CP copies. Unknown completion is separate. |
 | P restore latency | `rtp_llm_remote_restore_latency_bucket_qps` and `latency_sum_us_qps`, with separate checkpoint, GPU-completion and CPU-observation modes. The complete path's native and all-CP timeline qualification is pending. |
 | EOS to publication | `rtp_llm_decode_publish_eos_latency_bucket_qps` and `eos_latency_sum_us_qps`, from first real GenerateDone through confirmed FinishWrite, including delayed planning, fence and queue. |
@@ -242,6 +242,11 @@ recomputation and asynchronous overwrite invalidate the affected assertion.
 Legacy, inconsistent or stale origins remain usable as generic cache payload
 without being labeled Decode-generated. They never acquire attribution from a
 canonical-key side map.
+Generic nonidentity beam/fork copies lose attribution unless another validated
+load establishes it. The same subsequent forward can modify their terminal
+state/SWA, so its fence cannot justify restoring the old source assertion.
+The supported single-beam, independent-request path retains same-allocation
+and successful tier-transfer provenance.
 
 An unmodified Manager ignores FinishWrite.locations, including submitted origin
 markers. Accurate D-origin counters require the accompanying origin-aware
@@ -265,9 +270,11 @@ window totals by integrating those rates rather than applying a second counter
 rate. Payload bytes per second divided by `2^20` gives MiB/s. Keep restore modes
 separate when computing bucket quantiles. Sum pending bytes/jobs across D
 processes and take the maximum oldest age; divide microseconds by `1e6` for
-seconds. The Manager publication export must use its rate registration path,
-not a per-query gauge average. Its final exported name and dashboard query are
-still part of the dependency validation.
+seconds. The Manager publication QPS export consumes only its request-local
+delta, while its registry/Prometheus counter remains cumulative. Do not feed a
+shared cumulative value into QPS aggregation or treat a per-query gauge average
+as token throughput. Exporter and dashboard qualification on the final real
+dependency remain pending.
 
 ## Delivery gates
 
