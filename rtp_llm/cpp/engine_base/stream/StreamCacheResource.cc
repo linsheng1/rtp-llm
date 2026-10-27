@@ -211,6 +211,14 @@ absl::Status StreamCacheResource::initKVBlock() {
     malloc_info.enable_remove_skipped_blocks = false;
     malloc_info.enable_storage_backend       = !skip_remote_cache_;
 
+    // The allocator performs lookup and page preparation before backend.read.
+    // Keep an attempt-local steady timestamp; report only after a real remote
+    // read succeeds and the resulting GPU pages are adopted below.
+    remote_restore_attempt_started_at_.reset();
+    if (resource_context_.role_type == RoleType::PREFILL && remoteCacheDecodePublicationEnabled()
+        && malloc_info.enable_storage_backend && malloc_info.enable_cache_lookup) {
+        remote_restore_attempt_started_at_ = RemoteRestoreTiming::Clock::now();
+    }
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
     recordCacheReuseMallocResult(result);
     if (!result.success) {
@@ -241,6 +249,7 @@ absl::Status StreamCacheResource::initKVBlock() {
 
 void StreamCacheResource::clearCacheReuseState() {
     remote_restore_lifecycle_.reset();
+    remote_restore_attempt_started_at_.reset();
     stream_->setReuseLength(0);
     stream_->setMtpTokenIndex(0);
     stream_->setInitialReuseLength(0);
@@ -321,8 +330,11 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
         if (resource_context_.role_type == RoleType::PREFILL && stream_->metrics_reporter_
             && stream_->remoteReuseLength() > 0) {
             const auto timing = load_context->remoteRestoreTiming();
-            if (timing && remote_restore_lifecycle_.adopt(*timing)) {
+            if (timing && remote_restore_attempt_started_at_
+                && remote_restore_lifecycle_.adopt(*timing, remote_restore_attempt_started_at_)) {
                 reportRemoteRestoreLatency("checkpoint_gpu_ready", *remote_restore_lifecycle_.checkpointReadyUs());
+                reportRemoteRestoreLatency("read_to_checkpoint_gpu_ready",
+                                           *remote_restore_lifecycle_.readToCheckpointUs());
             }
         }
     } else if (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
@@ -402,8 +414,9 @@ void StreamCacheResource::reportRemoteContextReady() {
     }
     // The existing context forward can fuse historical tail with new prompt or
     // tool tokens. No source/tail identity is available here yet, so do not call
-    // this tail-only restore, actual D-token use or TTFT.
-    reportRemoteRestoreLatency("fused_context_ready", *latency);
+    // this tail-only restore, actual D-token use or TTFT. Root updateOutput is
+    // only a CPU observation: it is not proof of all-rank GPU tail completion.
+    reportRemoteRestoreLatency("root_context_update_observed", *latency);
 }
 
 void StreamCacheResource::reportRemoteRestoreLatency(const char* mode, int64_t latency_us) {

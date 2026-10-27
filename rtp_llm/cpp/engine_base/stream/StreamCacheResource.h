@@ -161,6 +161,7 @@ private:
     int64_t                          malloc_begin_time_us_    = 0;
     int64_t                          load_wait_begin_time_us_ = 0;
     RemoteRestoreLifecycle           remote_restore_lifecycle_;
+    std::optional<RemoteRestoreTiming::Clock::time_point> remote_restore_attempt_started_at_;
 
     // Physical block pins held for PD separation.
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;
