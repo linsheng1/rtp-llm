@@ -34,6 +34,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/GroupPolicy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DecodePublicationAccounting.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DtopOriginMetadata.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -618,7 +619,22 @@ public:
                     }
                 }
             }
-            const auto& actual_locations = has_actual_uri ? write_location.locations : empty_locations;
+            std::optional<kvcm::DtopOriginMetadata> source_metadata;
+            if (request.decode_completion && request.prefill_computed_tokens) {
+                try {
+                    source_metadata = kvcm::makeDtopOriginMetadata(
+                        write_location.locations, write_location.write_session_id, key_indices,
+                        static_cast<size_t>(cache_config_.seq_size_per_block) * target_physical_shards_,
+                        request.published_tokens, request.computed_tokens, *request.prefill_computed_tokens);
+                } catch (const std::bad_alloc&) {
+                    // Source attribution is optional metadata. A completed GPU
+                    // payload must not fail because its source could not be stored.
+                }
+                if (!source_metadata)
+                    RTP_LLM_LOG_WARNING("DTOP source metadata unavailable; retaining ordinary payload publication");
+            }
+            const auto& actual_locations = source_metadata ? source_metadata->locations :
+                                           has_actual_uri ? write_location.locations : empty_locations;
             finish_attempted             = true;
             {
                 const auto                             stage_start = Clock::now();
@@ -638,6 +654,11 @@ public:
                     request.completion_admission))
                 lease->recordOutcome("committed", /*acknowledged=*/true);
             if (request.decode_completion) {
+                // An older Manager ignores actual_locations. An ACK proves the
+                // data transaction, not persistence of this source assertion;
+                // do not turn origin_requested into confirmed D-token metrics.
+                RTP_LLM_LOG_INFO("DTOP_GPU source origin_requested=%d origin_persistence=unconfirmed",
+                                 source_metadata.has_value());
                 RTP_LLM_LOG_INFO(
                     "DTOP_FILE committed computed_end=%zu canonical_keys=%zu new_locations=%zu bytes=%zu dp_rank=%ld",
                     request.published_tokens,

@@ -19,6 +19,16 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
+cc_library(
+    name = "dtop_origin_metadata",
+    hdrs = ["DtopOriginMetadata.h"],
+    deps = [
+        "//3rdparty/remote_kv_cache_manager:remote_kv_cache_manager_client_headers",
+        "//rtp_llm/cpp/utils:decode_cache_origin",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 config_setting(
     name = "RECO_INTERNAL",
     values = {"copt": "-DRECO_INTERNAL=1"},
@@ -33,6 +43,7 @@ cc_library(
     deps = [
         ":client",
         ":decode_publication_accounting",
+        ":dtop_origin_metadata",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:cp_slot_mapper",
         ":group_policy",
@@ -41,6 +52,7 @@ cc_library(
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:decode_cache_origin",
         "//rtp_llm/models_py/bindings/core:types",
         "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         "@havenask//aios/autil:env_util",

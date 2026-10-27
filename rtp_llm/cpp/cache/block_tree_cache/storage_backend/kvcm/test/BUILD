@@ -1,6 +1,17 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
 
 cc_test(
+    name = "dtop_origin_metadata_test",
+    srcs = ["DtopOriginMetadataTest.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:dtop_origin_metadata",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "sdk_buffer_safety_test",
     srcs = ["SdkBufferSafetyTest.cc"],
     copts = copts(),
