@@ -1331,6 +1331,23 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
+class RtpLLMRemoteRestoreLatencyMetricsCollector final {
+public:
+    const char* mode{"checkpoint_gpu_ready"};
+    int64_t     latency_us{0};
+};
+
+class RtpLLMRemoteRestoreLatencyMetrics: public kmonitor::MetricsGroup {
+public:
+    bool                     init(kmonitor::MetricsGroupManager* manager) override;
+    void                     report(const kmonitor::MetricsTags*, RtpLLMRemoteRestoreLatencyMetricsCollector*);
+    kmonitor::MutableMetric* latency_bucket_qps_metric{nullptr};
+    kmonitor::MutableMetric* latency_sum_us_qps_metric{nullptr};
+
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMRemoteCacheOutcomeMetricsCollector final {
 public:
     const char* stage{"lookup"};

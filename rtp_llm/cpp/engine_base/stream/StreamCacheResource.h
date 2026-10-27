@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/utils/RemoteRestoreLifecycle.h"
 
 namespace rtp_llm {
 
@@ -117,6 +118,10 @@ public:
     bool enableCacheLookup() const;
     Tier storeTarget() const;
     void reportCacheReuseMetrics();
+    bool hasPendingRemoteRestore() const {
+        return remote_restore_lifecycle_.pendingForward();
+    }
+    void reportRemoteContextReady();
 
     void holdKVCacheForPDSep();
     void releaseKVCacheForPDSep();
@@ -138,6 +143,7 @@ private:
     void         publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
     absl::Status finalizeAllocatorLoad();
     void         publishAllocatorReuse(const LoadAsyncContext& context, bool local_only);
+    void         reportRemoteRestoreLatency(const char* mode, int64_t latency_us);
 
     GenerateStream*                stream_;
     BatchKVCacheResourcePtr        batch_kv_cache_resource_;
@@ -154,6 +160,7 @@ private:
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
     int64_t                          malloc_begin_time_us_    = 0;
     int64_t                          load_wait_begin_time_us_ = 0;
+    RemoteRestoreLifecycle           remote_restore_lifecycle_;
 
     // Physical block pins held for PD separation.
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;

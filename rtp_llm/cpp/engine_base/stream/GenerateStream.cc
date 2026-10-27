@@ -1379,6 +1379,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
+    const bool completes_remote_context = stream_cache_resource_->hasPendingRemoteRestore() && isContextStream();
     is_context_stream_->store(false, std::memory_order_release);
     if (reportUpdateErrorWithoutLock(update_info.error_info)) {
         return;
@@ -1458,6 +1459,11 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                   update_info.top_logprobs,
                   old_seq_length,
                   update_info.logprobs_offset});
+
+    if (completes_remote_context && !update_info.force_update_info && !hasErrorWithoutLock()
+        && !hasEventWithoutLock(StreamEvents::Error)) {
+        stream_cache_resource_->reportRemoteContextReady();
+    }
 
     // needFinish(), called by updateOutput(), can trim this packet at EOS/stop
     // words. Advance the cached phase only from tokens that were committed.

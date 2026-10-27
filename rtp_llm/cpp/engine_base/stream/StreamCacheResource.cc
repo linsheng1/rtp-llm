@@ -240,6 +240,7 @@ absl::Status StreamCacheResource::initKVBlock() {
 }
 
 void StreamCacheResource::clearCacheReuseState() {
+    remote_restore_lifecycle_.reset();
     stream_->setReuseLength(0);
     stream_->setMtpTokenIndex(0);
     stream_->setInitialReuseLength(0);
@@ -250,6 +251,7 @@ void StreamCacheResource::clearCacheReuseState() {
 }
 
 void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& result) {
+    remote_restore_lifecycle_.reset();
     cache_reuse_metrics_.device_input_length    = result.device_input_length;
     cache_reuse_metrics_.match_cost_time_us     = result.match_cost_time_us;
     cache_reuse_metrics_.report_match_cost_time = result.match_end_time_us > 0;
@@ -316,6 +318,13 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     if (load_success) {
         RTP_LLM_CHECK(load_context != nullptr);
         publishAllocatorReuse(*load_context, false);
+        if (resource_context_.role_type == RoleType::PREFILL && stream_->metrics_reporter_
+            && stream_->remoteReuseLength() > 0) {
+            const auto timing = load_context->remoteRestoreTiming();
+            if (timing && remote_restore_lifecycle_.adopt(*timing)) {
+                reportRemoteRestoreLatency("checkpoint_gpu_ready", *remote_restore_lifecycle_.checkpointReadyUs());
+            }
+        }
     } else if (resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
         const bool backend_timeout = load_context && load_context->backendTimedOut();
         skip_remote_cache_         = skip_remote_cache_ || backend_timeout;
@@ -384,6 +393,32 @@ void StreamCacheResource::reportCacheReuseMetrics() {
     kmonitor::MetricsTags tags;
     stream_->metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(
         &tags, &cache_reuse_metrics_);
+}
+
+void StreamCacheResource::reportRemoteContextReady() {
+    const auto latency = remote_restore_lifecycle_.completeContextForward();
+    if (!latency || !stream_->metrics_reporter_) {
+        return;
+    }
+    // The existing context forward can fuse historical tail with new prompt or
+    // tool tokens. No source/tail identity is available here yet, so do not call
+    // this tail-only restore, actual D-token use or TTFT.
+    reportRemoteRestoreLatency("fused_context_ready", *latency);
+}
+
+void StreamCacheResource::reportRemoteRestoreLatency(const char* mode, int64_t latency_us) {
+    if (!stream_->metrics_reporter_)
+        return;
+    try {
+        RtpLLMRemoteRestoreLatencyMetricsCollector collector;
+        collector.mode       = mode;
+        collector.latency_us = latency_us;
+        stream_->metrics_reporter_
+            ->report<RtpLLMRemoteRestoreLatencyMetrics, RtpLLMRemoteRestoreLatencyMetricsCollector>(nullptr,
+                                                                                                    &collector);
+    } catch (...) {
+        RTP_LLM_LOG_WARNING("remote restore telemetry failed; inference result is retained");
+    }
 }
 
 std::optional<absl::Status> StreamCacheResource::pollAllocatorLoad() {

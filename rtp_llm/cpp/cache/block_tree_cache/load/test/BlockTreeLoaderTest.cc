@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <gtest/gtest.h>
+#include "autil/EnvUtil.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
@@ -31,6 +32,18 @@ using block_tree_cache_test::insertGroupSetResources;
 using block_tree_cache_test::makeHostPool;
 using block_tree_cache_test::makeStructuralDevicePool;
 using block_tree_cache_test::releaseDeviceBlocks;
+
+TEST(BlockTreeLoaderTest, LocalOnlyCompletionNeverFabricatesRemoteTiming) {
+    for (const bool enabled : {false, true}) {
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        auto            coordinator = std::make_shared<LoadContextCoordinator>(
+            [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, LoadContextCoordinator::AbortCallback{});
+        auto context = coordinator->create({}, {}, 0);
+        ASSERT_TRUE(context->commit());
+        ASSERT_TRUE(context->success());
+        EXPECT_FALSE(context->remoteRestoreTiming().has_value());
+    }
+}
 
 class ReadFailureBackend final: public StorageBackend {
 public:
@@ -62,6 +75,7 @@ TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
+    autil::EnvGuard           feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     FullSWAEnvironmentOptions options;
     options.path_length = 1;
     options.enable_disk = false;
@@ -156,6 +170,8 @@ TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
     backend->shutdown();
     EXPECT_EQ(backend->read_calls.load(), 1u);
     EXPECT_FALSE(context->success());
+    EXPECT_FALSE(context->remoteRestoreTiming().has_value());
+    EXPECT_FALSE(joined->remoteRestoreTiming().has_value());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
     resources = environment->resourcesForPathNode(0);
     EXPECT_TRUE(resources[0].hasTier(Tier::DEVICE));

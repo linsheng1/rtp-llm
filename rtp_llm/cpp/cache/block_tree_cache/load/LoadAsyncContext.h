@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
+#include "rtp_llm/cpp/utils/RemoteRestoreLifecycle.h"
 
 namespace rtp_llm {
 
@@ -87,6 +88,7 @@ public:
     bool         localTransfersSucceeded() const;
     bool         localLoadSucceeded() const;
     bool         backendTimedOut() const;
+    std::optional<RemoteRestoreTiming> remoteRestoreTiming() const;
     bool         settle(bool success);
     bool         onTaskFail();
     void         waitDone() override;
@@ -142,6 +144,9 @@ private:
     ErrorInfo                 backend_error_{ErrorInfo::OkStatus()};
     ErrorInfo                 error_info_{ErrorInfo::OkStatus()};
     bool                      settlement_ready_{false};
+    const bool                                            track_remote_restore_{false};
+    std::optional<RemoteRestoreTiming::Clock::time_point> remote_read_started_at_;
+    std::optional<RemoteRestoreTiming::Clock::time_point> remote_gpu_ready_at_;
     SettlementReadyCallback   settlement_ready_callback_;
     std::vector<DoneCallback> callbacks_;
 

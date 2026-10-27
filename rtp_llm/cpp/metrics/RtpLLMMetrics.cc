@@ -42,6 +42,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCachePayloadMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheQuarantineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMDecodePublicationMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheOutcomeMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteRestoreLatencyMetrics);
 
 bool RtpLLMGrpcConnectFailureMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(connect_failed_qps_metric, "rtp_llm_rank_broadcast_grpc_connect_failed_qps");
@@ -937,6 +938,42 @@ void RtpLLMDecodePublicationMetrics::report(const kmonitor::MetricsTags* tags,
     all_tags.AddTag("le_us", "+Inf");
     eos_latency_bucket_qps_metric->Report(&all_tags, 1);
     eos_latency_sum_us_qps_metric->Report(tags, latency);
+}
+
+bool RtpLLMRemoteRestoreLatencyMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(latency_bucket_qps_metric, "rtp_llm_remote_restore_latency_bucket_qps");
+    REGISTER_QPS_MUTABLE_METRIC(latency_sum_us_qps_metric, "rtp_llm_remote_restore_latency_sum_us_qps");
+    return true;
+}
+
+void RtpLLMRemoteRestoreLatencyMetrics::report(const kmonitor::MetricsTags*                tags,
+                                               RtpLLMRemoteRestoreLatencyMetricsCollector* collector) {
+    kmonitor::MetricsTags mode_tags = tags ? *tags : kmonitor::MetricsTags{};
+    mode_tags.AddTag("mode", collector->mode);
+    static const int64_t bounds[] = {100,
+                                     500,
+                                     1000,
+                                     5000,
+                                     10000,
+                                     20000,
+                                     50000,
+                                     100000,
+                                     250000,
+                                     500000,
+                                     1000000,
+                                     2000000,
+                                     5000000,
+                                     10000000,
+                                     60000000};
+    for (const auto upper : bounds) {
+        auto bucket_tags = mode_tags;
+        bucket_tags.AddTag("le_us", std::to_string(upper));
+        latency_bucket_qps_metric->Report(&bucket_tags, collector->latency_us <= upper ? 1 : 0);
+    }
+    auto all_tags = mode_tags;
+    all_tags.AddTag("le_us", "+Inf");
+    latency_bucket_qps_metric->Report(&all_tags, 1);
+    latency_sum_us_qps_metric->Report(&mode_tags, collector->latency_us);
 }
 
 bool RtpLLMRemoteCacheOutcomeMetrics::init(kmonitor::MetricsGroupManager* manager) {
