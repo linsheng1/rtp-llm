@@ -128,7 +128,7 @@ bool configureDecodePublication(const CacheTopology&                            
     return true;
 }
 
-size_t fileWireBytes(const std::string& tag) const {
+size_t publicationWireBytes(const std::string& tag) const {
     if (!decode_publication_enabled_ || !is_decode_role_ || target_physical_shards_ == 1) {
         return cache_config_.blockSizeBytesForGroup(tag);
     }
@@ -165,7 +165,7 @@ size_t fileWireBytes(const std::string& tag) const {
     return bytes;
 }
 
-std::string fileTag(const std::string& tag, int peer) const {
+std::string publicationPeerTag(const std::string& tag, int peer) const {
     return is_decode_role_ ? tag + "#cp" + std::to_string(peer) : tag;
 }
 
@@ -337,7 +337,7 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
         for (int i = 0; i < remote.block_ids_size(); ++i) {
             const auto& tag   = remote.group_tags(i);
             const int   block = remote.block_ids(i);
-            batch.tags.push_back(fileTag(tag, peer));
+            batch.tags.push_back(publicationPeerTag(tag, peer));
             batch.blocks.push_back(block);
             batch.uris.push_back(remote.uris(i));
             batch.buffers.emplace_back();
@@ -352,7 +352,7 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
                     bytes += part.size_bytes;
                 }
             }
-            RTP_LLM_CHECK_WITH_INFO(bytes == fileWireBytes(tag), "EOS source wire size mismatch tag=%s", tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(bytes == publicationWireBytes(tag), "EOS source wire size mismatch tag=%s", tag.c_str());
         }
     }
     std::vector<FunctionResponsePB> responses(requests.size());

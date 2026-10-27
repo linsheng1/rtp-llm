@@ -162,7 +162,7 @@ public:
             } else {
                 other_group_tags.push_back(group.tag);
             }
-            group_block_size_bytes.emplace(group.tag, fileWireBytes(group.tag));
+            group_block_size_bytes.emplace(group.tag, publicationWireBytes(group.tag));
         }
         if (decode_publication_enabled_ && parallelism_config_.role_type == RoleType::PREFILL
             && parallelism_config_.tp_rank == 0) {
@@ -1312,7 +1312,7 @@ private:
                                                                      static_cast<int>(parallelism_config_.tp_rank),
                     groups.at(group_id).group_name,
                     runtime_config_.model_name);
-                registration_tags.push_back(fileTag(tag, peer));
+                registration_tags.push_back(publicationPeerTag(tag, peer));
                 registrations.push_back(std::move(wire_registration));
             }
         }
