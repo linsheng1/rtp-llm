@@ -481,6 +481,40 @@ TEST(KVCMLocalTest, EnabledReadQuarantinesUnprovenSdkErrorsButNotExplicitSafeRes
     }
 }
 
+TEST(KVCMLocalTest, UnknownWriteDoesNotImmediatelyAbortRemoteAllocationWhileSafeFailureDoes) {
+    autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
+    using EC = kv_cache_manager::ClientErrorCode;
+    for (const bool enabled : {false, true}) {
+        for (const auto ec : {EC::ER_SDKWRITE_ERROR, EC::ER_SDK_ERROR_BUFFER_SAFE}) {
+            autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+            auto environment = makeBackendEnvironment("kvcm_write_completion_proof");
+            auto client = std::make_shared<MockClientWrapper>();
+            EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+            EXPECT_CALL(*client, shutdown()).Times(1);
+            auto backend = makeCompletionProofBackend(environment, client);
+            ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+            kv_cache_manager::WriteLocation allocation;
+            allocation.write_session_id = "pending-session";
+            allocation.block_mask = kv_cache_manager::BlockMaskOffset{0};
+            allocation.locations = {{{"tp0_Fdefault", "write_uri"}}};
+            EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
+                .WillOnce(Return(std::make_pair(true, allocation)));
+            const bool unknown = enabled && ec == EC::ER_SDKWRITE_ERROR;
+            if (unknown) {
+                EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).Times(0);
+            } else {
+                EXPECT_CALL(*client, finishWrite(_, _, "pending-session", _, _)).WillOnce(Return(true));
+            }
+            client->save_status = ec;
+            auto task = backend.backend->prepareWrite(makeStorageRequest(environment));
+            ASSERT_TRUE(static_cast<bool>(task));
+            ASSERT_TRUE(backend.backend->write(std::move(task)));
+            ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+            EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), unknown);
+        }
+    }
+}
+
 TEST(KVCMLocalTest, EnabledReadAndWriteResponsesCarryExplicitCompletionProof) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");

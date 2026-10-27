@@ -655,7 +655,23 @@ public:
                                  transferred_bytes);
             }
         } catch (...) {
-            if (!finish_attempted) {
+            bool unknown_transfer = false;
+            if (decode_publication_enabled_) {
+                try {
+                    throw;
+                } catch (const StorageOperationCompletionUnknown&) {
+                    unknown_transfer = true;
+                } catch (...) {
+                }
+            }
+            if (unknown_transfer) {
+                // Do not immediately recycle remote allocations while an
+                // unproven SDK operation may still reference them. Keep the
+                // original Manager WRITING lease; SDK drain/lease lifetime is
+                // a separate contract, not proof supplied by a failed RPC.
+                RTP_LLM_LOG_WARNING("KVCM write completion unknown; retaining pending session [%s] without abort",
+                                    write_location.write_session_id.c_str());
+            } else if (!finish_attempted) {
                 const auto                             stage_start = Clock::now();
                 block_tree_cache_detail::ScopeRollback timer(
                     [&] { collector.remote_finish_write_time_us += elapsedTimeUs(stage_start); });
