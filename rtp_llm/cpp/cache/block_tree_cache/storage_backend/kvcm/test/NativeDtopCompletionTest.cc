@@ -746,6 +746,41 @@ TEST_P(EosGpuCompletionTest, MissingStateBacksOffWithoutRelabeling) {
     EXPECT_EQ(s.finishes, 1);
     EXPECT_EQ(s.aborts, 0);
 }
+TEST_P(EosGpuCompletionTest, KnownPrefillBoundarySkipsCheckpointWithoutNewDecodeKv) {
+    for (const bool checkpoint_backoff : {false, true}) {
+        SCOPED_TRACE(checkpoint_backoff);
+        Scenario     s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
+        const size_t unit    = 128 * s.shards;
+        const size_t handoff = checkpoint_backoff ? s.end() - unit : s.end();
+        ASSERT_TRUE(s.resource.decodeCompletionLifecycle().recordPrefillComputedEnd(handoff));
+        if (checkpoint_backoff) {
+            auto state = s.state;
+            state[2]   = NULL_BLOCK_IDX;
+            s.resource.setBatchBlocks(0, "state", state);
+        }
+        // D has computed a tail beyond P. In the second case the newest full
+        // boundary lacks its state page, so only P's older checkpoint is valid.
+        ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end() + 17, true));
+        ASSERT_TRUE(waitForBackendOperationsForTest(*s.backend));
+        EXPECT_EQ(s.starts, 0);
+        EXPECT_EQ(s.saves, 0);
+        EXPECT_EQ(s.finishes, 0);
+        EXPECT_EQ(s.aborts, 0);
+        EXPECT_FALSE(s.resource.decodeCompletionSubmitted());
+        for (const auto& [tag, pool] : s.env.pools_by_tag) {
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u) << tag;
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u) << tag;
+        }
+        s.dropRequestRefs();
+        for (const auto block : s.full) {
+            EXPECT_FALSE(s.env.pools_by_tag.at("full")->isAllocated(block));
+        }
+        for (const auto block : s.state) {
+            EXPECT_FALSE(s.env.pools_by_tag.at("state")->isAllocated(block));
+        }
+    }
+}
+
 TEST_P(EosGpuCompletionTest, UnknownSdkCompletionFreezesPagesAndKeepsAdmissionCharged) {
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
     s.fail_save = true;

@@ -234,6 +234,17 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
         RTP_LLM_LOG_INFO("DTOP_GPU no_complete_checkpoint computed=%zu", computed_end);
         return request;
     }
+    if (const auto& handoff = lifecycle.prefillComputedEnd(); handoff && *handoff >= 0
+                                                              && static_cast<uint64_t>(*handoff) <= computed_end
+                                                              && end <= static_cast<uint64_t>(*handoff)) {
+        // A partial D tail (or checkpoint backoff) did not add a complete
+        // checkpoint beyond P's explicit computed span. Skip optional work
+        // before copying keys, charging/holding pages or fencing the device.
+        // Legacy/unknown source metadata must retain the compatible path.
+        RTP_LLM_LOG_DEBUG(
+            "DTOP_GPU no_new_checkpoint computed=%zu published=%zu prefill=%ld", computed_end, end, *handoff);
+        return request;
+    }
     CacheKeysType complete_keys(source_keys.begin(), source_keys.begin() + end / base);
     request.keys = std::make_shared<const CacheKeysType>(mapper.canonicalCacheKeys(complete_keys));
     request.handles.resize(request.keys->size());
