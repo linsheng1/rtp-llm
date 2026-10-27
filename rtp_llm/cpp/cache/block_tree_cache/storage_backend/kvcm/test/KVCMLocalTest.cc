@@ -194,7 +194,7 @@ TEST(KVCMLocalTest, DisabledPublicationIgnoresDecodeOnlyBackendAndBudgetRestrict
     config.kvcm_model_sdk_config = R"([{"type":"pace_ssd"}])";
     // Deliberately outside the new Decode SSD/GDR pairing restrictions: off
     // must delegate the ordinary configuration to its original SDK path.
-    config.kvcm_read_backend_type = 1;
+    config.kvcm_read_backend_type = 0;
     RuntimeConfig runtime;
     runtime.model_name = "kvcm_disabled_decode";
     BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config,
