@@ -82,7 +82,7 @@ TEST(KVCMConfigTest, RoundTripsSsdThroughCompleteModelClientConfig) {
     KVCMConfig config(false,
                       "",
                       128,
-                      "linshuo_decode_remote_test",
+                      "decode_remote_test",
                       "fixture",
                       {"127.0.0.1:1"},
                       infos,

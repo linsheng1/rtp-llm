@@ -631,7 +631,7 @@ protected:
                     }));
             KVCacheConfig k;
             k.kvcm_server_address   = "unused";
-            k.kvcm_instance_group   = "linshuo_decode_remote_eos_gpu_test";
+            k.kvcm_instance_group   = "decode_remote_eos_gpu_test";
             k.kvcm_instance_id_salt = "eos_native_gpu";
             k.kvcm_model_sdk_config = "[{\"type\":\"pace\"}]";
             if (native_ssd_gdr) {
