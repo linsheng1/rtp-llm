@@ -753,7 +753,9 @@ TEST_P(EosGpuCompletionTest, UnknownSdkCompletionFreezesPagesAndKeepsAdmissionCh
     ASSERT_TRUE(waitForBackendOperationsForTest(*s.backend));
     s.dropRequestRefs();
     EXPECT_EQ(s.finishes, 0);
-    EXPECT_EQ(s.aborts, 1);
+    // Unknown DMA completion must retain the remote WRITING session as well as
+    // local GPU pages. An immediate abort could recycle its destination.
+    EXPECT_EQ(s.aborts, 0);
     for (int i = 0; i < s.count * s.shards; ++i)
         EXPECT_TRUE(s.env.pools_by_tag.at("full")->isAllocated(s.full[i]));
     EXPECT_GT(s.env.pools_by_tag.at("full")->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
