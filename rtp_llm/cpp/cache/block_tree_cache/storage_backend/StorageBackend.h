@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/DecodeReuseSources.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageCompletionAdmission.h"
@@ -35,6 +36,9 @@ struct StorageBlockHandle {
 
 struct StorageBackendMatchMeta {
     virtual ~StorageBackendMatchMeta() = default;
+    // Written only after a successful aggregate GPU read; the completion
+    // callback publishes it to the owning load context. No KV payload here.
+    DecodeReuseSourcesPtr decode_sources;
 };
 
 enum class StorageQuarantineReason {

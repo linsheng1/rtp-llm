@@ -555,6 +555,15 @@ public:
         // provenance only after every required rank has completed its actual
         // GPU read. A stale bind can never clear a newer allocation's source.
         size_t bound_regions = 0;
+        std::shared_ptr<DecodeReuseSources> restored_sources;
+        if (track_origins && collect_bindings) {
+            try {
+                restored_sources = std::make_shared<DecodeReuseSources>();
+                restored_sources->reserve(remote_blocks);
+            } catch (const std::bad_alloc&) {
+                restored_sources.reset();
+            }
+        }
         for (size_t begin = 0; begin < origin_bindings.size();) {
             size_t end = begin + 1;
             while (end < origin_bindings.size() && origin_bindings[end].key == origin_bindings[begin].key)
@@ -571,9 +580,13 @@ public:
                 }
             } else {
                 bound_regions += end - begin;
+                if (restored_sources)
+                    restored_sources->push_back({origin_bindings[begin].origin, Tier::REMOTE});
             }
             begin = end;
         }
+        meta->decode_sources = restored_sources && !restored_sources->empty()
+                                   ? std::move(restored_sources) : DecodeReuseSourcesPtr{};
         if (track_origins) {
             RtpLLMRemoteCacheOutcomeMetricsCollector source_result;
             source_result.stage = "read_source";

@@ -476,7 +476,13 @@ TEST(KVCMLocalTest, SuccessfulReadBindsItsRequiredSourceButLegacyOverwriteClears
                 EXPECT_FALSE(environment.device_pool->decodeOrigin(environment.block_id, "default"));
                 return true;
             }));
+        auto source_meta = observation.match_meta;
         EXPECT_TRUE(read(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta)));
+        EXPECT_EQ(static_cast<bool>(source_meta->decode_sources), known_source);
+        if (known_source) {
+            ASSERT_TRUE(source_meta->decode_sources);
+            EXPECT_EQ(countDecodeReuse(*source_meta->decode_sources, 8).total(), 4);
+        }
         const auto bound = environment.device_pool->decodeOrigin(environment.block_id, "default");
         if (known_source) {
             ASSERT_TRUE(bound);

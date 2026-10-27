@@ -191,14 +191,16 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
             remote_read_started_at_ = RemoteRestoreTiming::Clock::now();
         }
     }
-    storage_backend_->read(std::move(storage_request_), std::move(match_meta), [weak](ErrorInfo error) {
+    auto source_meta = track_remote_restore_ ? match_meta : nullptr;
+    storage_backend_->read(std::move(storage_request_), std::move(match_meta), [weak, source_meta](ErrorInfo error) {
         if (auto context = weak.lock()) {
-            context->onBackendRead(std::move(error));
+            auto sources = error.ok() && source_meta ? source_meta->decode_sources : DecodeReuseSourcesPtr{};
+            context->onBackendRead(std::move(error), std::move(sources));
         }
     });
 }
 
-void LoadAsyncContext::onBackendRead(ErrorInfo error) {
+void LoadAsyncContext::onBackendRead(ErrorInfo error, DecodeReuseSourcesPtr sources) {
     bool                    notify = false;
     SettlementReadyCallback settlement_ready_callback;
     {
@@ -208,6 +210,7 @@ void LoadAsyncContext::onBackendRead(ErrorInfo error) {
         }
         if (error.ok()) {
             matched_blocks_ = backend_matched_blocks_;
+            remote_decode_sources_ = std::move(sources);
         } else {
             backend_error_ = error;
             error_info_  = std::move(error);
@@ -216,6 +219,24 @@ void LoadAsyncContext::onBackendRead(ErrorInfo error) {
         finishIfReadyLocked(notify, settlement_ready_callback);
     }
     dispatchCompletion(notify, std::move(settlement_ready_callback));
+}
+
+void LoadAsyncContext::setLocalDecodeSources(DecodeReuseSourcesPtr sources) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    local_decode_sources_ = std::move(sources);
+}
+
+DecodeReuseSourcesPtr LoadAsyncContext::decodeSources(bool local_only) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (state_.load() == State::PENDING || !local_load_succeeded_)
+        return {};
+    if (local_only || state_.load() != State::SUCCEEDED || !remote_decode_sources_)
+        return local_decode_sources_;
+    if (!local_decode_sources_)
+        return remote_decode_sources_;
+    auto result = std::make_shared<DecodeReuseSources>(*local_decode_sources_);
+    result->insert(result->end(), remote_decode_sources_->begin(), remote_decode_sources_->end());
+    return result;
 }
 
 void LoadAsyncContext::failBeforeCommit() {

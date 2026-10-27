@@ -484,6 +484,7 @@ CoordinatorCacheManager::prepareKVCache(const CacheKeysType&                 cac
     BlockTreeMatchResult match_result =
         block_tree_cache_->match(cache_keys, valid_prefix, enable_storage_backend, request_id);
     std::shared_ptr<LoadAsyncContext> load_context = std::move(match_result.async_context);
+    prepared.decode_sources = std::move(match_result.matched_device_decode_sources);
     prepared.matched_device_blocks                 = match_result.matched_device_blocks;
     prepared.total_logical_blocks =
         load_context ? load_context->localMatchedBlocks() : match_result.matched_device_blocks;
@@ -609,6 +610,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
                             load_context};
         result.match_end_time_us = match_end_time_us;
         result.load_attempted    = load_attempted;
+        result.decode_sources = deferred_prepared->decode_sources;
         return result;
     }
 
@@ -619,6 +621,7 @@ MallocResult CoordinatorCacheManager::initMallocForCommonLen(const MallocInfo& m
         true, static_cast<int>(prepared.matched_device_blocks) * reuse_unit_tokens, match_cost_time_us, load_context};
     result.match_end_time_us = match_end_time_us;
     result.load_attempted    = load_attempted;
+    result.decode_sources = std::move(prepared.decode_sources);
     return result;
 }
 
