@@ -328,8 +328,13 @@ TEST_F(NativeSsdGpuReadWindowTest, WorkerExceptionDrainsEveryPeerAndQuarantinesW
             completed.fetch_add(1);return kv_cache_manager::ER_OK;
         }));
     Client client(std::move(delegate),copy,context,[device] { return cudaSetDevice(device)==cudaSuccess; });
+    std::atomic<size_t> confirmed{0}, unknown{0}, observations{0};
+    client.setSdkTransferObserver([&](bool read, size_t bytes, bool uncertain) {
+        EXPECT_TRUE(read);confirmed.fetch_add(bytes);unknown.fetch_add(uncertain);observations.fetch_add(1);
+    });
     auto b=destinations({4096,4096,4096,4096});
     EXPECT_THROW(client.LoadKvCaches({"0","1","2","3"},b),std::runtime_error);
+    EXPECT_EQ(confirmed.load(),3u*4096);EXPECT_EQ(unknown.load(),1u);EXPECT_EQ(observations.load(),4u);
     EXPECT_EQ(completed.load(),3);EXPECT_EQ(context->active_reservations,1u);
     EXPECT_EQ(client.LoadKvCaches({"0","1","2","3"},b),kv_cache_manager::ER_INVALID_LOCAL_BUFFERS);
     unsigned char byte=1;ASSERT_EQ(cudaMemcpy(&byte,output.get(),1,cudaMemcpyDeviceToHost),cudaSuccess);
@@ -395,14 +400,105 @@ TEST_F(NativeSsdGpuReadWindowTest, DeviceInitializationFailureProtectsTheEntireW
     EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(0);
     std::atomic<int> initialized{0};
     Client client(std::move(delegate), copy, context, [&] { ++initialized; return false; });
+    std::atomic<int> observed{0};
+    client.setSdkTransferObserver([&](bool, size_t, bool) { ++observed; });
     auto buffers = destinations({4096, 4096, 4096, 4096});
     EXPECT_EQ(client.LoadKvCaches({"0", "1", "2", "3"}, buffers), kv_cache_manager::ER_CUDAMEMCPY_ERROR);
     EXPECT_EQ(initialized.load(), 4);
+    EXPECT_EQ(observed.load(), 0);
     EXPECT_EQ(context->active_reservations, 1u);
     EXPECT_EQ(client.LoadKvCaches({"0", "1", "2", "3"}, buffers), kv_cache_manager::ER_INVALID_LOCAL_BUFFERS);
     unsigned char byte = 1;
     ASSERT_EQ(cudaMemcpy(&byte, output.get(), 1, cudaMemcpyDeviceToHost), cudaSuccess);
     EXPECT_EQ(byte, 0);
+}
+TEST_F(NativeSsdGpuReadWindowTest, SaveObserverKeepsConfirmedPrefixBeforeSdkFailure) {
+    using namespace kv_cache_manager;
+    auto delegate=std::make_unique<MockTransferClient>(destroyed);
+    EXPECT_CALL(*delegate,SaveKvCaches(_,_,_)).Times(2).WillRepeatedly(Invoke(
+        [](const Uris& uris,const Buffers&,auto) {
+            return std::make_pair(uris[0]=="first"?ER_OK:ER_SDK_TIMEOUT,uris);
+        }));
+    Client client(std::move(delegate),copy,context);
+    std::vector<std::tuple<bool,size_t,bool>> seen;
+    client.setSdkTransferObserver([&](bool read,size_t bytes,bool unknown) { seen.emplace_back(read,bytes,unknown); });
+    EXPECT_EQ(client.SaveKvCaches({"first","failed","not-issued"},destinations({17,33,65})).first,ER_SDK_TIMEOUT);
+    ASSERT_EQ(seen.size(),2u);
+    EXPECT_EQ(seen[0],std::make_tuple(false,size_t(17),false));
+    EXPECT_EQ(seen[1],std::make_tuple(false,size_t(0),true));
+    EXPECT_EQ(context->active_reservations,1u);
+}
+TEST_F(NativeSsdGpuReadWindowTest, PreSdkGeometryAndGatherRejectionsDoNotReportUnknownIo) {
+    using namespace kv_cache_manager;
+    auto delegate=std::make_unique<MockTransferClient>(destroyed);
+    EXPECT_CALL(*delegate,SaveKvCaches(_,_,_)).Times(0);
+    Client client(std::move(delegate),[](void*,M,const void*,M,size_t) { return false; },context);
+    int observed=0;
+    client.setSdkTransferObserver([&](bool,size_t,bool) { ++observed; });
+    EXPECT_EQ(client.SaveKvCaches({"invalid"},destinations({0})).first,ER_INVALID_LOCAL_BUFFERS);
+    EXPECT_EQ(context->active_reservations,0u);
+    EXPECT_EQ(client.SaveKvCaches({"gather-fails"},destinations({17})).first,ER_CUDAMEMCPY_ERROR);
+    EXPECT_EQ(observed,0);
+    EXPECT_EQ(context->active_reservations,1u);
+}
+TEST_F(NativeSsdGpuReadWindowTest, SdkReadSuccessRemainsConfirmedAfterScatterFailure) {
+    using namespace kv_cache_manager;
+    auto delegate=std::make_unique<MockTransferClient>(destroyed);
+    EXPECT_CALL(*delegate,LoadKvCaches(_,_,_)).WillOnce(Return(ER_OK));
+    Client client(std::move(delegate),[](void*,M,const void*,M,size_t) { return false; },context);
+    std::vector<std::tuple<bool,size_t,bool>> seen;
+    client.setSdkTransferObserver([&](bool read,size_t bytes,bool unknown) { seen.emplace_back(read,bytes,unknown); });
+    EXPECT_EQ(client.LoadKvCaches({"scatter-fails"},destinations({17})),ER_CUDAMEMCPY_ERROR);
+    ASSERT_EQ(seen.size(),1u);
+    EXPECT_EQ(seen[0],std::make_tuple(true,size_t(17),false));
+    EXPECT_EQ(context->active_reservations,1u);
+}
+TEST_F(NativeSsdGpuReadWindowTest, SdkWriteSuccessRemainsConfirmedAfterActualUriShapeFailure) {
+    using namespace kv_cache_manager;
+    auto delegate=std::make_unique<MockTransferClient>(destroyed);
+    EXPECT_CALL(*delegate,SaveKvCaches(_,_,_)).WillOnce(Return(std::make_pair(ER_OK,Uris{"wrong","count"})));
+    Client client(std::move(delegate),copy,context);
+    std::vector<std::tuple<bool,size_t,bool>> seen;
+    client.setSdkTransferObserver([&](bool read,size_t bytes,bool unknown) { seen.emplace_back(read,bytes,unknown); });
+    EXPECT_EQ(client.SaveKvCaches({"one"},destinations({17})).first,ER_INVALID_PARAMS);
+    ASSERT_EQ(seen.size(),1u);
+    EXPECT_EQ(seen[0],std::make_tuple(false,size_t(17),false));
+}
+TEST_F(NativeSsdGpuReadWindowTest, ObserverExceptionsPreserveSdkSuccessAndFailureResults) {
+    using namespace kv_cache_manager;
+    auto delegate=std::make_unique<MockTransferClient>(destroyed);
+    EXPECT_CALL(*delegate,LoadKvCaches(_,_,_)).WillOnce(Return(ER_OK)).WillOnce(Return(ER_SDK_TIMEOUT));
+    Client client(std::move(delegate),copy,context);
+    std::vector<std::tuple<bool,size_t,bool>> seen;
+    client.setSdkTransferObserver([&](bool read,size_t bytes,bool unknown) {
+        seen.emplace_back(read,bytes,unknown);throw std::logic_error("observer-failure");
+    });
+    EXPECT_EQ(client.LoadKvCaches({"success"},destinations({17})),ER_OK);
+    EXPECT_EQ(client.LoadKvCaches({"failed"},destinations({17})),ER_SDK_TIMEOUT);
+    ASSERT_EQ(seen.size(),2u);
+    EXPECT_EQ(seen[0],std::make_tuple(true,size_t(17),false));
+    EXPECT_EQ(seen[1],std::make_tuple(true,size_t(0),true));
+    EXPECT_EQ(client.LoadKvCaches({"quarantined"},destinations({17})),ER_INVALID_LOCAL_BUFFERS);
+    EXPECT_EQ(seen.size(),2u);
+}
+TEST_F(NativeSsdGpuReadWindowTest, ObserverExceptionCannotReplaceTheOriginalSdkException) {
+    using namespace kv_cache_manager;
+    auto delegate=std::make_unique<MockTransferClient>(destroyed);
+    EXPECT_CALL(*delegate,SaveKvCaches(_,_,_)).WillOnce(::testing::Throw(std::runtime_error("sdk-sentinel")));
+    Client client(std::move(delegate),copy,context);
+    int observed=0;
+    client.setSdkTransferObserver([&](bool read,size_t bytes,bool unknown) {
+        ++observed;EXPECT_FALSE(read);EXPECT_EQ(bytes,0u);EXPECT_TRUE(unknown);
+        throw std::logic_error("observer-failure");
+    });
+    try {
+        (void)client.SaveKvCaches({"throw"},destinations({17}));
+        FAIL()<<"SDK exception must propagate";
+    } catch(const std::runtime_error& error) {
+        EXPECT_STREQ(error.what(),"sdk-sentinel");
+    }
+    EXPECT_EQ(observed,1);
+    EXPECT_EQ(context->active_reservations,1u);
 }
 // GPU pages + recording SDK. CPU copies below are assertions only; the
 // implementation must pass native GPU IOVs through the Prefill transfer path.

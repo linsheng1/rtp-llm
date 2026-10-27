@@ -10,12 +10,14 @@
 #include <stdexcept>
 #include <vector>
 #include "kvcm_client/transfer_client.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkTransferObserver.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm::kvcm {
 
 // One complete GPU IOV per SSD URI, with ordered D2D gather/scatter into a
 // separately registered arena. No CPU payload allocation or fallback exists.
-class PackedSsdTransferClient final: public kv_cache_manager::TransferClient {
+class PackedSsdTransferClient final: public kv_cache_manager::TransferClient, public SdkTransferObservable {
     using Code    = kv_cache_manager::ClientErrorCode;
     using Buffers = kv_cache_manager::BlockBuffers;
     using Uris    = kv_cache_manager::UriStrVec;
@@ -62,6 +64,11 @@ public:
         quarantine_.reset();
     }
 
+    void setSdkTransferObserver(SdkTransferObserver observer) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        transfer_observer_ = std::move(observer);
+    }
+
     Code LoadKvCaches(const Uris& uris, const Buffers& destination, Trace trace = nullptr) override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (trace && trace->block_ids.size() != uris.size())
@@ -99,7 +106,7 @@ public:
                              one_trace = blockTrace(trace, block, uris.size())]() mutable {
                                 if (!read_thread_init_())
                                     return kv_cache_manager::ER_CUDAMEMCPY_ERROR;
-                                return inner_->LoadKvCaches({uri}, {buffer}, std::move(one_trace));
+                                return loadOne(uri, buffer, std::move(one_trace));
                             }));
                     }
                     std::exception_ptr failure;
@@ -117,8 +124,7 @@ public:
                         std::rethrow_exception(failure);
                 } else {
                     const auto block = range.first;
-                    result = inner_->LoadKvCaches(
-                        {uris[block]}, {operation->buffers[block]}, blockTrace(trace, block, uris.size()));
+                    result = loadOne(uris[block], operation->buffers[block], blockTrace(trace, block, uris.size()));
                 }
                 if (result != kv_cache_manager::ER_OK) {
                     quarantine(operation);
@@ -168,8 +174,7 @@ public:
                 return {kv_cache_manager::ER_CUDAMEMCPY_ERROR, {}};
             }
             try {
-                auto result = inner_->SaveKvCaches(
-                    {uris[block]}, {operation->buffers[block]}, blockTrace(trace, block, uris.size()));
+                auto result = saveOne(uris[block], operation->buffers[block], blockTrace(trace, block, uris.size()));
                 if (result.first != kv_cache_manager::ER_OK) {
                     quarantine(operation);
                     return {result.first, {}};
@@ -195,6 +200,49 @@ protected:
     }
 
 private:
+    void observe(bool is_read, size_t bytes, bool unknown) const noexcept {
+        if (transfer_observer_) {
+            try {
+                transfer_observer_(is_read, bytes, unknown);
+            } catch (...) {
+                // Telemetry must not rewrite an SDK result or create another
+                // completion-unknown event for a successful SDK operation.
+                try {
+                    RTP_LLM_LOG_ERROR("failed to report inner SSD SDK payload");
+                } catch (...) {}
+            }
+        }
+    }
+    Code loadOne(const std::string& uri, const kv_cache_manager::BlockBuffer& buffer, Trace trace) {
+        // Prepare descriptors before the attempted-I/O boundary. Allocation or
+        // trace failures here have not called the SDK and report no unknown I/O.
+        const Uris uris{uri};
+        const Buffers buffers{buffer};
+        Code code;
+        try {
+            code = inner_->LoadKvCaches(uris, buffers, std::move(trace));
+        } catch (...) {
+            observe(true, 0, true);
+            throw;
+        }
+        observe(true, code == kv_cache_manager::ER_OK ? buffer.iovs.front().size : 0,
+                code != kv_cache_manager::ER_OK);
+        return code;
+    }
+    std::pair<Code, Uris> saveOne(const std::string& uri, const kv_cache_manager::BlockBuffer& buffer, Trace trace) {
+        const Uris uris{uri};
+        const Buffers buffers{buffer};
+        std::pair<Code, Uris> result;
+        try {
+            result = inner_->SaveKvCaches(uris, buffers, std::move(trace));
+        } catch (...) {
+            observe(false, 0, true);
+            throw;
+        }
+        observe(false, result.first == kv_cache_manager::ER_OK ? buffer.iovs.front().size : 0,
+                result.first != kv_cache_manager::ER_OK);
+        return result;
+    }
     static Trace blockTrace(const Trace& trace, size_t block, size_t count) {
         if (!trace)
             return {};
@@ -330,6 +378,7 @@ private:
     kv_cache_manager::MemoryType                       staging_type_;
     ReadThreadInit                                    read_thread_init_;
     std::mutex                                        mutex_;
+    SdkTransferObserver                               transfer_observer_;
     std::shared_ptr<Operation>                        quarantine_;
 };
 }  // namespace rtp_llm::kvcm

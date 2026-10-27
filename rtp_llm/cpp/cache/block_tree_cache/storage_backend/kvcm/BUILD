@@ -75,6 +75,7 @@ cc_library(
     hdrs = [
         "ClientFactory.h",
         "PackedSsdTransferClient.h",
+        "SdkTransferObserver.h",
         "ClientWrapper.h",
         "KVCMConfig.h",
     ],
