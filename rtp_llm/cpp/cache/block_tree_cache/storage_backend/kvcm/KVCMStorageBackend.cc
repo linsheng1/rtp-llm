@@ -587,6 +587,23 @@ public:
         }
         meta->decode_sources = restored_sources && !restored_sources->empty()
                                    ? std::move(restored_sources) : DecodeReuseSourcesPtr{};
+        if (meta->decode_sources) {
+            try {
+                const auto unit = topology_->groups().front().cacheKeyTokenStride();
+                const auto adopted_end = unit != 0
+                    && request.handles.size() <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / unit
+                        ? static_cast<int64_t>(request.handles.size() * unit) : int64_t{0};
+                const auto counts = countDecodeReuse(*meta->decode_sources, adopted_end);
+                if (counts.total() > 0) {
+                    RtpLLMDecodeCacheTokenMetricsCollector restored;
+                    restored.stage = "restored";
+                    restored.logical_tokens = counts.total();
+                    reportRemoteMetrics<RtpLLMDecodeCacheTokenMetrics>(restored);
+                }
+            } catch (const std::bad_alloc&) {
+                // Attribution does not change the completed payload result.
+            }
+        }
         if (track_origins) {
             RtpLLMRemoteCacheOutcomeMetricsCollector source_result;
             source_result.stage = "read_source";

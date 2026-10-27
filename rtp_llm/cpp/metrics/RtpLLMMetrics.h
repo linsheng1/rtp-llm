@@ -1354,6 +1354,22 @@ public:
     const char* outcome{"failed"};
 };
 
+class RtpLLMDecodeCacheTokenMetricsCollector final {
+public:
+    const char* stage{"restored"};
+    const char* tier{"REMOTE"};
+    int64_t logical_tokens{0};
+};
+
+class RtpLLMDecodeCacheTokenMetrics: public kmonitor::MetricsGroup {
+public:
+    bool init(kmonitor::MetricsGroupManager* manager) override;
+    void report(const kmonitor::MetricsTags*, RtpLLMDecodeCacheTokenMetricsCollector*);
+    kmonitor::MutableMetric* logical_tokens_qps_metric{nullptr};
+private:
+    AUTIL_LOG_DECLARE();
+};
+
 class RtpLLMRemoteCacheOutcomeMetrics: public kmonitor::MetricsGroup {
 public:
     bool init(kmonitor::MetricsGroupManager* manager) override;

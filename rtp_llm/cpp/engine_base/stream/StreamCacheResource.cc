@@ -53,6 +53,7 @@ void StreamCacheResource::init(int batch_size) {
 }
 
 void StreamCacheResource::releaseResource() {
+    decode_reuse_use_state_.adopt({}, 0);
     RTP_LLM_PROFILE_FUNCTION();
     if (!resource_context_.cache_manager) {
         return;
@@ -243,11 +244,13 @@ absl::Status StreamCacheResource::initKVBlock() {
 
     // HOST/DISK reuse is published after the asynchronous load completes.
     publishReuseLengths(result.reuse_len, 0, 0, 0);
+    adoptDecodeReuse(std::move(result.decode_sources), result.reuse_len);
     allocator_load_context_ = std::move(result.async_context);
     return absl::OkStatus();
 }
 
 void StreamCacheResource::clearCacheReuseState() {
+    decode_reuse_use_state_.adopt({}, 0);  // Never reset a consumed logical request on retry.
     remote_restore_lifecycle_.reset();
     remote_restore_attempt_started_at_.reset();
     stream_->setReuseLength(0);
@@ -259,7 +262,41 @@ void StreamCacheResource::clearCacheReuseState() {
     stream_->setRemoteReuseLength(0);
 }
 
+void StreamCacheResource::adoptDecodeReuse(DecodeReuseSourcesPtr sources, int64_t adopted_end) {
+    if (resource_context_.role_type == RoleType::PREFILL && stream_->metrics_reporter_
+        && remoteCacheDecodePublicationEnabled())
+        decode_reuse_use_state_.adopt(std::move(sources), adopted_end);
+}
+
+void StreamCacheResource::reportDecodeCacheUse(
+    std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at) {
+    if (resource_context_.role_type != RoleType::PREFILL || !stream_->metrics_reporter_ || !gpu_ready_at)
+        return;
+    try {
+        const auto counts = decode_reuse_use_state_.consume(true);
+        if (!counts)
+            return;
+        for (size_t tier = 0; tier < counts->by_tier.size(); ++tier) {
+            if (counts->by_tier[tier] <= 0)
+                continue;
+            RtpLLMDecodeCacheTokenMetricsCollector collector;
+            collector.stage = "used";
+            collector.tier = tierName(static_cast<Tier>(tier));
+            collector.logical_tokens = counts->by_tier[tier];
+            stream_->metrics_reporter_->report<RtpLLMDecodeCacheTokenMetrics>(nullptr, &collector);
+        }
+        RtpLLMRemoteCacheOutcomeMetricsCollector outcome;
+        outcome.stage = "use";
+        outcome.outcome = counts->total() > 0 ? "used" : "no_decode_interval";
+        stream_->metrics_reporter_->report<RtpLLMRemoteCacheOutcomeMetrics>(nullptr, &outcome);
+    } catch (const std::bad_alloc&) {
+        decode_reuse_use_state_.adopt({}, 0);
+        RTP_LLM_LOG_WARNING("optional Decode cache use attribution unavailable");
+    }
+}
+
 void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& result) {
+    decode_reuse_use_state_.adopt({}, 0);
     remote_restore_lifecycle_.reset();
     cache_reuse_metrics_.device_input_length    = result.device_input_length;
     cache_reuse_metrics_.match_cost_time_us     = result.match_cost_time_us;
@@ -327,6 +364,11 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
     if (load_success) {
         RTP_LLM_CHECK(load_context != nullptr);
         publishAllocatorReuse(*load_context, false);
+        try {
+            adoptDecodeReuse(load_context->decodeSources(), stream_->reuseLength());
+        } catch (const std::bad_alloc&) {
+            decode_reuse_use_state_.adopt({}, 0);
+        }
         if (resource_context_.role_type == RoleType::PREFILL && stream_->metrics_reporter_
             && stream_->remoteReuseLength() > 0) {
             const auto timing = load_context->remoteRestoreTiming();
@@ -352,6 +394,11 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
             malloc_status = MallocStatus::RETRYABLE_RESOURCE_EXHAUSTED;
         } else if (reuse_local) {
             publishAllocatorReuse(*load_context, true);
+            try {
+                adoptDecodeReuse(load_context->decodeSources(true), stream_->reuseLength());
+            } catch (const std::bad_alloc&) {
+                decode_reuse_use_state_.adopt({}, 0);
+            }
         } else {
             stream_->setHostReuseLength(0);
             stream_->setDiskReuseLength(0);

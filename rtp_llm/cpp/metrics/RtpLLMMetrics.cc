@@ -42,6 +42,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCachePayloadMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheQuarantineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMDecodePublicationMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheOutcomeMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMDecodeCacheTokenMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteRestoreLatencyMetrics);
 
 bool RtpLLMGrpcConnectFailureMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -979,6 +980,19 @@ void RtpLLMRemoteRestoreLatencyMetrics::report(const kmonitor::MetricsTags*     
 bool RtpLLMRemoteCacheOutcomeMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(outcome_qps_metric, "rtp_llm_remote_cache_outcome_qps");
     return true;
+}
+
+bool RtpLLMDecodeCacheTokenMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(logical_tokens_qps_metric, "rtp_llm_decode_cache_logical_tokens_qps");
+    return true;
+}
+
+void RtpLLMDecodeCacheTokenMetrics::report(const kmonitor::MetricsTags* tags,
+                                          RtpLLMDecodeCacheTokenMetricsCollector* collector) {
+    kmonitor::MetricsTags source_tags = tags ? *tags : kmonitor::MetricsTags{};
+    source_tags.AddTag("stage", collector->stage);
+    source_tags.AddTag("tier", collector->tier);
+    logical_tokens_qps_metric->Report(&source_tags, collector->logical_tokens);
 }
 
 void RtpLLMRemoteCacheOutcomeMetrics::report(const kmonitor::MetricsTags* tags,
