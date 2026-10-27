@@ -42,8 +42,6 @@ createNativeSsdGpu(const std::string& config,
                    const kv_cache_manager::InitParams& params,
                    const kv_cache_manager::ClientMemoryRegistrations& registrations) {
 #if USING_CUDA
-    if (registrations.gpu.empty())
-        throw std::invalid_argument("PACE SSD requires dedicated GPU memory registrations");
     // PACE SSD treats each IOV as a complete object write. A model page has
     // several layer IOVs, so gather into one registered GPU span per URI.
     // This is D2D packing, not the legacy CPU snapshot/packed wrapper.
@@ -65,6 +63,22 @@ createNativeSsdGpu(const std::string& config,
         return {};
     std::lock_guard<std::mutex> registry_lock(registry_mutex);
     auto context = contexts[device].lock();
+    if (registrations.gpu.empty()) {
+        // ClientWrapper registers every pool at its first Init and clears the
+        // later descriptors. Those clients may reuse only a proven subspan of
+        // that successful registration, never an arbitrary empty descriptor.
+        if (!context || !params.regist_span
+            || !context->coversRegisteredGpuSpan(*params.regist_span, device))
+            throw std::invalid_argument("PACE SSD requires dedicated GPU memory registrations");
+    } else if (context && context->registered) {
+        // PACE seals registrations at its first Init. A second engine cannot
+        // quietly introduce a new GPU allocation into an old process session.
+        for (const auto& gpu : registrations.gpu) {
+            if (gpu.device_id != device
+                || !context->coversRegisteredGpuSpan({gpu.base, gpu.size}, device))
+                throw std::invalid_argument("PACE SSD cannot register new GPU spans after its first Init");
+        }
+    }
     if (!context) {
         size_t previous = resident_bytes.load();
         do {
@@ -90,9 +104,12 @@ createNativeSsdGpu(const std::string& config,
     auto memory = registrations;
     if (!context->registered)
         memory.gpu.push_back({context->memory.get(), bytes, device});
+    auto registered_spans = context->registered ? std::vector<kv_cache_manager::GpuMemorySpan>{} : memory.gpu;
     auto delegate = kv_cache_manager::TransferClient::Create(config, params, memory);
     if (!delegate)
         return {};
+    if (!context->registered)
+        context->registered_gpu_spans.swap(registered_spans);
     context->registered = true;
     return std::make_unique<PackedSsdTransferClient>(
         std::move(delegate),

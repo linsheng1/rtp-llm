@@ -55,6 +55,23 @@ TEST(ClientFactoryFeatureBoundaryTest, EnabledSsdStillRejectsMissingGpuRegistrat
     EXPECT_THROW(factory.createTransferClientWithMemory(ssd, params, registrations), std::invalid_argument);
     EXPECT_THROW(factory.createTransferClientWithMemory(mixed, params, registrations), std::invalid_argument);
 }
+TEST(ClientFactoryFeatureBoundaryTest, EmptyDescriptorsCanReuseOnlySuccessfullyRegisteredGpuSubspans) {
+    using Context = kvcm::PackedSsdTransferClient::GpuPackingContext;
+    const auto pointer = [](uintptr_t value) { return reinterpret_cast<void*>(value); };
+    Context context(std::shared_ptr<void>(pointer(0x10000), [](void*) {}));
+    context.registered_gpu_spans = {{pointer(0x10000), 0x4000, 0}, {pointer(0x20000), 0x8000, 0}};
+    EXPECT_FALSE(context.coversRegisteredGpuSpan({pointer(0x10000), 0x4000}, 0));
+    context.registered = true;
+    EXPECT_TRUE(context.coversRegisteredGpuSpan({pointer(0x10000), 0x4000}, 0));
+    EXPECT_TRUE(context.coversRegisteredGpuSpan({pointer(0x22000), 0x6000}, 0));
+    EXPECT_FALSE(context.coversRegisteredGpuSpan({pointer(0x22000), 0x6001}, 0));
+    EXPECT_FALSE(context.coversRegisteredGpuSpan({pointer(0x28000), 1}, 0));
+    EXPECT_FALSE(context.coversRegisteredGpuSpan({pointer(0x0ffff), 1}, 0));
+    EXPECT_FALSE(context.coversRegisteredGpuSpan({pointer(0x10000), 0x4000}, 1));
+    EXPECT_FALSE(context.coversRegisteredGpuSpan({nullptr, 1}, 0));
+    EXPECT_FALSE(context.coversRegisteredGpuSpan({pointer(0x10000), 0}, 0));
+    EXPECT_FALSE(context.coversRegisteredGpuSpan({pointer(UINTPTR_MAX - 1), 8}, 0));
+}
 TEST(DecodePublicationConfigTest, SingleSwitchNeedsNoCpSpecificFlag) {
     {
         autil::EnvGuard off("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");

@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <future>
 #include <limits>
@@ -37,6 +38,23 @@ public:
         size_t active_reservations{0};
         // Accessed only while ClientFactory's device registry mutex is held.
         bool registered{false};
+        std::vector<kv_cache_manager::GpuMemorySpan> registered_gpu_spans;
+
+        bool coversRegisteredGpuSpan(const kv_cache_manager::RegistSpan& span, int device) const noexcept {
+            if (!registered || !span.base || span.size == 0)
+                return false;
+            const auto address = reinterpret_cast<uintptr_t>(span.base);
+            for (const auto& gpu : registered_gpu_spans) {
+                if (gpu.device_id != device || !gpu.base)
+                    continue;
+                const auto base = reinterpret_cast<uintptr_t>(gpu.base);
+                // Subtraction avoids wrapping either end address.
+                if (address >= base && address - base <= gpu.size
+                    && span.size <= gpu.size - (address - base))
+                    return true;
+            }
+            return false;
+        }
     };
     // Copy must finish before returning: external RDMA cannot rely on CUDA
     // stream ordering to observe a gather or protect an in-flight scatter.
