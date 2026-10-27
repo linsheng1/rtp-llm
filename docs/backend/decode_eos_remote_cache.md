@@ -129,6 +129,45 @@ local-only; D receives its prompt KV through the existing P-to-D mechanism and
 publishes completed additions for P. This does not add remote-to-D reconstruction
 from the P-layout wire format. D local hot-cache reuse remains enabled.
 
+## Publication telemetry
+
+Enabled D backends maintain a bounded admission lease for every retained source
+checkpoint. `rtp_llm_decode_publish_pending_charge_bytes`, `pending_jobs`,
+`queued_jobs`, `running_jobs`, `quarantined_jobs`, `pending_bytes_limit`,
+`pending_jobs_limit` and `oldest_pending_age_us` share the
+`rtp_llm_decode_publish_` prefix. Queued includes preparation before executor
+submission. Total pending includes quarantine; late/retried callbacks cannot
+turn quarantine back into a running or queued task. Source-page charges are
+conservative across separate jobs, not a measurement of extra allocated HBM.
+
+A CPU sampler reports once per second only for enabled D backends with a metrics
+reporter; no inference step, GPU operation or new per-step collective is needed.
+Age starts at first admission and includes idle or frozen time. Feature-off and
+P-only backends do not create this accounting/sampler. Shutdown joins the sampler
+before releasing its owner; frozen admission remains charged until the existing
+backend quarantine lifecycle ends.
+
+`rtp_llm_decode_publish_outcome_qps{outcome=...}` reports one terminal outcome per
+admission: `committed`, `already_present`, `completion_unknown`, or `failed`.
+`budget_skipped` counts rejected admission attempts separately. Failed admission,
+cancellation, missing acknowledgement and uncertain completion never claim a
+successful commit. Internal SDK retries do not create additional logical commit
+outcomes.
+
+Acknowledged commits report `rtp_llm_decode_publish_eos_latency_bucket_qps`
+with a fixed low-cardinality `le_us` label (100 microseconds through 60 seconds,
+plus `+Inf`) and `rtp_llm_decode_publish_eos_latency_sum_us_qps`. Latency begins
+at the EOS planning entry, before checkpoint scan/device fence/queueing, and ends
+at the successful FinishWrite acknowledgement. Ratios of cumulative bucket rates
+to the `+Inf` rate give a bounded approximate P50/P95; these are not averages or
+exact quantiles. Do not combine buckets across different deployment/configuration
+populations without preserving the ordinary instance/rank tags.
+
+This telemetry does not infer D-origin token counts from a cache hit. Reliable
+D provenance and all-rank P restore including necessary checkpoint-tail replay
+require separate versioned protocol/execution validation. Existing read latency
+or generic remote-reuse length must not be renamed to imply those guarantees.
+
 ## Admission and failure isolation
 
 No GPU shadow KV pool or request-owned early CPU payload snapshot is allocated.

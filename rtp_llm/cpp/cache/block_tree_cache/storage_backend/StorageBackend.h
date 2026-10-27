@@ -19,6 +19,7 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageCompletionAdmission.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
@@ -92,7 +93,7 @@ struct StorageRequest {
     // task lifetime, including completion-unknown quarantine.
     bool                  decode_completion{false};
     size_t                computed_tokens{0}, published_tokens{0};
-    std::shared_ptr<void> completion_admission;
+    std::shared_ptr<StorageCompletionAdmission> completion_admission;
 
     bool empty() const {
         for (const auto& key_handles : handles) {
@@ -216,7 +217,7 @@ private:
     StorageQuarantineBreakdown quarantined_breakdown_{};
     // Keep optional EOS admission charged while FROZEN pages are unavailable.
     // No more publications can be admitted after backend shutdown.
-    std::vector<std::shared_ptr<void>> quarantined_completion_admissions_;
+    std::vector<std::shared_ptr<StorageCompletionAdmission>> quarantined_completion_admissions_;
 
     friend class LoadAsyncContext;
 };

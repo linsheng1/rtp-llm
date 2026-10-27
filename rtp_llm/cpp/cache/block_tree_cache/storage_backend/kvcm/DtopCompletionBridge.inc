@@ -1,19 +1,5 @@
 // EOS-only native GPU publication. No early payload copy or CPU snapshot.
 // Metadata and payload transfer reuse the Prefill StorageBackend pipeline.
-struct CompletionAccounting {
-    std::mutex mutex;
-    size_t     bytes{0}, jobs{0};
-};
-struct CompletionLease {
-    std::shared_ptr<CompletionAccounting> accounting;
-    size_t                                bytes;
-    CompletionLease(std::shared_ptr<CompletionAccounting> state, size_t n): accounting(std::move(state)), bytes(n) {}
-    ~CompletionLease() {
-        std::lock_guard<std::mutex> guard(accounting->mutex);
-        accounting->bytes -= bytes;
-        --accounting->jobs;
-    }
-};
 
 bool configureDecodePublication(
     const CacheTopology& topology,
@@ -108,7 +94,35 @@ bool configureDecodePublication(
         completion_limits_ = *limits;
         RTP_LLM_LOG_INFO("DTOP_GPU budget native_pool_bytes=%zu pending_bytes_limit=%zu pending_jobs_limit=%zu",
                          native_pool_bytes, completion_limits_.bytes, completion_limits_.jobs);
-        completion_accounting_ = std::make_shared<CompletionAccounting>();
+        kvcm::DecodePublicationAccounting::SnapshotObserver snapshots;
+        kvcm::DecodePublicationAccounting::EventObserver events;
+        if (metrics_reporter_) {
+            // Retain only the reporter, not Impl or its block pools: quarantined
+            // admission can outlive the executor until backend shutdown.
+            const auto reporter = metrics_reporter_;
+            snapshots = [reporter](const auto& value) {
+                RtpLLMDecodePublicationStateMetricsCollector collector;
+                collector.pending_bytes = value.bytes;
+                collector.pending_jobs = value.jobs;
+                collector.queued_jobs = value.queued;
+                collector.running_jobs = value.running;
+                collector.quarantined_jobs = value.quarantined;
+                collector.byte_limit = value.byte_limit;
+                collector.job_limit = value.job_limit;
+                collector.oldest_age_us = value.oldest_age_us;
+                reporter->report<RtpLLMDecodePublicationMetrics, RtpLLMDecodePublicationStateMetricsCollector>(
+                    nullptr, &collector);
+            };
+            events = [reporter](const char* outcome, std::optional<int64_t> latency) {
+                RtpLLMDecodePublicationEventMetricsCollector collector;
+                collector.outcome = outcome;
+                collector.eos_to_commit_us = latency;
+                reporter->report<RtpLLMDecodePublicationMetrics, RtpLLMDecodePublicationEventMetricsCollector>(
+                    nullptr, &collector);
+            };
+        }
+        completion_accounting_ = std::make_shared<kvcm::DecodePublicationAccounting>(
+            completion_limits_.bytes, completion_limits_.jobs, std::move(snapshots), std::move(events));
         file_resolver_ = resolver;
     }
     return true;
@@ -163,6 +177,7 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
         return request;
     if (resource.batchSize() != 1 || computed_end == 0)
         return request;
+    const auto eos_at = Clock::now();
     const size_t base           = cache_config_.seq_size_per_block;
     const size_t canonical_unit = base * target_physical_shards_;
     const size_t completed_full = computed_end / base;
@@ -259,21 +274,13 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
             request.handles[key].push_back(std::move(handle));
         }
     }
-    const size_t limit = completion_limits_.bytes;
-    const size_t jobs  = completion_limits_.jobs;
-    {
-        std::lock_guard<std::mutex> guard(completion_accounting_->mutex);
-        if (bytes > limit || completion_accounting_->bytes > limit - bytes || completion_accounting_->jobs >= jobs) {
-            RTP_LLM_LOG_WARNING("DTOP_GPU admission=rejected retained_bytes=%zu pending_bytes=%zu pending_jobs=%zu",
-                                bytes,
-                                completion_accounting_->bytes,
-                                completion_accounting_->jobs);
-            return {};
-        }
-        auto lease = std::make_shared<CompletionLease>(completion_accounting_, bytes);
-        completion_accounting_->bytes += bytes;
-        ++completion_accounting_->jobs;
-        request.completion_admission = std::move(lease);
+    request.completion_admission = completion_accounting_->tryAcquire(bytes, eos_at);
+    if (!request.completion_admission) {
+        completion_accounting_->recordBudgetSkip();
+        const auto pending = completion_accounting_->snapshot();
+        RTP_LLM_LOG_WARNING("DTOP_GPU admission=rejected retained_bytes=%zu pending_bytes=%zu pending_jobs=%zu",
+                            bytes, pending.bytes, pending.jobs);
+        return {};
     }
     // One fence at successful EOS. No decode-step fence or CPU capture. The
     // task cannot outlive source ownership until prepareWrite has pinned it.

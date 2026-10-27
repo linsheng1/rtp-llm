@@ -33,6 +33,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/GroupPolicy.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DecodePublicationAccounting.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -297,6 +298,8 @@ public:
             RTP_LLM_LOG_ERROR("create BlockTree KVCM clients failed");
             return false;
         }
+        if (completion_accounting_)
+            completion_accounting_->startSampling();
         const auto tp_rank = parallelism_config_.tp_rank;
         RTP_LLM_LOG_INFO("BlockTree KVCM storage backend initialized, tp_rank=%ld tp_size=%ld policy={%s}",
                          tp_rank,
@@ -520,6 +523,9 @@ public:
                 // Keep the legacy task QPS, but report no payload blocks or
                 // transfer time when all keys already have enough replicas.
                 collector.remote_write_fail_qps = false;
+                if (const auto lease = std::dynamic_pointer_cast<kvcm::DecodePublicationAccounting::Lease>(
+                        request.completion_admission))
+                    lease->recordOutcome("already_present");
                 return;
             }
             const auto& spec_info = group_policy_->spec_info_map();
@@ -585,6 +591,9 @@ public:
             }
             collector.remote_write_cache_block_num = static_cast<int64_t>(write_location.locations.size());
             collector.remote_write_fail_qps        = false;
+            if (const auto lease = std::dynamic_pointer_cast<kvcm::DecodePublicationAccounting::Lease>(
+                    request.completion_admission))
+                lease->recordOutcome("committed", /*acknowledged=*/true);
             if (request.decode_completion) {
                 RTP_LLM_LOG_INFO(
                     "DTOP_FILE committed computed_end=%zu canonical_keys=%zu new_locations=%zu bytes=%zu dp_rank=%ld",
@@ -668,6 +677,10 @@ public:
         if (client_wrapper_) {
             client_wrapper_->shutdown();
         }
+        if (completion_accounting_) {
+            completion_accounting_->stopSampling();
+            completion_accounting_->reportSnapshot();
+        }
         // Upstream keeps uncertain source pages FROZEN until pool destruction.
     }
 
@@ -699,6 +712,8 @@ public:
                                size_t                            block_count,
                                const StorageQuarantineBreakdown& breakdown) noexcept {
         reportQuarantineMetrics(generation, task_count, block_count, breakdown);
+        if (completion_accounting_)
+            completion_accounting_->reportSnapshot();
         if (parallelism_config_.tp_rank == 0 && quarantine_abort_ratio_ > 0.0 && total_device_block_count_ > 0) {
             const long double threshold = static_cast<long double>(total_device_block_count_) * quarantine_abort_ratio_;
             if (static_cast<long double>(block_count) > threshold) {
@@ -1360,7 +1375,7 @@ private:
     int                            target_prefill_cp_{1}, target_prefill_tp_{1}, target_physical_shards_{1}, file_capture_blocks_{1};
     bool                           decode_publication_enabled_{false}, pace_backend_{false}, file_decode_{false};
     StorageBackend::BufferResolver file_resolver_;
-    std::shared_ptr<CompletionAccounting>   completion_accounting_;
+    std::shared_ptr<kvcm::DecodePublicationAccounting> completion_accounting_;
     DecodePublicationLimits completion_limits_;
     CacheConfig                          cache_config_;
     KVCacheConfig                        kv_cache_config_;

@@ -1,5 +1,13 @@
 load("//:def.bzl", "copts")
 
+cc_library(
+    name = "decode_publication_accounting",
+    hdrs = ["DecodePublicationAccounting.h"],
+    copts = copts(),
+    deps = ["//rtp_llm/cpp/cache/block_tree_cache:storage_completion_admission"],
+    visibility = ["//visibility:public"],
+)
+
 config_setting(
     name = "KVCM_INTERNAL",
     values = {"copt": "-DKVCM_INTERNAL=1"},
@@ -18,6 +26,7 @@ cc_library(
     visibility = ["//visibility:public"],
     deps = [
         ":client",
+        ":decode_publication_accounting",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:cp_slot_mapper",
         ":group_policy",
