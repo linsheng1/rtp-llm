@@ -29,23 +29,22 @@ bool configureDecodePublication(
         RTP_LLM_LOG_ERROR("PACE SSD requires backend9/pace_ssd and GDR; DRAM cannot use backend9");
         return false;
     }
-    file_decode_ = parallelism_config_.role_type == RoleType::DECODE;
+    is_decode_role_ = parallelism_config_.role_type == RoleType::DECODE;
     const bool prefill = parallelism_config_.role_type == RoleType::PREFILL;
     const auto& cp = parallelism_config_.prefill_cp_config;
     target_prefill_cp_ = cp.prefill_cp_size;
     target_prefill_tp_ = target_prefill_cp_;
     target_physical_shards_ = cp.kv_cache_sharded ? target_prefill_cp_ : 1;
-    file_capture_blocks_ = target_physical_shards_;
     // CP is the target layout, DP is execution parallelism. They are independent.
     // Geometry checks remain in CPSlotMapper / group projection, never a CP2/4 whitelist.
-    if (!pace_backend_ || (!file_decode_ && !prefill) || target_prefill_cp_ < 1
+    if (!pace_backend_ || (!is_decode_role_ && !prefill) || target_prefill_cp_ < 1
         || cache_config_.seq_size_per_block < 1
         || static_cast<size_t>(target_prefill_cp_) > static_cast<size_t>(std::numeric_limits<int>::max()) / cache_config_.seq_size_per_block
         || !cache_config_.mtp_sub_configs.empty() || sp_config_.type != SP_TYPE_NONE
         || autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false)
         || !kv_cache_config_.kvcm_client_config.empty() || kv_cache_config_.kvcm_instance_id_salt.empty()
         || (pace_backend_ && backend_config != (ssd ? "[{\"type\":\"pace_ssd\"}]" : "[{\"type\":\"pace\"}]"))
-        || (file_decode_ && (parallelism_config_.tp_size != 1 || parallelism_config_.dp_size < 1))
+        || (is_decode_role_ && (parallelism_config_.tp_size != 1 || parallelism_config_.dp_size < 1))
         || (prefill && (parallelism_config_.tp_size != target_prefill_cp_ || parallelism_config_.dp_size != 1))) {
         RTP_LLM_LOG_ERROR("Decode publication requires matching target P CP layout, positive D DP, synchronous single-token decoding, and native PACE");
         return false;
@@ -55,11 +54,10 @@ bool configureDecodePublication(
         return false;
     }
     RTP_LLM_LOG_INFO(
-        "DTOP_FILE layout target_cp=%d target_tp=%d shards=%d capture_blocks=%d visible_tokens=%zu dp=%ld role=%d",
+        "DTOP_GPU layout target_cp=%d target_tp=%d shards=%d visible_tokens=%zu dp=%ld role=%d",
         target_prefill_cp_,
         target_prefill_tp_,
         target_physical_shards_,
-        file_capture_blocks_,
         cache_config_.seq_size_per_block * target_physical_shards_,
         parallelism_config_.dp_size,
         static_cast<int>(parallelism_config_.role_type));
@@ -67,7 +65,7 @@ bool configureDecodePublication(
                      pace_backend_ ? "pace" : "file",
                      target_prefill_cp_,
                      target_prefill_tp_);
-    if (file_decode_) {
+    if (is_decode_role_) {
         size_t native_pool_bytes = 0;
         std::unordered_set<const DeviceBlockPool*> unique_pools;
         for (const auto& group : topology.groups()) {
@@ -129,43 +127,43 @@ bool configureDecodePublication(
 }
 
 size_t fileWireBytes(const std::string& tag) const {
-    if (!decode_publication_enabled_ || !file_decode_ || target_physical_shards_ == 1) {
+    if (!decode_publication_enabled_ || !is_decode_role_ || target_physical_shards_ == 1) {
         return cache_config_.blockSizeBytesForGroup(tag);
     }
     const auto& group = cache_config_.topology().group(tag);
     if (group.policy.group_type == CacheGroupType::FULL) {
         RTP_LLM_CHECK_WITH_INFO(group.policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN,
-                                "DTOP_FILE requires FULL page RR, tag=%s",
+                                "DTOP_GPU requires FULL page RR, tag=%s",
                                 tag.c_str());
         return cache_config_.blockSizeBytesForGroup(tag);
     }
     RTP_LLM_CHECK_WITH_INFO(group.policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK
                                 && group.seqSizePerBlock()
                                        == cache_config_.seq_size_per_block * target_physical_shards_,
-                            "DTOP_FILE requires matching canonical state/SWA span, tag=%s",
+                            "DTOP_GPU requires matching canonical state/SWA span, tag=%s",
                             tag.c_str());
     size_t bytes = 0;
     for (const int layer : cache_config_.layerIdsForGroup(tag)) {
         const auto& physical = cache_config_.physicalGroupForLayer(layer, tag);
         RTP_LLM_CHECK_WITH_INFO(
-            physical.kvScaleStrideBytes() == 0, "DTOP_FILE requires packed state/SWA, tag=%s", tag.c_str());
+            physical.kvScaleStrideBytes() == 0, "DTOP_GPU requires packed state/SWA, tag=%s", tag.c_str());
         size_t payload = physical.kvBlockStrideBytes();
         if (group.policy.cp_slice == CpBlockSliceMode::PAYLOAD_BYTES) {
             payload = group.spec->k_block_payload_bytes();
         } else {
             RTP_LLM_CHECK_WITH_INFO(group.policy.cp_slice == CpBlockSliceMode::EQUAL_BYTES,
-                                    "DTOP_FILE unsupported state slice, tag=%s",
+                                    "DTOP_GPU unsupported state slice, tag=%s",
                                     tag.c_str());
         }
         RTP_LLM_CHECK_WITH_INFO(
-            payload > 0 && payload % target_physical_shards_ == 0, "DTOP_FILE invalid state payload, tag=%s", tag.c_str());
+            payload > 0 && payload % target_physical_shards_ == 0, "DTOP_GPU invalid state payload, tag=%s", tag.c_str());
         bytes += payload / target_physical_shards_;
     }
     return bytes;
 }
 
 std::string fileTag(const std::string& tag, int peer) const {
-    return file_decode_ ? tag + "#cp" + std::to_string(peer) : tag;
+    return is_decode_role_ ? tag + "#cp" + std::to_string(peer) : tag;
 }
 
 // Select completed native checkpoints, not the final mutable slot. In
@@ -173,7 +171,7 @@ std::string fileTag(const std::string& tag, int peer) const {
 // required terminal STATE/SWA page must still be present at that exact key.
 StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end) {
     StorageRequest request;
-    if (!decode_publication_enabled_ || !file_decode_ || parallelism_config_.tp_rank != 0
+    if (!decode_publication_enabled_ || !is_decode_role_ || parallelism_config_.tp_rank != 0
         || resource.decodeCompletionSubmitted())
         return request;
     if (resource.batchSize() != 1 || computed_end == 0)

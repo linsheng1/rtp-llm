@@ -344,7 +344,7 @@ public:
     }
 
     StorageMatchResult match(const StorageRequest& request) {
-        if (decode_publication_enabled_ && file_decode_) {
+        if (decode_publication_enabled_ && is_decode_role_) {
             return {request.local_matched_blocks_num, nullptr};
         }
         RTP_LLM_CHECK_WITH_INFO(parallelism_config_.tp_rank == 0,
@@ -625,7 +625,7 @@ public:
     void write(const StorageRequest& request) {
         // Preserve ordinary Prefill publication. D publishes through the EOS
         // transaction only; no benchmark flag may disable P's normal cache path.
-        if (decode_publication_enabled_ && file_decode_ && !request.decode_completion)
+        if (decode_publication_enabled_ && is_decode_role_ && !request.decode_completion)
             return;
         RTP_LLM_CHECK_WITH_INFO(parallelism_config_.tp_rank == 0,
                                 "KVCM metadata write must run on tp rank 0, got %ld",
@@ -789,7 +789,7 @@ public:
                 RTP_LLM_LOG_INFO("DTOP_GPU source origin_requested=%d origin_persistence=unconfirmed",
                                  source_metadata.has_value());
                 RTP_LLM_LOG_INFO(
-                    "DTOP_FILE committed computed_end=%zu canonical_keys=%zu new_locations=%zu bytes=%zu dp_rank=%ld",
+                    "DTOP_GPU committed computed_end=%zu canonical_keys=%zu new_locations=%zu bytes=%zu dp_rank=%ld",
                     request.published_tokens,
                     request.keys->size(),
                     write_location.locations.size(),
@@ -799,7 +799,7 @@ public:
                                  request.computed_tokens,
                                  request.published_tokens,
                                  request.computed_tokens - request.published_tokens);
-                RTP_LLM_LOG_INFO("DTOP_FILE write_duration_us=%ld computed_end=%zu bytes=%zu",
+                RTP_LLM_LOG_INFO("DTOP_GPU write_duration_us=%ld computed_end=%zu bytes=%zu",
                                  autil::TimeUtility::currentTimeInMicroSeconds() - write_started_us,
                                  request.published_tokens,
                                  transferred_bytes);
@@ -1166,7 +1166,7 @@ private:
         instance_id += std::to_string(hashString(identity.str()));
 
         if (decode_publication_enabled_) {
-            RTP_LLM_LOG_INFO("DTOP_FILE identity instance=%s tp=%ld dp=%ld base_tokens=%zu",
+            RTP_LLM_LOG_INFO("DTOP_GPU identity instance=%s tp=%ld dp=%ld base_tokens=%zu",
                              instance_id.c_str(),
                              static_cast<long>(wire_tp),
                              static_cast<long>(wire_dp),
@@ -1176,7 +1176,7 @@ private:
                 for (const int layer : cache_config_.layerIdsForGroup(group.tag)) {
                     layers << layer << ',';
                 }
-                RTP_LLM_LOG_INFO("DTOP_FILE topology tag=%s reusable=%d layers=%s physical_bytes=%zu",
+                RTP_LLM_LOG_INFO("DTOP_GPU topology tag=%s reusable=%d layers=%s physical_bytes=%zu",
                                  group.tag.c_str(),
                                  static_cast<int>(group.policy.enable_prefix_reuse),
                                  layers.str().c_str(),
@@ -1293,11 +1293,11 @@ private:
                              use_gdr ? "gdr" : "standard",
                              registration_size);
             pools_by_tag.emplace(tag, pool);
-            const int peers = decode_publication_enabled_ && file_decode_ ? target_prefill_tp_ : 1;
+            const int peers = decode_publication_enabled_ && is_decode_role_ ? target_prefill_tp_ : 1;
             for (int peer = 0; peer < peers; ++peer) {
                 auto wire_registration               = registration;
                 wire_registration.location_spec_name = kvcm::genLocationSpecName(
-                    decode_publication_enabled_ && file_decode_ ? peer : static_cast<int>(parallelism_config_.tp_rank),
+                    decode_publication_enabled_ && is_decode_role_ ? peer : static_cast<int>(parallelism_config_.tp_rank),
                     groups.at(group_id).group_name,
                     runtime_config_.model_name);
                 registration_tags.push_back(fileTag(tag, peer));
@@ -1638,8 +1638,8 @@ private:
     }
 
 private:
-    int                            target_prefill_cp_{1}, target_prefill_tp_{1}, target_physical_shards_{1}, file_capture_blocks_{1};
-    bool                           decode_publication_enabled_{false}, pace_backend_{false}, file_decode_{false};
+    int                            target_prefill_cp_{1}, target_prefill_tp_{1}, target_physical_shards_{1};
+    bool                           decode_publication_enabled_{false}, pace_backend_{false}, is_decode_role_{false};
     StorageBackend::BufferResolver file_resolver_;
     std::shared_ptr<kvcm::DecodePublicationAccounting> completion_accounting_;
     DecodePublicationLimits completion_limits_;
