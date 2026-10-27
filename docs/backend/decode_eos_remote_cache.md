@@ -63,6 +63,13 @@ Configure Consumer external-memory registration and its actual local client
 count using the transport's existing settings. Do not derive a remote Provider's
 client count from P CP or D DP.
 
+CUDA builds pin the `2026_10_25_15_21` client packages in `deps/http.bzl`, with
+matching headers and libraries. The older public API alone does not establish
+PACE GPU registration support; an old-header/new-library overlay is not a
+qualified build. Packaging can rewrite SONAME/RPATH: verify that transformation
+reproducibly, then record the actual loaded library hash separately from the raw
+RPM and raw library hashes.
+
 ## Checkpoints, ownership and shutdown
 
 1. `GenerateStream` records the first successful `GenerateDone` and submits
@@ -87,6 +94,14 @@ client count from P CP or D DP.
    shutdown does not unfreeze pool pages. A missing commit acknowledgement cannot
    be called a confirmed publication or trigger an unsafe abort of a possibly
    committed transaction.
+
+On the enabled route, local pre-I/O rejection and an explicit matching SDK
+BUFFER_SAFE result are distinct from an unproven SDK error/exception. Unknown
+completion quarantines native pages, and a failed RPC or legacy response is not
+completion proof. The off route retains its original response handling. After
+an unproven write, keep the Manager WRITING lease instead of immediately aborting
+and recycling its destination. SDK drain and remote lease lifetime need their
+own transport validation; waiting for a timeout does not prove DMA has stopped.
 
 The per-process byte default sums participating unique physical pool capacities
 once, takes one eighth and caps at 4 GiB. A 4 GiB pool permits 512 MiB; a 48 GiB
@@ -128,7 +143,7 @@ individual objects belong in logs/timeline, never metric labels.
 | --- | --- |
 | D new logical tokens | Confirmed publication, P restoration and actual P reuse are separate. Reliable version-bound D provenance is still pending. |
 | KV payload bytes | `rtp_llm_remote_completed_payload_bytes_qps{mode=read,write}` counts IOV bytes of successful SDK chunks, including scale/state and actual CP copies. Unknown completion is separate. |
-| P restore latency | Start at recovery and end after all required GPU KV and necessary checkpoint-tail replay are ready. Existing backend-read timing is only a subphase; full boundary is pending. |
+| P restore latency | `rtp_llm_remote_restore_latency_bucket_qps` and `latency_sum_us_qps`, with separate checkpoint and context-update modes. Full recovery including necessary lookup/allocation and verified tail replay is still pending. |
 | EOS to publication | `rtp_llm_decode_publish_eos_latency_bucket_qps` and `eos_latency_sum_us_qps`, from first real GenerateDone through confirmed FinishWrite, including delayed planning, fence and queue. |
 | Held page budget | `rtp_llm_decode_publish_pending_charge_bytes`, `pending_bytes_limit`; includes frozen pages and conservative cross-job charging. |
 | Pending jobs | Same `rtp_llm_decode_publish_` prefix: `pending_jobs`, `queued_jobs`, `running_jobs`, `quarantined_jobs`, `pending_jobs_limit`. Total includes quarantine. |
@@ -163,6 +178,20 @@ Payload counts exclude D2D and NIC retransmissions. Successful earlier chunks
 remain counted when a later chunk fails. An attempted failed/throwing SDK call
 increments `rtp_llm_remote_payload_completion_unknown_qps`; its partial bytes
 remain unknown. Pre-SDK geometry rejection is not unknown I/O.
+
+For SSD, the observer runs at each actual inner SDK call. Completed objects
+remain counted if a later object or D2D scatter fails; the outer wrapper does
+not count them again. Arena/geometry/device-initialization rejection before the
+inner SDK call produces no SDK payload event. Payload-volume uncertainty is
+separate from whether the SDK proves that caller buffers are safe to release.
+
+Restore mode `checkpoint_gpu_ready` currently measures read entry through
+successful load settlement, emitted only after P adopts a real remote restore.
+`fused_context_ready` ends at the existing successful P context-update event;
+it includes merged new-prompt computation and is not isolated tail replay or
+generic TTFT. Keep the distributions separate. These subphases do not yet
+establish the complete lookup/allocation start or an independently verified
+all-rank tail-completion boundary. Pure local hits and failed loads emit neither.
 
 Logical D token counts must exclude the already-computed P prefix, CP replicas
 and duplicate retries; each real repeated use counts separately. Restoration is
