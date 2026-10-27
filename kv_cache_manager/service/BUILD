@@ -77,6 +77,7 @@ cc_library(
         ":service_impl_base",
         "//kv_cache_manager/common",
         "//kv_cache_manager/common:env_util",
+        "//kv_cache_manager/common:cache_origin",
         "//kv_cache_manager/config:leader_elector_base",
         "//kv_cache_manager/manager:cache_location_view",
         "//kv_cache_manager/manager:cache_manager",

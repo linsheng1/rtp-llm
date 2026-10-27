@@ -22,6 +22,19 @@ protected:
 
 #define GET(ptr, group, name) (ptr)->get_##group##_##name##_metrics()
 
+TEST_F(MetricsCollectorTest, CompletedDecodePublishCounterUsesExistingInstanceDimension) {
+    MetricsTags tags = {{"instance_id", "isolated_instance"}};
+    ServiceMetricsCollector first(metrics_registry_, tags), second(metrics_registry_, tags);
+    ASSERT_TRUE(first.Init());
+    ASSERT_TRUE(second.Init());
+    EXPECT_EQ(first.get_manager_completed_decode_publish_tokens_counter_metrics(), 0u);
+    first.AddCompletedDecodePublishTokens(1024);
+    EXPECT_EQ(second.get_manager_completed_decode_publish_tokens_counter_metrics(), 1024u);
+    EXPECT_EQ(first.TakeCompletedDecodePublishTokensSample(), 1024u);
+    EXPECT_EQ(first.TakeCompletedDecodePublishTokensSample(), 0u);
+    EXPECT_EQ(second.TakeCompletedDecodePublishTokensSample(), 0u);
+}
+
 TEST_F(MetricsCollectorTest, EventReportMetricsTest) {
     MetricsTags tags = {{"event_type", "block_snapshot"}};
     auto collector = std::make_shared<EventReportMetricsCollector>(metrics_registry_, tags);

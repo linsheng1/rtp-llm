@@ -159,6 +159,11 @@ public:
                             std::is_same_v<T, proto::admin::CacheLocation>>
     CacheLocationsFromProto(const google::protobuf::RepeatedPtrField<T> &proto_cache_locations,
                             std::vector<CacheLocation> &cache_location_infos);
+    // FinishWrite SDK sends ST_UNSPECIFIED / -1, because Locations contains
+    // only spec names/URIs. Preserve those sentinels; allocation is authoritative.
+    static bool
+    FinishedCacheLocationsFromProto(const google::protobuf::RepeatedPtrField<proto::meta::CacheLocation> &locations,
+                                    std::vector<CacheLocation> &out);
 };
 // DONE
 template <typename T>

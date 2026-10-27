@@ -20,6 +20,7 @@
 #include <utility>
 #include <vector>
 
+#include "kv_cache_manager/common/cache_origin.h"
 #include "kv_cache_manager/common/env_util.h"
 #include "kv_cache_manager/common/jsonizable.h"
 #include "kv_cache_manager/common/logger.h"
@@ -38,6 +39,7 @@
 #include "kv_cache_manager/manager/cache_reclaimer.h"
 #include "kv_cache_manager/manager/data_storage_selector.h"
 #include "kv_cache_manager/manager/event_report_cleanup_util.h"
+#include "kv_cache_manager/manager/finish_write_validator.h"
 #include "kv_cache_manager/manager/hash_util.h"
 #include "kv_cache_manager/manager/meta_searcher_manager.h"
 #include "kv_cache_manager/manager/migration_manager.h"
@@ -1272,6 +1274,7 @@ CacheManager::StartWriteCache(RequestContext *request_context,
     RETURN_IF_EC_NOT_OK_WITH_TYPE_LOG(WARN, filter_ec, StartWriteCacheInfo, "filter write cache failed");
 
     std::vector<std::string> location_ids;
+    CacheLocationVector allocated_locations;
     std::string write_session_id = StringUtil::GenerateRandomString(32);
     if (new_keys.empty()) {
         // if no new keys, delete this write_session_id as soon as possible
@@ -1289,14 +1292,16 @@ CacheManager::StartWriteCache(RequestContext *request_context,
         RETURN_IF_EC_NOT_OK_WITH_TYPE_LOG(WARN, ec, StartWriteCacheInfo, "start write cache failed");
         KVCM_METRICS_COLLECTOR_CHRONO_MARK_BEGIN(service_metrics_collector, ManagerBatchAddLocation);
         std::vector<MetaSearcher::AddLocationResult> add_results;
-        ec = meta_searcher->BatchAddLocation(request_context, new_keys, new_locations, add_results);
+        ec = meta_searcher->BatchAddLocation(request_context, new_keys, new_locations, add_results, write_session_id);
         KVCM_METRICS_COLLECTOR_CHRONO_MARK_END(service_metrics_collector, ManagerBatchAddLocation);
         if (ec != EC_OK) {
             RollbackAddLocations(request_context, instance_id, new_keys, new_locations, add_results);
         } else {
             location_ids.reserve(add_results.size());
+            allocated_locations.reserve(add_results.size());
             for (const auto &add_result : add_results) {
                 location_ids.push_back(add_result.location_id);
+                allocated_locations.push_back(add_result.allocated_location);
             }
             RecordWriteBytesForLocations(new_locations); // 记录写入量
         }
@@ -1316,7 +1321,9 @@ CacheManager::StartWriteCache(RequestContext *request_context,
             auto ec = this->FinishWriteCache(
                 &temp_request_context, instance_id, write_session_id, succeed_block, std::move(write_location_info));
             static_cast<void>(ec);
-        });
+        },
+        instance_id,
+        std::move(allocated_locations));
     KVCM_METRICS_COLLECTOR_CHRONO_MARK_END(service_metrics_collector, PutWriteLocationManager);
     auto start_write_event = std::make_shared<StartWriteCacheEvent>(instance_id);
     start_write_event->SetEventTriggerTime();
@@ -1432,12 +1439,33 @@ CacheManager::FinishWriteCache(RequestContext *request_context,
                                const std::string &instance_id,
                                const std::string &write_session_id,
                                const BlockMask &success_block_mask,
-                               std::unique_ptr<WriteLocationManager::WriteLocationInfo> write_location_info_internal) {
+                               std::unique_ptr<WriteLocationManager::WriteLocationInfo> write_location_info_internal,
+                               const std::vector<CacheLocation> &actual_locations) {
     SPAN_TRACER(request_context);
     const std::string &trace_id = request_context->trace_id();
     auto *service_metrics_collector = dynamic_cast<ServiceMetricsCollector *>(request_context->metrics_collector());
     WriteLocationManager::WriteLocationInfo location_info;
-    if (write_location_info_internal != nullptr) {
+    CacheLocationVector serving_locations;
+    bool source_finish = false;
+    for (const auto &location : actual_locations) {
+        for (const auto &spec : location.location_specs()) {
+            source_finish = source_finish || HasDecodeOriginParameter(spec.uri());
+        }
+    }
+    if (source_finish) {
+        if (write_location_info_internal != nullptr || !meta_searcher_manager_->GetMetaSearcher(instance_id)) {
+            return EC_BADARGS;
+        }
+        const auto validate = [&](const WriteLocationManager::WriteLocationInfo &allocation) {
+            return ValidateFinishedLocations(
+                allocation, instance_id, write_session_id, success_block_mask, actual_locations, serving_locations);
+        };
+        const ErrorCode claim_ec = write_location_manager_->TakeValidated(write_session_id, validate, location_info);
+        if (claim_ec != EC_OK) {
+            request_context->error_tracer()->AddErrorMsg("FinishWrite allocation/source validation or claim failed");
+            return claim_ec;
+        }
+    } else if (write_location_info_internal != nullptr) {
         location_info = std::move(*write_location_info_internal);
     } else if (!write_location_manager_->GetAndDelete(write_session_id, location_info)) {
         request_context->error_tracer()->AddErrorMsg("write_session_id has been deleted");
@@ -1460,6 +1488,7 @@ CacheManager::FinishWriteCache(RequestContext *request_context,
     std::vector<KeyType> success_batch_keys;
     std::vector<std::string> success_batch_location_ids;
     std::vector<std::vector<MetaSearcher::LocationUpdateTask>> success_batch_update_tasks;
+    std::vector<std::vector<MetaSearcher::LocationCASTask>> success_batch_commit_tasks;
     CacheLocationDelRequest failed_del_request{.instance_id = instance_id, .delay = std::chrono::seconds(0)};
 
     for (size_t block_key_idx = 0; block_key_idx < location_info.keys.size(); block_key_idx++) {
@@ -1469,10 +1498,21 @@ CacheManager::FinishWriteCache(RequestContext *request_context,
             success_batch_location_ids.push_back(location_info.location_ids[block_key_idx]);
             success_batch_update_tasks.push_back(
                 {{location_info.location_ids[block_key_idx], CacheLocationStatus::CLS_SERVING}});
+            if (source_finish) {
+                success_batch_commit_tasks.push_back({{location_info.location_ids[block_key_idx],
+                                                       CLS_WRITING,
+                                                       CLS_SERVING,
+                                                       location_info.allocated_locations[block_key_idx]->ToJsonString(),
+                                                       serving_locations[success_batch_commit_tasks.size()]}});
+            }
         } else {
             // failed
             failed_del_request.block_keys.push_back(location_info.keys[block_key_idx]);
             failed_del_request.location_ids.push_back({location_info.location_ids[block_key_idx]});
+            if (source_finish) {
+                failed_del_request.expected_location_values.push_back(
+                    {location_info.allocated_locations[block_key_idx]->ToJsonString()});
+            }
         }
     }
 
@@ -1482,8 +1522,27 @@ CacheManager::FinishWriteCache(RequestContext *request_context,
     KVCM_METRICS_COLLECTOR_CHRONO_MARK_BEGIN(service_metrics_collector, ManagerBatchUpdateLocation);
     std::vector<std::vector<ErrorCode>> out_batch_results;
     if (!success_batch_keys.empty()) {
-        ec = meta_searcher->BatchUpdateLocationStatus(
-            request_context, success_batch_keys, success_batch_update_tasks, out_batch_results);
+        if (!source_finish) {
+            ec = meta_searcher->BatchUpdateLocationStatus(
+                request_context, success_batch_keys, success_batch_update_tasks, out_batch_results);
+        } else {
+            ec = meta_searcher->BatchCASLocationStatus(
+                request_context, success_batch_keys, success_batch_commit_tasks, out_batch_results);
+            // Generic cleanup CAS treats missing slots as idempotent. A new
+            // publication must actually replace every original allocation.
+            if (ec == EC_OK) {
+                if (out_batch_results.size() != success_batch_keys.size()) {
+                    ec = EC_ERROR;
+                } else {
+                    for (const auto &result : out_batch_results) {
+                        if (result.size() != 1 || result.front() != EC_OK) {
+                            ec = result.size() == 1 ? result.front() : EC_ERROR;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
         if (ec != EC_OK) {
             std::string detail_ec_str = MetaSearcher::BatchErrorCodeToStr(out_batch_results);
             PREFIX_LOG(WARN, "update location status failed, ec: %d, ec_batches: %s", ec, detail_ec_str.c_str());
@@ -1552,6 +1611,23 @@ CacheManager::FinishWriteCache(RequestContext *request_context,
         }
     }
 
+    if (source_finish) {
+        failed_del_request.authoritative_read = true;
+        if (ec != EC_OK) {
+            // A claimed session cannot run its timeout callback again. Route
+            // failed/unknown commit cleanup through the existing version-guarded
+            // reclaimer. Already SERVING or replaced locations do not match the
+            // exact original WRITING value and must not be removed.
+            for (size_t i = 0; i < location_info.keys.size(); ++i) {
+                if (!IsIndexInMaskRange(success_block_mask, i))
+                    continue;
+                failed_del_request.block_keys.push_back(location_info.keys[i]);
+                failed_del_request.location_ids.push_back({location_info.location_ids[i]});
+                failed_del_request.expected_location_values.push_back(
+                    {location_info.allocated_locations[i]->ToJsonString()});
+            }
+        }
+    }
     if (!failed_del_request.block_keys.empty()) {
         reclaimer_task_supervisor_->Submit(request_context->trace_id(), std::move(failed_del_request));
         // no need to wait delete finish here
@@ -1561,6 +1637,19 @@ CacheManager::FinishWriteCache(RequestContext *request_context,
     finish_write_event->SetAddtionalArgs(write_session_id, success_block_mask);
     if (event_manager_) {
         event_manager_->Publish(finish_write_event);
+    }
+    if (source_finish && ec == EC_OK && service_metrics_collector != nullptr) {
+        try {
+            const auto tokens = CountCompletedDecodePublishTokens(
+                true, location_info.keys.size(), success_batch_keys.size(), write_session_id, serving_locations);
+            if (tokens > 0) {
+                service_metrics_collector->AddCompletedDecodePublishTokens(static_cast<uint64_t>(tokens));
+            }
+        } catch (const std::bad_alloc &) {
+            // Optional statistics must not turn a committed transaction into a
+            // failed response or repeat the claim. Payload/source commit stands.
+            PREFIX_LOG(WARN, "completed Decode publish metric unavailable");
+        }
     }
     return ec;
 }

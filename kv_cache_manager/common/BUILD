@@ -2,6 +2,12 @@ load("//bazel:version.bzl", "version_info_cc")
 
 package(default_visibility = ["//visibility:public"])
 
+cc_library(
+    name = "cache_origin",
+    hdrs = ["cache_origin.h"],
+    deps = [":standard_uri"],
+)
+
 version_info_cc(
     name = "build_version",
 )

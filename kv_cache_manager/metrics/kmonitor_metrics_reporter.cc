@@ -56,6 +56,7 @@ struct KmonitorMetricsReporter::Context {
     DECLARE_METRICS(manager, prefix_match_len);
     DECLARE_METRICS(manager, get_cache_location_query_block_counter);
     DECLARE_METRICS(manager, get_cache_location_hit_block_counter);
+    DECLARE_METRICS(manager, completed_decode_publish_tokens_qps);
     DECLARE_METRICS(manager, prefix_match_time_us);
     DECLARE_METRICS(manager, batch_get_time_us);
     DECLARE_METRICS(manager, lock_write_location_retry_times);
@@ -369,6 +370,7 @@ bool KmonitorMetricsReporter::InitMetrics() {
     // existing codebase convention (e.g. cache_reclaimer counters).
     REGISTER_GAUGE_METRIC(manager, get_cache_location_query_block_counter);
     REGISTER_GAUGE_METRIC(manager, get_cache_location_hit_block_counter);
+    REGISTER_QPS_METRIC(manager, completed_decode_publish_tokens_qps);
     REGISTER_GAUGE_METRIC(manager, prefix_match_time_us);
     REGISTER_GAUGE_METRIC(manager, batch_get_time_us);
     REGISTER_GAUGE_METRIC(manager, lock_write_location_retry_times);
@@ -611,6 +613,7 @@ void KmonitorMetricsReporter::ReportPerQuery(MetricsCollector *collector, std::o
         REPORT_COLLECTED_METRICS(manager, prefix_match_len);
         REPORT_COLLECTED_METRICS(manager, get_cache_location_query_block_counter);
         REPORT_COLLECTED_METRICS(manager, get_cache_location_hit_block_counter);
+        REPORT_METRICS(manager, completed_decode_publish_tokens_qps, p->TakeCompletedDecodePublishTokensSample());
         REPORT_COLLECTED_METRICS(manager, prefix_match_time_us);
         REPORT_COLLECTED_METRICS(manager, batch_get_time_us);
         REPORT_COLLECTED_METRICS(manager, lock_write_location_retry_times);

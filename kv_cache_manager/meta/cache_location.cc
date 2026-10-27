@@ -38,6 +38,7 @@ CacheLocation::CacheLocation(const CacheLocation &other)
     , type_(other.type_)
     , spec_size_(other.spec_size_)
     , create_time_(other.create_time_)
+    , allocation_session_id_(other.allocation_session_id_)
     , location_specs_(other.location_specs_)
     , validated_total_size_(other.validated_total_size_) {
     if (const auto *owned = std::get_if<std::string>(&other.id_)) {

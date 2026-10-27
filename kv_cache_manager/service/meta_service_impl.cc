@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "google/protobuf/message.h"
+#include "kv_cache_manager/common/cache_origin.h"
 #include "kv_cache_manager/common/env_util.h"
 #include "kv_cache_manager/common/error_code.h"
 #include "kv_cache_manager/common/logger.h"
@@ -792,8 +793,24 @@ void MetaServiceImpl::FinishWriteCache(RequestContext *request_context,
     // 调用Manager层完成写入缓存
     BlockMask success_blocks_req;
     ProtoConvert::BlockMaskFromProto(&request->success_blocks(), success_blocks_req);
-    ErrorCode ec_info = cache_manager_->FinishWriteCache(
-        request_context, request->instance_id(), request->write_session_id(), success_blocks_req);
+    std::vector<CacheLocation> actual_locations;
+    bool has_origin = false;
+    for (const auto &location : request->locations()) {
+        for (const auto &spec : location.location_specs()) {
+            has_origin = has_origin || HasDecodeOriginParameter(spec.uri());
+        }
+    }
+    // Unmarked SDK locations were historically ignored. Preserve that complete
+    // compatibility path, including its sentinel fields and URI behavior.
+    const bool valid =
+        !has_origin || ProtoConvert::FinishedCacheLocationsFromProto(request->locations(), actual_locations);
+    ErrorCode ec_info = valid ? cache_manager_->FinishWriteCache(request_context,
+                                                                 request->instance_id(),
+                                                                 request->write_session_id(),
+                                                                 success_blocks_req,
+                                                                 nullptr,
+                                                                 actual_locations)
+                              : EC_BADARGS;
 
     if (ec_info != EC_OK) {
         status->set_code(ToMetaPbError(ec_info));

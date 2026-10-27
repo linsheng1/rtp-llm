@@ -1,6 +1,16 @@
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
+    name = "finish_write_validator",
+    srcs = ["finish_write_validator.cc"],
+    hdrs = ["finish_write_validator.h"],
+    deps = [
+        ":write_location_manager",
+        "//kv_cache_manager/common:cache_origin",
+    ],
+)
+
+cc_library(
     name = "hash_util",
     hdrs = [
         "hash_util.h",
@@ -21,6 +31,7 @@ cc_library(
         ":cache_manager_metrics_recorder",
         ":cache_reclaimer",
         ":data_storage_selector",
+        ":finish_write_validator",
         ":hash_util",
         ":meta_searcher",
         ":migration_manager",
@@ -28,6 +39,7 @@ cc_library(
         ":startup_config_loader",
         ":write_location_manager",
         "//kv_cache_manager/common",
+        "//kv_cache_manager/common:cache_origin",
         "//kv_cache_manager/config",
         "//kv_cache_manager/data_storage",
         "//kv_cache_manager/event:event_publisher",

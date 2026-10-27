@@ -264,6 +264,7 @@ class ServiceMetricsCollector final : public MetricsCollector {
     KVCM_GAUGE_METRICS(manager, prefix_match_len)
     KVCM_COUNTER_METRICS(manager, get_cache_location_query_block_counter)
     KVCM_COUNTER_METRICS(manager, get_cache_location_hit_block_counter)
+    KVCM_COUNTER_METRICS(manager, completed_decode_publish_tokens_counter)
     KVCM_CHRONO_METRICS(manager, prefix_match_time_us, ManagerPrefixMatch)
     KVCM_CHRONO_METRICS(manager, batch_get_time_us, ManagerBatchGet)
     KVCM_GAUGE_METRICS(manager, lock_write_location_retry_times)
@@ -320,6 +321,20 @@ public:
     ~ServiceMetricsCollector() override = default;
 
     bool Init() override;
+
+    // The registry counter is cumulative for Prometheus/local inspection;
+    // KMonitor QPS needs this request's delta, never the shared running total.
+    void AddCompletedDecodePublishTokens(uint64_t tokens) {
+        manager_completed_decode_publish_tokens_counter_metrics_ += tokens;
+        completed_decode_publish_tokens_sample_ += tokens;
+    }
+    uint64_t TakeCompletedDecodePublishTokensSample() noexcept {
+        const auto result = completed_decode_publish_tokens_sample_;
+        completed_decode_publish_tokens_sample_ = 0;
+        return result;
+    }
+private:
+    uint64_t completed_decode_publish_tokens_sample_{0};
 };
 
 // Lightweight per-event observability for ReportEvent. It reuses service.*

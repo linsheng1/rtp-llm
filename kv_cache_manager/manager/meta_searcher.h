@@ -140,11 +140,15 @@ public:
         ErrorCode ec = EC_UNKNOWN;
         // EC_OK 时是可供业务使用的 location id；失败时若非空，仅可作为回滚定位符。
         std::string location_id;
+        // Exact immutable WRITING value installed by this allocation. Shared
+        // with its write session for FinishWrite version checks; no URI copy.
+        CacheLocationConstPtr allocated_location = nullptr;
     };
     ErrorCode BatchAddLocation(RequestContext *request_context,
                                const KeyVector &keys,
                                const CacheLocationVector &locations,
-                               std::vector<AddLocationResult> &out_results);
+                               std::vector<AddLocationResult> &out_results,
+                               const std::string &allocation_session_id = {});
     struct AddLocationRollbackPlan {
         // Confirmed-successful items (EC_OK + non-empty location id). The
         // caller submits these to the standard location delete pipeline.
@@ -340,6 +344,9 @@ public:
         // This closes the gap between a cleanup scan and its status CAS when
         // a stable location id is refreshed by a newer snapshot.
         std::string expected_location_value;
+        // Optional FinishWrite replacement; URI/specs/source and SERVING become
+        // visible as one immutable location under the existing metadata fence.
+        CacheLocationConstPtr serving_replacement = nullptr;
     };
     ErrorCode BatchCASLocationStatus(RequestContext *request_context,
                                      const KeyVector &keys,

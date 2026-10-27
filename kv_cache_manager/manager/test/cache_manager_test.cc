@@ -16,6 +16,7 @@
 
 #include "kv_cache_manager/common/jsonizable.h"
 #include "kv_cache_manager/common/request_context.h"
+#include "kv_cache_manager/common/standard_uri.h"
 #include "kv_cache_manager/common/string_util.h"
 #include "kv_cache_manager/common/unittest.h"
 #include "kv_cache_manager/config/instance_group.h"
@@ -2069,6 +2070,153 @@ TEST_F(CacheManagerTest, TestGetCacheNotExistLocation) {
         ASSERT_EQ(EC_OK, ec);
         const auto &cache_locations_view = cache_locations.cache_locations_view();
         ASSERT_EQ(3, cache_locations_view.size());
+    }
+}
+
+TEST_F(CacheManagerTest, SpecifiedFinishPersistsSourceAndRejectedInputDoesNotConsumeSession) {
+    auto collector = std::make_shared<ServiceMetricsCollector>(metrics_registry_);
+    ASSERT_TRUE(collector->Init());
+    request_context_ = std::make_shared<RequestContext>("completed_source_publish", collector);
+    ASSERT_EQ(EC_OK,
+              cache_manager_
+                  ->RegisterInstance(request_context_.get(),
+                                     "default",
+                                     "test_instance",
+                                     64,
+                                     createLocationSpecInfos(),
+                                     createModelDeployment(),
+                                     std::vector<LocationSpecGroup>())
+                  .first);
+    const std::vector<int64_t> keys{8101, 8102};
+    auto [start_ec, started] =
+        cache_manager_->StartWriteCache(request_context_.get(), "test_instance", keys, {}, {}, 60);
+    ASSERT_EQ(start_ec, EC_OK);
+    std::vector<CacheLocation> actual;
+    for (const auto &view : started.locations().cache_locations_view()) {
+        std::vector<LocationSpec> specs;
+        const auto origin = "v1." + started.write_session_id() + ".0." + std::to_string(64 * actual.size()) + "." +
+                            std::to_string(64 * (actual.size() + 1)) + ".128.129";
+        for (const auto &spec : view.location_specs()) {
+            specs.emplace_back(spec.name(), StandardUri(spec.uri()).ToUriStringWithExtraParam("dtop_origin", origin));
+        }
+        // Exact SDK GenCacheLocation wire shape after proto conversion.
+        actual.emplace_back(DataStorageType::DATA_STORAGE_TYPE_UNKNOWN, std::numeric_limits<size_t>::max(), specs);
+    }
+    ASSERT_EQ(actual.size(), 2u);
+    auto invalid = actual;
+    invalid.back().mutable_location_specs()[0].set_uri("nfs://foreign/path?size=0");
+    EXPECT_EQ(EC_BADARGS,
+              cache_manager_->FinishWriteCache(
+                  request_context_.get(), "test_instance", started.write_session_id(), size_t{2}, nullptr, invalid));
+    EXPECT_EQ(collector->get_manager_completed_decode_publish_tokens_counter_metrics(), 0u);
+    EXPECT_EQ(EC_OK,
+              cache_manager_->FinishWriteCache(
+                  request_context_.get(), "test_instance", started.write_session_id(), size_t{2}, nullptr, actual));
+    EXPECT_EQ(collector->get_manager_completed_decode_publish_tokens_counter_metrics(), 128u);
+    auto [lookup_ec, found] = cache_manager_->GetCacheLocation(
+        request_context_.get(), "test_instance", CacheManager::QueryType::QT_PREFIX_MATCH, keys, {}, size_t{0}, 0, {});
+    ASSERT_EQ(lookup_ec, EC_OK);
+    ASSERT_EQ(found.cache_locations_view().size(), 2u);
+    for (size_t i = 0; i < actual.size(); ++i) {
+        const auto &restored = found.cache_locations_view()[i];
+        ASSERT_EQ(restored.location_specs().size(), actual[i].location_specs().size());
+        for (size_t j = 0; j < restored.location_specs().size(); ++j) {
+            EXPECT_EQ(restored.location_specs()[j].uri(), actual[i].location_specs()[j].uri());
+        }
+    }
+    EXPECT_NE(EC_OK,
+              cache_manager_->FinishWriteCache(
+                  request_context_.get(), "test_instance", started.write_session_id(), size_t{2}, nullptr, actual));
+    EXPECT_EQ(collector->get_manager_completed_decode_publish_tokens_counter_metrics(), 128u);
+}
+
+TEST_F(CacheManagerTest, SourceFinishPartialCasFailureDoesNotReclaimServingValues) {
+    auto collector = std::make_shared<ServiceMetricsCollector>(metrics_registry_);
+    ASSERT_TRUE(collector->Init());
+    request_context_ = std::make_shared<RequestContext>("partial_source_publish", collector);
+    cache_manager_->reclaimer_task_supervisor_->Stop();
+    ASSERT_EQ(EC_OK,
+              cache_manager_
+                  ->RegisterInstance(request_context_.get(),
+                                     "default",
+                                     "test_instance",
+                                     64,
+                                     createLocationSpecInfos(),
+                                     createModelDeployment(),
+                                     std::vector<LocationSpecGroup>())
+                  .first);
+    const std::vector<int64_t> keys{8201, 8202};
+    auto [start_ec, started] =
+        cache_manager_->StartWriteCache(request_context_.get(), "test_instance", keys, {}, {}, 60);
+    ASSERT_EQ(start_ec, EC_OK);
+    std::vector<CacheLocation> actual;
+    for (const auto &view : started.locations().cache_locations_view()) {
+        std::vector<LocationSpec> specs;
+        const auto origin = "v1." + started.write_session_id() + ".0." + std::to_string(64 * actual.size()) + "." +
+                            std::to_string(64 * (actual.size() + 1)) + ".128.129";
+        for (const auto &spec : view.location_specs()) {
+            specs.emplace_back(spec.name(), StandardUri(spec.uri()).ToUriStringWithExtraParam("dtop_origin", origin));
+        }
+        actual.emplace_back(DataStorageType::DATA_STORAGE_TYPE_UNKNOWN, std::numeric_limits<size_t>::max(), specs);
+    }
+    ASSERT_EQ(actual.size(), 2u);
+    auto *searcher = cache_manager_->meta_searcher_manager_->GetMetaSearcher("test_instance");
+    ASSERT_NE(searcher, nullptr);
+    std::vector<CacheLocationMap> before;
+    ASSERT_EQ(EC_OK, searcher->BatchGetLocation(request_context_.get(), keys, size_t{0}, before));
+    ASSERT_EQ(before.size(), 2u);
+    ASSERT_EQ(before[0].size(), 1u);
+    const auto first = before[0].begin()->second;
+    std::vector<std::vector<ErrorCode>> update_results;
+    ASSERT_EQ(EC_OK,
+              searcher->BatchUpdateLocationStatus(
+                  request_context_.get(), {keys[0]}, {{{first->id(), CLS_SERVING}}}, update_results));
+    // The first original WRITING CAS is now stale; the second may validly commit.
+    EXPECT_EQ(EC_MISMATCH,
+              cache_manager_->FinishWriteCache(
+                  request_context_.get(), "test_instance", started.write_session_id(), size_t{2}, nullptr, actual));
+    EXPECT_EQ(collector->get_manager_completed_decode_publish_tokens_counter_metrics(), 0u);
+    std::shared_ptr<ReclaimerTaskSupervisor::ReclaimerTaskSupervisorCell> cleanup;
+    ASSERT_TRUE(cache_manager_->reclaimer_task_supervisor_->cell_queue_.Pop(&cleanup));
+    ASSERT_EQ(cleanup->result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(cleanup->result.get().status, EC_OK);
+    std::vector<CacheLocationMap> after;
+    ASSERT_EQ(EC_OK, searcher->BatchGetLocation(request_context_.get(), keys, size_t{0}, after));
+    ASSERT_EQ(after.size(), 2u);
+    for (size_t i = 0; i < after.size(); ++i) {
+        ASSERT_EQ(after[i].size(), 1u);
+        EXPECT_EQ(after[i].begin()->second->status(), CLS_SERVING);
+        const auto &uri = after[i].begin()->second->location_specs()[0].uri();
+        EXPECT_EQ(uri.find("dtop_origin=") != std::string::npos, i == 1);
+    }
+}
+
+TEST_F(CacheManagerTest, PartialMaskAndLegacyFinishNeverCountCompletedDecodePublication) {
+    auto collector = std::make_shared<ServiceMetricsCollector>(metrics_registry_);
+    ASSERT_TRUE(collector->Init());
+    request_context_ = std::make_shared<RequestContext>("noncompleted_source_publish", collector);
+    ASSERT_EQ(EC_OK, cache_manager_->RegisterInstance(request_context_.get(), "default", "test_instance", 64,
+              createLocationSpecInfos(), createModelDeployment(), std::vector<LocationSpecGroup>()).first);
+    for (const bool marked : {false, true}) {
+        const std::vector<int64_t> keys = marked ? std::vector<int64_t>{8301, 8302} : std::vector<int64_t>{8303, 8304};
+        auto [start_ec, started] = cache_manager_->StartWriteCache(request_context_.get(), "test_instance", keys, {}, {}, 60);
+        ASSERT_EQ(start_ec, EC_OK);
+        std::vector<CacheLocation> actual;
+        for (const auto &view : started.locations().cache_locations_view()) {
+            std::vector<LocationSpec> specs;
+            const auto value = "v1." + started.write_session_id() + ".0." + std::to_string(actual.size() * 64) + "." +
+                               std::to_string((actual.size() + 1) * 64) + ".128.129";
+            for (const auto &spec : view.location_specs())
+                specs.emplace_back(spec.name(), marked ? StandardUri(spec.uri()).ToUriStringWithExtraParam("dtop_origin", value)
+                                                       : spec.uri());
+            actual.emplace_back(DataStorageType::DATA_STORAGE_TYPE_UNKNOWN, std::numeric_limits<size_t>::max(), specs);
+        }
+        ASSERT_EQ(actual.size(), 2u);
+        if (marked)
+            actual.resize(1);  // Valid selected-key source commit, but not a completed whole session.
+        EXPECT_EQ(EC_OK, cache_manager_->FinishWriteCache(request_context_.get(), "test_instance",
+                  started.write_session_id(), marked ? size_t{1} : size_t{2}, nullptr, actual));
+        EXPECT_EQ(collector->get_manager_completed_decode_publish_tokens_counter_metrics(), 0u);
     }
 }
 

@@ -4088,6 +4088,56 @@ TEST_F(MetaSearcherTest, TestBatchCASLocationStatusChecksExactLocationValue) {
     ASSERT_EQ((std::vector<std::vector<ErrorCode>>{{EC_OK}}), results);
 }
 
+TEST_F(MetaSearcherTest, FinishWriteCASReplacesCompleteValueAndRejectsStaleAllocation) {
+    const MetaSearcher::KeyVector keys{151};
+    auto location = MetaSearcherTestHelper::CreateCacheLocation(
+        DataStorageType::DATA_STORAGE_TYPE_NFS, 1, MetaSearcherTestHelper::CreateDefaultLocationSpecs());
+    std::vector<MetaSearcher::AddLocationResult> allocated;
+    ASSERT_EQ(
+        EC_OK,
+        meta_searcher_->BatchAddLocation(request_context_.get(), keys, {location}, allocated, "original-session"));
+    ASSERT_EQ(allocated.size(), 1u);
+    const auto original = allocated[0].allocated_location;
+    ASSERT_NE(original, nullptr);
+    ASSERT_EQ(original->status(), CLS_WRITING);
+    ASSERT_EQ(original->allocation_session_id(), "original-session");
+    auto serving = std::make_shared<CacheLocation>(*original);
+    for (auto &spec : serving->mutable_location_specs()) {
+        spec.set_uri(spec.uri() + "&dtop_origin=validated-source");
+    }
+    serving->set_status(CLS_SERVING);
+    const std::vector<std::vector<MetaSearcher::LocationCASTask>> tasks{
+        {{original->id(), CLS_WRITING, CLS_SERVING, original->ToJsonString(), serving}}};
+    std::vector<std::vector<ErrorCode>> results;
+    ASSERT_EQ(EC_OK, meta_searcher_->BatchCASLocationStatus(request_context_.get(), keys, tasks, results));
+    ASSERT_EQ((std::vector<std::vector<ErrorCode>>{{EC_OK}}), results);
+    std::vector<CacheLocationMap> values;
+    ASSERT_EQ(EC_OK, meta_searcher_->BatchGetLocation(request_context_.get(), keys, size_t{0}, values));
+    ASSERT_EQ(values.size(), 1u);
+    EXPECT_EQ(values[0].at(original->id())->ToJsonString(), serving->ToJsonString());
+    EXPECT_EQ(original->status(), CLS_WRITING); // The retained allocation is immutable.
+
+    ASSERT_EQ(EC_OK, meta_searcher_->BatchCASLocationStatus(request_context_.get(), keys, tasks, results));
+    EXPECT_EQ((std::vector<std::vector<ErrorCode>>{{EC_MISMATCH}}), results);
+    ASSERT_EQ(EC_OK, meta_searcher_->BatchGetLocation(request_context_.get(), keys, size_t{0}, values));
+    EXPECT_EQ(values[0].at(original->id())->ToJsonString(), serving->ToJsonString());
+}
+
+TEST_F(MetaSearcherTest, FinishWriteCASRequiresAnExactWritingVersion) {
+    std::vector<std::vector<ErrorCode>> results;
+    auto serving = std::make_shared<CacheLocation>();
+    serving->set_id("id");
+    serving->set_status(CLS_SERVING);
+    const std::vector<std::vector<MetaSearcher::LocationCASTask>> missing_version{
+        {{"id", CLS_WRITING, CLS_SERVING, "", serving}}};
+    EXPECT_EQ(EC_BADARGS,
+              meta_searcher_->BatchCASLocationStatus(request_context_.get(), {152}, missing_version, results));
+    const std::vector<std::vector<MetaSearcher::LocationCASTask>> missing_target{
+        {{"id", CLS_WRITING, CLS_SERVING, "old", serving}}};
+    EXPECT_EQ(EC_OK, meta_searcher_->BatchCASLocationStatus(request_context_.get(), {152}, missing_target, results));
+    EXPECT_EQ((std::vector<std::vector<ErrorCode>>{{EC_NOENT}}), results);
+}
+
 TEST_F(MetaSearcherTest, TestBatchCADLocationStatus) {
     // 准备测试数据
     MetaSearcher::KeyVector keys = {400, 500, 600};

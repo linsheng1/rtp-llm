@@ -278,3 +278,12 @@ cc_test(
         "//kv_cache_manager/metrics:metrics_lifecycle",
     ],
 )
+cc_test(
+    name = "finish_write_validator_test",
+    srcs = ["finish_write_validator_test.cc"],
+    deps = [
+        "//kv_cache_manager/manager:finish_write_validator",
+        "//kv_cache_manager/common:cache_origin",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

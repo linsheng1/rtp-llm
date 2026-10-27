@@ -2,6 +2,7 @@
 #include <vector>
 
 #include "kmonitor/client/core/MutableMetric.h"
+#include "kmonitor/client/metric/QpsMetric.h"
 #include "kv_cache_manager/common/unittest.h"
 #include "kv_cache_manager/config/registry_manager.h"
 #include "kv_cache_manager/data_storage/data_storage_manager.h"
@@ -20,6 +21,17 @@ thread_local double reported_error_qps = 0;
 thread_local double reported_create_qps = 0;
 thread_local std::vector<double> reported_create_keys;
 thread_local std::vector<double> reported_create_times;
+thread_local std::vector<double> reported_decode_publish_deltas;
+thread_local std::unique_ptr<kmonitor::QpsMetric> decode_publish_qps_accumulator;
+void CaptureDecodePublishQps(kmonitor::MutableMetric *metric, const kmonitor::MetricsTags *tags, double value) {
+    if (metric->metric_name_.find("manager.completed_decode_publish_tokens_qps") == std::string::npos)
+        return;
+    auto *series = metric->DeclareMetric(tags);
+    EXPECT_NE(dynamic_cast<kmonitor::QpsMetric *>(series), nullptr);
+    EXPECT_TRUE(metric->UndeclareMetric(series));
+    reported_decode_publish_deltas.push_back(value);
+    decode_publish_qps_accumulator->Update(value);
+}
 
 void CaptureErrorQps(kmonitor::MutableMetric *metric, const kmonitor::MetricsTags *, double value) {
     if (metric->metric_name_.find("service.error_qps") != std::string::npos) {
@@ -57,6 +69,30 @@ protected:
 };
 
 TEST_F(KmonitorMetricsReporterTest, TestConstructorAndDestructor) { EXPECT_NE(reporter_, nullptr); }
+
+TEST_F(KmonitorMetricsReporterTest, CompletedDecodePublicationReportsDeltasAsQpsRatherThanAnAverage) {
+    Stub stub;
+    auto report = static_cast<void (kmonitor::MutableMetric::*)(const kmonitor::MetricsTags *, double)>(
+        &kmonitor::MutableMetric::Report);
+    reported_decode_publish_deltas.clear();
+    decode_publish_qps_accumulator = std::make_unique<kmonitor::QpsMetric>("completed_decode_publish_tokens_qps_test");
+    stub.set(report, CaptureDecodePublishQps);
+    const MetricsTags tags{{"instance_id", "isolated_instance"}};
+    for (const uint64_t delta : {128u, 0u, 128u}) {
+        ServiceMetricsCollector collector(metrics_registry_, tags);
+        ASSERT_TRUE(collector.Init());
+        collector.AddCompletedDecodePublishTokens(delta);
+        reporter_->ReportPerQuery(&collector, false);
+        EXPECT_EQ(collector.TakeCompletedDecodePublishTokensSample(), 0u);
+    }
+    EXPECT_EQ(reported_decode_publish_deltas, (std::vector<double>{128, 0, 128}));
+    kmonitor::MetricsRecord record(nullptr, nullptr, 0);
+    decode_publish_qps_accumulator->Snapshot(&record, 2000);
+    ASSERT_EQ(record.Values().size(), 1u);
+    EXPECT_DOUBLE_EQ(std::stod(record.Values().front()->Value()), 256.0 / 2.0);
+    EXPECT_EQ(metrics_registry_->GetCounter("manager.completed_decode_publish_tokens_counter", tags).Get(), 256u);
+    decode_publish_qps_accumulator.reset();
+}
 
 TEST_F(KmonitorMetricsReporterTest, TestInitWithNull) {
     EXPECT_FALSE(reporter_->Init(nullptr, nullptr, ""));

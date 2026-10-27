@@ -2130,7 +2130,8 @@ ErrorCode MetaSearcher::BatchGetLocation(RequestContext *request_context,
 ErrorCode MetaSearcher::BatchAddLocation(RequestContext *request_context,
                                          const KeyVector &keys,
                                          const CacheLocationVector &locations,
-                                         std::vector<AddLocationResult> &out_results) {
+                                         std::vector<AddLocationResult> &out_results,
+                                         const std::string &allocation_session_id) {
     out_results.assign(keys.size(), AddLocationResult{});
     if (keys.size() != locations.size()) {
         for (auto &result : out_results) {
@@ -2141,7 +2142,7 @@ ErrorCode MetaSearcher::BatchAddLocation(RequestContext *request_context,
     std::vector<std::pair<DataStorageType, std::uint64_t>> loc_sz(keys.size());
 
     const int64_t batch_create_time = TimestampUtil::GetCurrentTimeUs();
-    auto modifier = [&locations, &out_results, &keys, &loc_sz, batch_create_time](
+    auto modifier = [&locations, &out_results, &keys, &loc_sz, &allocation_session_id, batch_create_time](
                         const LocationIdVector &existing_location_ids,
                         ErrorCode get_ec,
                         size_t index,
@@ -2171,6 +2172,8 @@ ErrorCode MetaSearcher::BatchAddLocation(RequestContext *request_context,
         new_loc->set_id(location_id);
         new_loc->set_status(CLS_WRITING);
         new_loc->set_create_time(batch_create_time);
+        new_loc->set_allocation_session_id(allocation_session_id);
+        out_results[index].allocated_location = new_loc;
         out_new_locations[location_id] = std::move(new_loc);
 
         // compute storage size for usage tracking
@@ -3284,6 +3287,12 @@ ErrorCode MetaSearcher::BatchCASLocationStatus(RequestContext *request_context,
     for (size_t i = 0; i < keys.size(); ++i) {
         location_ids_per_key[i].reserve(batch_tasks[i].size());
         for (const auto &task : batch_tasks[i]) {
+            if (task.serving_replacement &&
+                (task.expected_location_value.empty() || task.old_status != CLS_WRITING ||
+                 task.new_status != CLS_SERVING || task.serving_replacement->status() != CLS_SERVING ||
+                 task.serving_replacement->id() != task.location_id)) {
+                return EC_BADARGS;
+            }
             location_ids_per_key[i].push_back(task.location_id);
         }
     }
@@ -3321,9 +3330,13 @@ ErrorCode MetaSearcher::BatchCASLocationStatus(RequestContext *request_context,
             } else {
                 updated = true;
                 // COW: copy the location, modify the copy, replace the pointer
-                auto new_loc = std::make_shared<CacheLocation>(*locs[loc_index]);
-                new_loc->set_status(task.new_status);
-                locs[loc_index] = std::move(new_loc);
+                if (task.serving_replacement) {
+                    locs[loc_index] = task.serving_replacement;
+                } else {
+                    auto new_loc = std::make_shared<CacheLocation>(*locs[loc_index]);
+                    new_loc->set_status(task.new_status);
+                    locs[loc_index] = std::move(new_loc);
+                }
             }
         }
         if (!updated) {

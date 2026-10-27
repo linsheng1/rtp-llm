@@ -6,6 +6,23 @@
 #include "kv_cache_manager/common/logger.h"
 
 namespace kv_cache_manager {
+bool ProtoConvert::FinishedCacheLocationsFromProto(
+    const google::protobuf::RepeatedPtrField<proto::meta::CacheLocation> &locations, std::vector<CacheLocation> &out) {
+    std::vector<CacheLocation> converted;
+    converted.reserve(locations.size());
+    for (const auto &location : locations) {
+        if (!proto::meta::StorageType_IsValid(location.type()) || location.spec_size() < -1 ||
+            location.spec_size() == 0) {
+            return false;
+        }
+        CacheLocation value;
+        CacheLocationFromProto(&location, value);
+        converted.push_back(std::move(value));
+    }
+    out = std::move(converted);
+    return true;
+}
+
 void ProtoConvert::StorageConfigToProto(const StorageConfig &storage_config,
                                         proto::admin::StorageConfig *proto_storage_config) {
     // 设置global_unique_name

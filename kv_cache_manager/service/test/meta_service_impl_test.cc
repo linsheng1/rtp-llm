@@ -1,3 +1,4 @@
+#include <limits>
 #include <memory>
 
 #include "kv_cache_manager/common/request_context.h"
@@ -56,8 +57,23 @@ ErrorCode FinishWriteCacheForMetrics(CacheManager *,
                                      const std::string &,
                                      const std::string &,
                                      const BlockMask &,
-                                     std::unique_ptr<WriteLocationManager::WriteLocationInfo>) {
+                                     std::unique_ptr<WriteLocationManager::WriteLocationInfo>,
+                                     const std::vector<CacheLocation> &) {
     return RequestResult(context);
+}
+
+std::vector<CacheLocation> captured_finish_locations;
+int captured_finish_calls = 0;
+ErrorCode CaptureFinishedLocations(CacheManager *,
+                                   RequestContext *,
+                                   const std::string &,
+                                   const std::string &,
+                                   const BlockMask &,
+                                   std::unique_ptr<WriteLocationManager::WriteLocationInfo>,
+                                   const std::vector<CacheLocation> &locations) {
+    ++captured_finish_calls;
+    captured_finish_locations = locations;
+    return EC_OK;
 }
 
 ErrorCode ReportEventForMetrics(CacheManager *,
@@ -181,6 +197,62 @@ TEST_F(MetaServiceImplTest, FinishWriteCacheErrorMetrics) {
     request.set_write_session_id("session");
     request.mutable_success_blocks();
     CheckErrorMetrics("FinishWriteCache", request, &MetaServiceImpl::FinishWriteCache);
+}
+
+TEST_F(MetaServiceImplTest, FinishWriteUsesActualSdkSentinelsAndKeepsUnmarkedLegacyRoute) {
+    Stub stub;
+    stub.set(ADDR(CacheManager, FinishWriteCache), CaptureFinishedLocations);
+    service_->EnableLeaderOnlyRequests();
+    proto::meta::FinishWriteCacheRequest request;
+    request.set_instance_id("instance");
+    request.set_write_session_id("0123456789abcdefghijklmnopqrstuv");
+    request.mutable_success_blocks();
+    auto *location = request.add_locations();
+    location->set_type(proto::meta::ST_UNSPECIFIED);
+    location->set_spec_size(-1);
+    auto *spec = location->add_location_specs();
+    spec->set_name("full");
+    spec->set_uri("pace://pool/page?size=4096");
+    captured_finish_calls = 0;
+    captured_finish_locations.clear();
+    RequestContext legacy_context("legacy-sdk");
+    proto::meta::CommonResponse legacy_response;
+    service_->FinishWriteCache(&legacy_context, &request, &legacy_response);
+    EXPECT_EQ(legacy_response.header().status().code(), proto::meta::OK);
+    EXPECT_EQ(captured_finish_calls, 1);
+    EXPECT_TRUE(captured_finish_locations.empty());
+
+    // Historical unmarked fields/URIs were ignored, including values that the
+    // origin-bearing contract rejects. Do not retroactively validate them.
+    location->set_type(static_cast<proto::meta::StorageType>(999));
+    location->set_spec_size(-20);
+    spec->set_uri("legacy-opaque-actual-uri");
+    RequestContext opaque_context("legacy-opaque-sdk");
+    proto::meta::CommonResponse opaque_response;
+    service_->FinishWriteCache(&opaque_context, &request, &opaque_response);
+    EXPECT_EQ(opaque_response.header().status().code(), proto::meta::OK);
+    EXPECT_EQ(captured_finish_calls, 2);
+    EXPECT_TRUE(captured_finish_locations.empty());
+
+    location->set_type(proto::meta::ST_UNSPECIFIED);
+    location->set_spec_size(-1);
+    spec->set_uri("pace://pool/page?dtop_origin=v1.0123456789abcdefghijklmnopqrstuv.0.0.512.512.513&size=4096");
+    RequestContext source_context("source-sdk");
+    proto::meta::CommonResponse source_response;
+    service_->FinishWriteCache(&source_context, &request, &source_response);
+    ASSERT_EQ(source_response.header().status().code(), proto::meta::OK);
+    ASSERT_EQ(captured_finish_calls, 3);
+    ASSERT_EQ(captured_finish_locations.size(), 1u);
+    EXPECT_EQ(captured_finish_locations[0].type(), DataStorageType::DATA_STORAGE_TYPE_UNKNOWN);
+    EXPECT_EQ(captured_finish_locations[0].spec_size(), std::numeric_limits<size_t>::max());
+    EXPECT_EQ(captured_finish_locations[0].location_specs()[0].uri(), spec->uri());
+
+    location->set_type(static_cast<proto::meta::StorageType>(999));
+    RequestContext invalid_context("invalid-source-sdk");
+    proto::meta::CommonResponse invalid_response;
+    service_->FinishWriteCache(&invalid_context, &request, &invalid_response);
+    EXPECT_EQ(invalid_response.header().status().code(), proto::meta::INVALID_ARGUMENT);
+    EXPECT_EQ(captured_finish_calls, 3);
 }
 
 TEST_F(MetaServiceImplTest, ReportEventCountsFailuresAndPartialFailuresOnce) {

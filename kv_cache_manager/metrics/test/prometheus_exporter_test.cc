@@ -25,6 +25,19 @@ TEST_F(PrometheusExporterTest, EmptyRegistry) {
     ASSERT_TRUE(output.empty());
 }
 
+TEST_F(PrometheusExporterTest, CompletedDecodePublicationExportsAuthoritativeCumulativeTokens) {
+    const MetricsTags tags{{"instance_id", "isolated_instance"}};
+    for (const uint64_t delta : {128u, 0u, 128u}) {
+        ServiceMetricsCollector collector(registry_, tags);
+        ASSERT_TRUE(collector.Init());
+        collector.AddCompletedDecodePublishTokens(delta);
+    }
+    const auto output = PrometheusExporter::Expose(*registry_);
+    EXPECT_NE(output.find("# TYPE kvcm_manager_completed_decode_publish_tokens_counter counter"), std::string::npos);
+    EXPECT_NE(output.find("kvcm_manager_completed_decode_publish_tokens_counter{instance_id=\"isolated_instance\"} 256"),
+              std::string::npos);
+}
+
 TEST_F(PrometheusExporterTest, SingleCounter) {
     Counter c = registry_->GetCounter("service.query_counter");
     ++c;

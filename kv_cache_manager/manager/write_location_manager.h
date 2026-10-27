@@ -22,6 +22,8 @@ public:
     struct WriteLocationInfo {
         std::vector<int64_t> keys;
         std::vector<std::string> location_ids;
+        std::string instance_id;
+        CacheLocationVector allocated_locations;
     };
     using CallBack = std::function<void(std::unique_ptr<WriteLocationInfo>)>;
     void Start();
@@ -31,8 +33,16 @@ public:
              std::vector<int64_t> &&keys,
              std::vector<std::string> &&location_ids,
              int64_t write_timeout_seconds,
-             CallBack callback);
+             CallBack callback,
+             std::string instance_id = {},
+             CacheLocationVector allocated_locations = {});
     bool GetAndDelete(const std::string &write_session_id, WriteLocationInfo &location_info);
+    // The validator must be pure CPU work: no callbacks into metadata or SDK.
+    // Rejecting input keeps the original session available to timeout cleanup.
+    using FinishValidator = std::function<ErrorCode(const WriteLocationInfo &)>;
+    ErrorCode TakeValidated(const std::string &write_session_id,
+                            const FinishValidator &validator,
+                            WriteLocationInfo &location_info);
     bool HasLocationId(const std::string &location_id) const;
     size_t ExpireSize() const { return session_id_map_.Size(); }
 
@@ -55,6 +65,9 @@ private:
         void DropAll();
         void Put(ExpireUnitPtr unit);
         bool GetAndDelete(const std::string &write_session_id, WriteLocationInfo &location_info);
+        ErrorCode TakeValidated(const std::string &write_session_id,
+                                const FinishValidator &validator,
+                                WriteLocationInfo &location_info);
         bool HasLocationId(const std::string &location_id) const;
 
     private:

@@ -61,6 +61,7 @@ DEFINE_METRICS_NAME_FOR_MANAGER(request_key_count);
 DEFINE_METRICS_NAME_FOR_MANAGER(prefix_match_len);
 DEFINE_METRICS_NAME_FOR_MANAGER(get_cache_location_query_block_counter);
 DEFINE_METRICS_NAME_FOR_MANAGER(get_cache_location_hit_block_counter);
+DEFINE_METRICS_NAME_FOR_MANAGER(completed_decode_publish_tokens_counter);
 DEFINE_METRICS_NAME_FOR_MANAGER(prefix_match_time_us);
 DEFINE_METRICS_NAME_FOR_MANAGER(batch_get_time_us);
 DEFINE_METRICS_NAME_FOR_MANAGER(lock_write_location_retry_times);
@@ -140,6 +141,7 @@ bool ServiceMetricsCollector::Init() {
     REGISTER_GAUGE_METRICS_FOR_MANAGER(prefix_match_len);
     REGISTER_COUNTER_METRICS_FOR_MANAGER(get_cache_location_query_block_counter);
     REGISTER_COUNTER_METRICS_FOR_MANAGER(get_cache_location_hit_block_counter);
+    REGISTER_COUNTER_METRICS_FOR_MANAGER(completed_decode_publish_tokens_counter);
     REGISTER_GAUGE_METRICS_FOR_MANAGER(prefix_match_time_us);
     REGISTER_GAUGE_METRICS_FOR_MANAGER(batch_get_time_us);
     REGISTER_GAUGE_METRICS_FOR_MANAGER(lock_write_location_retry_times);

@@ -128,6 +128,9 @@ public:
         Put(writer, "type", type_);
         Put(writer, "spec_size", spec_size_);
         Put(writer, "create_time", create_time_);
+        if (!allocation_session_id_.empty()) {
+            Put(writer, "allocation_session_id", allocation_session_id_);
+        }
         Put(writer, "location_specs", location_specs_);
     }
 
@@ -140,6 +143,7 @@ public:
         KVCM_JSON_GET_DEFAULT_MACRO(rapid_value, "type", type_, DataStorageType::DATA_STORAGE_TYPE_UNKNOWN);
         KVCM_JSON_GET_DEFAULT_MACRO(rapid_value, "spec_size", spec_size_, size_t{0});
         KVCM_JSON_GET_DEFAULT_MACRO(rapid_value, "create_time", create_time_, int64_t{0});
+        KVCM_JSON_GET_DEFAULT_MACRO(rapid_value, "allocation_session_id", allocation_session_id_, std::string{});
         KVCM_JSON_GET_MACRO(rapid_value, "location_specs", location_specs_);
         return true;
     }
@@ -157,6 +161,8 @@ public:
     }
     void set_spec_size(size_t spec_size) { spec_size_ = spec_size; }
     void set_create_time(int64_t create_time) { create_time_ = create_time; }
+    void set_allocation_session_id(const std::string &id) { allocation_session_id_ = id; }
+    const std::string &allocation_session_id() const { return allocation_session_id_; }
     void push_location_spec(LocationSpec &&location_spec) {
         validated_total_size_ = kUnknownValidatedTotalSize;
         location_specs_.push_back(std::move(location_spec));
@@ -198,7 +204,7 @@ public:
     [[nodiscard]] size_t spec_size() const { return spec_size_; }
     [[nodiscard]] int64_t create_time() const { return create_time_; }
     [[nodiscard]] size_t EstimateMemUsage() const {
-        size_t usage = sizeof(CacheLocation) + id().size();
+        size_t usage = sizeof(CacheLocation) + id().size() + allocation_session_id_.size();
         for (const auto &spec : location_specs_) {
             usage += sizeof(LocationSpec) + spec.name().size() + spec.uri().size();
         }
@@ -213,6 +219,9 @@ private:
     DataStorageType type_ = DataStorageType::DATA_STORAGE_TYPE_UNKNOWN;
     size_t spec_size_ = 0;
     int64_t create_time_ = 0;
+    // Private version identity, not a client-controlled proto field. A stale
+    // Finish cannot bind provenance to a deleted/recreated allocation.
+    std::string allocation_session_id_;
     std::vector<LocationSpec> location_specs_;
     // Pure-local ReportEvent has already validated every URI and summed its
     // sizes. Keep that proof and aggregate beside the immutable specs so the
