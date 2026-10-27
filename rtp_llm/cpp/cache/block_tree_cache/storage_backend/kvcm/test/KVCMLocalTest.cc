@@ -469,13 +469,13 @@ TEST(KVCMLocalTest, ProductionNonrootBackendInstallsPayloadObserverWithoutGenera
                         raw->kvcm::ClientWrapper::shutdown();
                     }));
                     KVCacheConfig config;
-                    config.kvcm_server_address                 = "unused-test-address";
+                    config.kvcm_server_address                  = "unused-test-address";
                     config.kvcm_instance_id_salt                = "payload-observer";
                     config.kvcm_model_sdk_config                = R"([{"type":"pace"}])";
-                    auto parallel                              = singleRankConfig();
-                    parallel.role_type                         = RoleType::PREFILL;
-                    parallel.tp_size                           = cp;
-                    parallel.tp_rank                           = rank;
+                    auto parallel                               = singleRankConfig();
+                    parallel.role_type                          = RoleType::PREFILL;
+                    parallel.tp_size                            = cp;
+                    parallel.tp_rank                            = rank;
                     parallel.prefill_cp_config.prefill_cp_size  = cp;
                     parallel.prefill_cp_config.kv_cache_sharded = sharded;
                     RuntimeConfig runtime;

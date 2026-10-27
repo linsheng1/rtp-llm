@@ -326,13 +326,14 @@ public:
                 kmonitor::MetricsTags write_tags("mode", "write");
                 write_tags.AddTag("tp_rank", std::to_string(parallelism_config_.tp_rank));
                 write_tags.AddTag("dp_rank", std::to_string(parallelism_config_.dp_rank));
-                client_wrapper_->setTransferObserver([reporter, read_tags, write_tags](bool read, size_t bytes, bool unknown) {
-                    RtpLLMRemoteCachePayloadMetricsCollector collector;
-                    collector.completed_payload_bytes = static_cast<int64_t>(bytes);
-                    collector.completion_unknown      = unknown;
-                    reporter->report<RtpLLMRemoteCachePayloadMetrics, RtpLLMRemoteCachePayloadMetricsCollector>(
-                        read ? &read_tags : &write_tags, &collector);
-                });
+                client_wrapper_->setTransferObserver(
+                    [reporter, read_tags, write_tags](bool read, size_t bytes, bool unknown) {
+                        RtpLLMRemoteCachePayloadMetricsCollector collector;
+                        collector.completed_payload_bytes = static_cast<int64_t>(bytes);
+                        collector.completion_unknown      = unknown;
+                        reporter->report<RtpLLMRemoteCachePayloadMetrics, RtpLLMRemoteCachePayloadMetricsCollector>(
+                            read ? &read_tags : &write_tags, &collector);
+                    });
             }
         } catch (const std::exception& error) {
             // Optional telemetry allocation must not invalidate registered GPU

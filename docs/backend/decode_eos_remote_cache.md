@@ -185,6 +185,14 @@ Local-only hits are outside that denominator. Stage `read` reports `failed` or
 adoption, tail replay, or actual request use. SDK-internal retries are not new
 logical lookups.
 
+Payload observers report each rank's actual SDK calls, with fixed `tp_rank`,
+`dp_rank` and `mode` tags. Feature-on nonroot P backends use a payload-only
+reporter; general engine/cache and builtin metrics keep their root reporting
+scope. The backend drains and detaches its observer before the process owner
+stops the shared metrics factory. Sum per-rank byte rates across the selected
+P/D population; do not multiply the root value by CP. Feature-off creates no
+payload reporter or metrics factory through this path.
+
 Payload counts exclude D2D and NIC retransmissions. Successful earlier chunks
 remain counted when a later chunk fails. An attempted failed/throwing SDK call
 increments `rtp_llm_remote_payload_completion_unknown_qps`; its partial bytes

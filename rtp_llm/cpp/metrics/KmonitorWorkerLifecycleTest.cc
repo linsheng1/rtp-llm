@@ -32,8 +32,12 @@ size_t sample(kmonitor::KMonitorWorker& worker) {
 
 class KmonitorWorkerLifecycleTest: public ::testing::Test {
 protected:
-    void SetUp() override { kmonitor::KMonitorFactory::Shutdown(); }
-    void TearDown() override { kmonitor::KMonitorFactory::Shutdown(); }
+    void SetUp() override {
+        kmonitor::KMonitorFactory::Shutdown();
+    }
+    void TearDown() override {
+        kmonitor::KMonitorFactory::Shutdown();
+    }
 
     void startPayloadOnly() {
         kmonitor::MetricsConfig config;
@@ -131,7 +135,7 @@ TEST_F(KmonitorWorkerLifecycleTest, StartedWorkerCanRestartWithoutStaleSources) 
 
 TEST_F(KmonitorWorkerLifecycleTest, DestroyingOneReporterDoesNotStopAnother) {
     startPayloadOnly();
-    auto first = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    auto first  = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     auto second = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
     ASSERT_EQ(kmonitor::KMonitorFactory::GetKMonitorMap()->size(), 2u);
     first.reset();

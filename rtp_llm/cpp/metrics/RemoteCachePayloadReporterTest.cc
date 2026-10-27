@@ -14,8 +14,12 @@ namespace {
 class RemoteCachePayloadReporterTest: public ::testing::Test {
 protected:
     autil::EnvGuard manual_{"kmonitorManuallyMode", "true"};
-    void SetUp() override { stopKmonitorFactory(); }
-    void TearDown() override { stopKmonitorFactory(); }
+    void            SetUp() override {
+        stopKmonitorFactory();
+    }
+    void TearDown() override {
+        stopKmonitorFactory();
+    }
 };
 
 TEST_F(RemoteCachePayloadReporterTest, DisabledAndMissingRootReporterDoNotStartFactory) {
@@ -26,8 +30,8 @@ TEST_F(RemoteCachePayloadReporterTest, DisabledAndMissingRootReporterDoNotStartF
 
 TEST_F(RemoteCachePayloadReporterTest, ExistingRootReporterIsReusedWithoutFallback) {
     ASSERT_TRUE(initKmonitorFactory());
-    auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
-    const auto count = kmonitor::KMonitorFactory::GetKMonitorMap()->size();
+    auto       reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    const auto count    = kmonitor::KMonitorFactory::GetKMonitorMap()->size();
     EXPECT_EQ(remoteCachePayloadReporter(true, 0, reporter), reporter);
     EXPECT_EQ(remoteCachePayloadReporter(true, 1, reporter), reporter);
     EXPECT_EQ(remoteCachePayloadReporter(false, 1, reporter), nullptr);
@@ -36,7 +40,7 @@ TEST_F(RemoteCachePayloadReporterTest, ExistingRootReporterIsReusedWithoutFallba
 
 TEST_F(RemoteCachePayloadReporterTest, NonrootGetsOnlyPayloadReporterWithoutChangingGeneralPointer) {
     kmonitor::MetricsReporterPtr general;
-    auto payload = remoteCachePayloadReporter(true, 3, general);
+    auto                         payload = remoteCachePayloadReporter(true, 3, general);
     ASSERT_NE(payload, nullptr);
     EXPECT_EQ(general, nullptr);
     EXPECT_TRUE(kmonitor::KMonitorFactory::IsStarted());
@@ -54,7 +58,7 @@ TEST_F(RemoteCachePayloadReporterTest, ConfiguredFactoryIsStartedWithoutReconfig
     config.AddGlobalTag("retained", "tag");
     ASSERT_TRUE(kmonitor::KMonitorFactory::Init(config));
     auto* original = kmonitor::KMonitorFactory::GetConfig();
-    auto payload = remoteCachePayloadReporter(true, 1, nullptr);
+    auto  payload  = remoteCachePayloadReporter(true, 1, nullptr);
     ASSERT_NE(payload, nullptr);
     EXPECT_EQ(kmonitor::KMonitorFactory::GetConfig(), original);
     EXPECT_EQ(original->service_name(), "retained-service");
@@ -103,9 +107,8 @@ TEST_F(RemoteCachePayloadReporterTest, RepeatedFullThenPayloadFactoryRestart) {
 TEST_F(RemoteCachePayloadReporterTest, ConcurrentNonrootReportersShareOneFactory) {
     std::vector<std::future<kmonitor::MetricsReporterPtr>> pending;
     for (int rank = 1; rank < 8; ++rank) {
-        pending.push_back(std::async(std::launch::async, [rank] {
-            return remoteCachePayloadReporter(true, rank, nullptr);
-        }));
+        pending.push_back(
+            std::async(std::launch::async, [rank] { return remoteCachePayloadReporter(true, rank, nullptr); }));
     }
     std::vector<kmonitor::MetricsReporterPtr> reporters;
     for (auto& future : pending) {
@@ -125,8 +128,8 @@ TEST_F(RemoteCachePayloadReporterTest, UnequalRankPayloadsCountOnceAndKeepSucces
     for (const bool replicated : {false, true}) {
         for (int cp : {2, 4, 8}) {
             ASSERT_TRUE(initKmonitorFactory());
-            auto root = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
-            int64_t actual_sum = 0;
+            auto    root         = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+            int64_t actual_sum   = 0;
             int64_t expected_sum = 0;
             for (int rank = 0; rank < cp; ++rank) {
                 SCOPED_TRACE(::testing::PrintToString(std::make_tuple(replicated, cp, rank)));
@@ -135,7 +138,7 @@ TEST_F(RemoteCachePayloadReporterTest, UnequalRankPayloadsCountOnceAndKeepSucces
                 kmonitor::MetricsTags tags("mode", "write");
                 tags.AddTag("tp_rank", std::to_string(rank));
                 tags.AddTag("dp_rank", "0");
-                const int64_t first = (replicated ? 100 : 20) + rank;
+                const int64_t first  = (replicated ? 100 : 20) + rank;
                 const int64_t second = 7 + rank;
                 for (int64_t bytes : {first, second}) {
                     RtpLLMRemoteCachePayloadMetricsCollector event;

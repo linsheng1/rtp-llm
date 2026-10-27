@@ -1432,8 +1432,8 @@ bool initKmonitorFactory() {
     return initKmonitorFactoryLocked(/*with_builtin_metrics=*/true);
 }
 
-kmonitor::MetricsReporterPtr remoteCachePayloadReporter(
-    bool enabled, int64_t tp_rank, const kmonitor::MetricsReporterPtr& existing_reporter) {
+kmonitor::MetricsReporterPtr
+remoteCachePayloadReporter(bool enabled, int64_t tp_rank, const kmonitor::MetricsReporterPtr& existing_reporter) {
     // In particular, GetConfig/GetWorker instantiate a factory: do not call
     // them (or construct tags/reporters) when the feature is disabled.
     if (!enabled) {
