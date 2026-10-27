@@ -907,6 +907,18 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
             }
         }
     }
+    // Reacquire ordinary request ownership only after migration has settled.
+    // Keep the original assertions about REQUEST + CACHE reference counts:
+    // multiple tree reference types share one physical device ownership ref.
+    for (size_t group = 0; group < env->groups.size(); ++group) {
+        block_tree_cache_test::referenceDeviceBlocksForTest(*env->groups[group], env->request_blocks[group]);
+    }
+    block_tree_cache_detail::ScopeRollback request_refs_guard([&] {
+        for (size_t group = 0; group < env->groups.size(); ++group) {
+            block_tree_cache_test::unreferenceDeviceBlocksForTest(*env->groups[group], env->request_blocks[group]);
+        }
+    });
+    store_refs_guard.run();
     auto engine                                        = std::make_shared<DeferredLoadEngine>(env->groups);
     env->cache->transfer_dispatcher_->per_rank_engine_ = engine;
     auto owner                                         = env->cache->match({env->keys[0], env->keys[1]}).async_context;
@@ -998,7 +1010,7 @@ TEST_P(BlockTreeLoaderCorruptionTest, FullCorruptionBlocksPendingKeyUntilDescend
     }
     releaseTargets(owner_refs);
     releaseTargets(child_refs);
-    store_refs_guard.run();
+    request_refs_guard.run();
     env->reclaimAll();
     env->expectFullyReclaimed();
 }
