@@ -3,6 +3,12 @@ load("@arch_config//:arch_select.bzl", "torch_deps")
 
 package(default_visibility = ["//:__subpackages__"])
 
+cc_library(
+    name = "decode_cache_origin",
+    hdrs = ["DecodeCacheOrigin.h"],
+    visibility = ["//visibility:public"],
+)
+
 
 
 # KVCache utilities - simple inline functions, no external dependencies

@@ -240,6 +240,10 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
     request.decode_completion                            = true;
     request.computed_tokens                              = computed_end;
     request.published_tokens                             = end;
+    if (const auto& handoff = lifecycle.prefillComputedEnd(); handoff && *handoff >= 0
+        && static_cast<uint64_t>(*handoff) <= computed_end) {
+        request.prefill_computed_tokens = *handoff;
+    }
     size_t                                         bytes = 0;
     std::unordered_map<const DeviceBlockPool*, std::unordered_set<BlockIdxType>> charged_blocks;
     size_t unique_pages = 0;

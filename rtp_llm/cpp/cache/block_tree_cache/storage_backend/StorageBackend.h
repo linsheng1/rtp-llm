@@ -94,6 +94,9 @@ struct StorageRequest {
     // task lifetime, including completion-unknown quarantine.
     bool                  decode_completion{false};
     size_t                computed_tokens{0}, published_tokens{0};
+    // Validated P-to-D computed endpoint, only when explicitly supplied by the
+    // successful handoff. Unknown must not be inferred from D input length.
+    std::optional<int64_t> prefill_computed_tokens;
     std::shared_ptr<StorageCompletionAdmission> completion_admission;
 
     bool empty() const {

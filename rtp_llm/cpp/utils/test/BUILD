@@ -11,6 +11,13 @@ google_test_deps = [
 ]
 
 cc_test(
+    name = "decode_cache_origin_test",
+    srcs = ["DecodeCacheOriginTest.cc"],
+    copts = copts(),
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:decode_cache_origin"],
+)
+
+cc_test(
     name = "remote_cache_config_test",
     srcs = ["RemoteCacheConfigTest.cc"],
     copts = copts(),
