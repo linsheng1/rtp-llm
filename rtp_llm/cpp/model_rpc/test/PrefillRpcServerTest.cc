@@ -269,6 +269,7 @@ TEST_F(PrefillRpcServerTest, GenerateHandoffExplicitlyExcludesSampledTokenOnlyWh
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", mode == "disabled" ? "0" : "1");
         GenerateInputPB request;
         auto            context = makeContext(&request);
+        context->meta           = std::make_shared<RpcServerRuntimeMeta>();
         context->request_id     = 42;
         auto stream             = makeWaitingStream();
         // Model output: three prompt tokens have KV, token 7 was just sampled.
