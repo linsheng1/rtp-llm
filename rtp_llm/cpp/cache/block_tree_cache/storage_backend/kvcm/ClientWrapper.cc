@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/Subscriber.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include <algorithm>
 #include <exception>
 #include <numeric>
@@ -653,6 +654,13 @@ kv_cache_manager::ClientErrorCode ClientWrapper::loadKvCachesForTagWithStatus(
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS;
     }
+    if (!remoteCacheDecodePublicationEnabled()) {
+        const auto ec = transfer_clients_[slot->second]->LoadKvCaches(uri_str_vec, block_buffers, trace_info);
+        if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
+            RTP_LLM_LOG_ERROR("kvcm client loadKvCaches fail, ec [%d]", ec);
+        }
+        return ec;
+    }
     const auto io_started = std::chrono::steady_clock::now();
     auto       ec         = kv_cache_manager::ClientErrorCode::ER_OK;
     std::vector<SdkRange> ranges;
@@ -727,6 +735,13 @@ ClientWrapper::saveKvCachesForTagWithStatus(
     if (slot == tag_to_index_.end()) {
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return {kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS, {}};
+    }
+    if (!remoteCacheDecodePublicationEnabled()) {
+        auto result = transfer_clients_[slot->second]->SaveKvCaches(uri_str_vec, block_buffers, trace_info);
+        if (result.first != kv_cache_manager::ClientErrorCode::ER_OK) {
+            RTP_LLM_LOG_ERROR("kvcm client saveKvCaches fail, ec [%d]", result.first);
+        }
+        return result;
     }
     const auto                  io_started = std::chrono::steady_clock::now();
     auto                        ec         = kv_cache_manager::ClientErrorCode::ER_OK;

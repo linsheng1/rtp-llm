@@ -157,6 +157,44 @@ TEST(KVCMLocalTest, InitRejectsMissingTopologyAndInvalidPoolShape) {
     EXPECT_ANY_THROW(backend->init(environment.cache_config.topologyPtr(), {{"default", nullptr}}, resolver));
 }
 
+TEST(KVCMLocalTest, DisabledPublicationIgnoresDecodeOnlyBackendAndBudgetRestrictions) {
+    autil::EnvGuard off("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    autil::EnvGuard budget("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB", "invalid");
+    autil::EnvGuard jobs("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS", "invalid");
+    auto environment = makeBackendEnvironment("kvcm_disabled_decode_preserves_prefill");
+    auto client = std::make_shared<MockClientWrapper>();
+    EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client, shutdown()).Times(1);
+    KVCacheConfig config;
+    config.kvcm_server_address = "unused-test-address";
+    config.kvcm_model_sdk_config = R"([{"type":"pace_ssd"}])";
+    // Deliberately outside the new Decode SSD/GDR pairing restrictions: off
+    // must delegate the ordinary configuration to its original SDK path.
+    config.kvcm_read_backend_type = 1;
+    RuntimeConfig runtime;
+    runtime.model_name = "kvcm_disabled_decode";
+    BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config,
+                                                             config,
+                                                             runtime,
+                                                             singleRankConfig(),
+                                                             SpeculativeExecutionConfig{},
+                                                             nullptr,
+                                                             /*gdr_enabled=*/false,
+                                                             nullptr,
+                                                             client));
+    ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+    kv_cache_manager::Locations locations{
+        kv_cache_manager::Location{kv_cache_manager::LocationSpecUnit{"tp0_Fdefault", "read_uri"}}};
+    EXPECT_CALL(*client, match(_, _, _, std::vector<int64_t>{101}, _, _))
+        .WillOnce(Return(std::make_pair(true, locations)));
+    auto observation = match(*backend.backend, makeStorageRequest(environment));
+    ASSERT_TRUE(observation.success);
+    ASSERT_EQ(observation.matched_blocks_num, 1u);
+    EXPECT_CALL(*client, loadKvCachesForTag("default", kv_cache_manager::UriStrVec{"read_uri"}, _, _))
+        .WillOnce(Return(true));
+    EXPECT_TRUE(read(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta)));
+}
+
 TEST(KVCMLocalTest, InitRejectsInvalidQuarantineAbortRatio) {
     autil::EnvGuard quarantine_abort_ratio("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", "invalid");
     auto            environment    = makeBackendEnvironment("kvcm_storage_backend_invalid_quarantine_ratio");

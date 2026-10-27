@@ -1360,7 +1360,7 @@ private:
     int                            target_prefill_cp_{1}, target_prefill_tp_{1}, target_physical_shards_{1}, file_capture_blocks_{1};
     bool                           decode_publication_enabled_{false}, pace_backend_{false}, file_decode_{false};
     StorageBackend::BufferResolver file_resolver_;
-    std::shared_ptr<CompletionAccounting>   completion_accounting_ = std::make_shared<CompletionAccounting>();
+    std::shared_ptr<CompletionAccounting>   completion_accounting_;
     DecodePublicationLimits completion_limits_;
     CacheConfig                          cache_config_;
     KVCacheConfig                        kv_cache_config_;

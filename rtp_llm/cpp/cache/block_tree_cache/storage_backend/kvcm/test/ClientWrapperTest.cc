@@ -927,7 +927,54 @@ TEST(ClientWrapperTest, ServiceInstanceFailureReRegistersAndRoutesTheNextRequest
     EXPECT_EQ(*destruction_count, 1);
 }
 
+TEST(ClientWrapperTest, DisabledPublicationPreservesSdkCallAndTraceIdentity) {
+    autil::EnvGuard disabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    using namespace kv_cache_manager;
+    unsigned char byte = 7;
+    RegistSpan span{&byte, 1};
+    InitObservation observation;
+    MockTransferClient* mock = nullptr;
+    auto client = initializeClient(
+        false, "upstream_passthrough", span, observation, std::make_shared<int>(0), nullptr, nullptr, &mock);
+    ASSERT_NE(client, nullptr);
+    // Above both the new block/IOV chunk limits: ordinary SDK clients retain
+    // their original call granularity and receive the caller's descriptors.
+    UriStrVec uris(300, "allocated_uri"), actual(300, "actual_uri");
+    BlockBuffers buffers(300);
+    for (auto& block : buffers)
+        for (size_t j = 0; j < 4; ++j)
+            block.iovs.push_back({MemoryType::CPU, &byte, 1, false});
+    auto trace = std::make_shared<TransferTraceInfo>();
+    trace->block_ids = uris;
+    EXPECT_CALL(*mock, SaveKvCaches(_, _, _)).WillOnce(Invoke([&](const auto& u, const auto& b, const auto& t) {
+        EXPECT_EQ(&u, &uris);
+        EXPECT_EQ(&b, &buffers);
+        EXPECT_EQ(t, trace);
+        return std::make_pair(ClientErrorCode::ER_OK, actual);
+    }));
+    const auto saved = client->saveKvCachesForTagWithStatus("default", uris, buffers, trace);
+    EXPECT_EQ(saved.first, ClientErrorCode::ER_OK);
+    EXPECT_EQ(saved.second, actual);
+    EXPECT_CALL(*mock, LoadKvCaches(_, _, _)).WillOnce(Invoke([&](const auto& u, auto& b, const auto& t) {
+        EXPECT_EQ(&u, &actual);
+        EXPECT_EQ(&b, &buffers);
+        EXPECT_EQ(t, trace);
+        b[0].iovs[0].size = 2;
+        return ClientErrorCode::ER_SDK_TIMEOUT;
+    }));
+    EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", actual, buffers, trace),
+              ClientErrorCode::ER_SDK_TIMEOUT);
+    EXPECT_EQ(buffers[0].iovs[0].size, 2u);
+    EXPECT_CALL(*mock, SaveKvCaches(_, _, _))
+        .WillOnce(Return(std::make_pair(ClientErrorCode::ER_SDK_TIMEOUT, UriStrVec{"partial_uri"})));
+    const auto failed = client->saveKvCachesForTag("default", uris, buffers, trace);
+    EXPECT_FALSE(failed.first);
+    EXPECT_TRUE(failed.second.empty());
+    client->shutdown();
+}
+
 TEST(ClientWrapperTest, BoundedSdkChunksPreserveUrisAndDestinationBytes) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     using namespace kv_cache_manager;
     std::vector<unsigned char> data(250 * 19), destination(data.size(), 0);
     for (size_t i = 0; i < data.size(); ++i)
@@ -995,6 +1042,7 @@ TEST(ClientWrapperTest, BoundedSdkChunksPreserveUrisAndDestinationBytes) {
     client->shutdown();
 }
 TEST(ClientWrapperTest, BoundedSdkStopsOnFailureAndRejectsUnsafeGeometry) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     using namespace kv_cache_manager;
     unsigned char       byte = 7;
     RegistSpan          span{&byte, 1};

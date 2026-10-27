@@ -15,20 +15,23 @@ struct CompletionLease {
     }
 };
 
-bool configureDecodePublication(StorageBackend::BufferResolver resolver) {
-    file_resolver_             = resolver;
+bool configureDecodePublication(const StorageBackend::BufferResolver& resolver) {
     const char* feature = std::getenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH");
     if (feature && std::string_view(feature) != "0" && std::string_view(feature) != "1") {
         RTP_LLM_LOG_ERROR("ENABLE_DECODE_PUBLISH must be 0 or 1");
         return false;
     }
     decode_publication_enabled_ = remoteCacheDecodePublicationEnabled();
+    // Off must preserve the upstream Prefill backend contract. In particular,
+    // do not validate Decode-only backend/layout/budget settings, retain its
+    // resolver, or allocate publication accounting for an ordinary P cache.
+    if (!decode_publication_enabled_)
+        return true;
     std::string backend_config = kv_cache_config_.kvcm_model_sdk_config;
     backend_config.erase(
         std::remove_if(backend_config.begin(), backend_config.end(), [](unsigned char c) { return std::isspace(c); }),
         backend_config.end());
-    // Backend selection is independent of Decode publication. Ordinary Prefill
-    // GDR and B/C toggles need no second experimental PACE enable flag.
+    // The enabled path selects its backend from existing PACE configuration.
     pace_backend_ = backend_config == "[{\"type\":\"pace\"}]"
                     || backend_config == "[{\"type\":\"pace_ssd\"}]";
     const bool ssd = backend_config == "[{\"type\":\"pace_ssd\"}]";
@@ -37,14 +40,6 @@ bool configureDecodePublication(StorageBackend::BufferResolver resolver) {
         RTP_LLM_LOG_ERROR("PACE SSD requires backend9/pace_ssd and GDR; DRAM cannot use backend9");
         return false;
     }
-    if (!decode_publication_enabled_)
-        return true;
-    const auto limits = remoteCacheDecodePublicationLimits();
-    if (!limits) {
-        RTP_LLM_LOG_ERROR("invalid Decode publication pending byte/job budget");
-        return false;
-    }
-    completion_limits_ = *limits;
     file_decode_ = parallelism_config_.role_type == RoleType::DECODE;
     const bool prefill = parallelism_config_.role_type == RoleType::PREFILL;
     const auto& cp = parallelism_config_.prefill_cp_config;
@@ -83,7 +78,16 @@ bool configureDecodePublication(StorageBackend::BufferResolver resolver) {
                      pace_backend_ ? "pace" : "file",
                      target_prefill_cp_,
                      target_prefill_tp_);
-    file_resolver_ = std::move(resolver);
+    if (file_decode_) {
+        const auto limits = remoteCacheDecodePublicationLimits();
+        if (!limits) {
+            RTP_LLM_LOG_ERROR("invalid Decode publication pending byte/job budget");
+            return false;
+        }
+        completion_limits_ = *limits;
+        completion_accounting_ = std::make_shared<CompletionAccounting>();
+        file_resolver_ = resolver;
+    }
     return true;
 }
 
