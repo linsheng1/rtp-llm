@@ -233,6 +233,11 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
                 RTP_LLM_LOG_ERROR("init KVCM transfer client failed for pool %zu", index);
                 return false;
             }
+            if (transfer_observer_) {
+                if (auto* observable = dynamic_cast<SdkTransferObservable*>(client.get())) {
+                    observable->setSdkTransferObserver(transfer_observer_);
+                }
+            }
             clients.push_back(std::move(client));
         }
         transfer_clients_ = std::move(clients);
@@ -632,7 +637,15 @@ bool ClientWrapper::reinitAllMetaClients() {
 
 void ClientWrapper::setTransferObserver(TransferObserver observer) {
     std::unique_lock lock(transfer_mutex_);
-    transfer_observer_ = std::move(observer);
+    const bool       had_observer = static_cast<bool>(transfer_observer_);
+    transfer_observer_            = remoteCacheDecodePublicationEnabled() ? std::move(observer) : TransferObserver{};
+    if (transfer_observer_ || had_observer) {
+        for (const auto& client : transfer_clients_) {
+            if (auto* observable = dynamic_cast<SdkTransferObservable*>(client.get())) {
+                observable->setSdkTransferObserver(transfer_observer_);
+            }
+        }
+    }
 }
 
 void ClientWrapper::observeTransfer(bool is_read, size_t completed_bytes, bool completion_unknown) const noexcept {
@@ -675,6 +688,8 @@ kv_cache_manager::ClientErrorCode ClientWrapper::loadKvCachesForTagWithStatus(
         return ec;
     }
     const auto io_started = std::chrono::steady_clock::now();
+    const bool inner_observation =
+        dynamic_cast<SdkTransferObservable*>(transfer_clients_[slot->second].get()) != nullptr;
     auto       ec         = kv_cache_manager::ClientErrorCode::ER_OK;
     std::vector<SdkRange> ranges;
     if ((trace_info && !trace_info->block_ids.empty() && trace_info->block_ids.size() != uri_str_vec.size())
@@ -692,11 +707,15 @@ kv_cache_manager::ClientErrorCode ClientWrapper::loadKvCachesForTagWithStatus(
         try {
             ec = transfer_clients_[slot->second]->LoadKvCaches(uris, buffers, part_trace);
         } catch (...) {
-            observeTransfer(/*is_read=*/true, 0, /*completion_unknown=*/true);
+            if (!inner_observation)
+                observeTransfer(/*is_read=*/true, 0, /*completion_unknown=*/true);
             throw;
         }
-        observeTransfer(/*is_read=*/true, ec == kv_cache_manager::ClientErrorCode::ER_OK ? range.bytes : 0,
-                         ec != kv_cache_manager::ClientErrorCode::ER_OK);
+        if (!inner_observation) {
+            observeTransfer(/*is_read=*/true,
+                            ec == kv_cache_manager::ClientErrorCode::ER_OK ? range.bytes : 0,
+                            ec != kv_cache_manager::ClientErrorCode::ER_OK);
+        }
         const auto us =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
         RTP_LLM_LOG_INFO("KV_SDK_CHUNK op=read pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
@@ -765,6 +784,8 @@ ClientWrapper::saveKvCachesForTagWithStatus(
         return result;
     }
     const auto                  io_started = std::chrono::steady_clock::now();
+    const bool                  inner_observation =
+        dynamic_cast<SdkTransferObservable*>(transfer_clients_[slot->second].get()) != nullptr;
     auto                        ec         = kv_cache_manager::ClientErrorCode::ER_OK;
     kv_cache_manager::UriStrVec result;
     std::vector<SdkRange> ranges;
@@ -784,13 +805,17 @@ ClientWrapper::saveKvCachesForTagWithStatus(
             try {
                 return transfer_clients_[slot->second]->SaveKvCaches(uris, buffers, part_trace);
             } catch (...) {
-                observeTransfer(/*is_read=*/false, 0, /*completion_unknown=*/true);
+                if (!inner_observation)
+                    observeTransfer(/*is_read=*/false, 0, /*completion_unknown=*/true);
                 throw;
             }
         }();
         ec         = saved.first;
-        observeTransfer(/*is_read=*/false, ec == kv_cache_manager::ClientErrorCode::ER_OK ? range.bytes : 0,
-                         ec != kv_cache_manager::ClientErrorCode::ER_OK);
+        if (!inner_observation) {
+            observeTransfer(/*is_read=*/false,
+                            ec == kv_cache_manager::ClientErrorCode::ER_OK ? range.bytes : 0,
+                            ec != kv_cache_manager::ClientErrorCode::ER_OK);
+        }
         const auto us =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
         RTP_LLM_LOG_INFO("KV_SDK_CHUNK op=write pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",

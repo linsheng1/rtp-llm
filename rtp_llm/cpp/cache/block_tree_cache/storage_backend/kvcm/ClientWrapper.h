@@ -16,6 +16,7 @@
 #include "kvcm_client/transfer_client.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMConfig.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkTransferObserver.h"
 
 namespace rtp_llm {
 namespace kvcm {
@@ -41,7 +42,7 @@ public:
     // Internal optional telemetry: completed logical payload per SDK chunk,
     // or completion-unknown for an attempted failed/throwing SDK call. The
     // observer must be thread-safe and must not reenter this wrapper.
-    using TransferObserver = std::function<void(bool is_read, size_t completed_bytes, bool completion_unknown)>;
+    using TransferObserver = SdkTransferObserver;
     void setTransferObserver(TransferObserver observer);
     // for meta client
     virtual std::pair<bool, kv_cache_manager::Locations> match(const std::string&                      unique_id,
