@@ -181,6 +181,21 @@ public:
         return match_calls_;
     }
 
+    bool captureCompletedDecode(const BatchKVCacheResource& resource, size_t end, bool finished) override {
+        ++capture_calls;
+        captured_end = end;
+        capture_saw_blocks = resource.curBlocksNum() > 0;
+        EXPECT_TRUE(finished);
+        if (fail_capture) {
+            throw std::runtime_error("injected publication admission failure");
+        }
+        return true;
+    }
+    size_t capture_calls{0};
+    size_t captured_end{0};
+    bool capture_saw_blocks{false};
+    bool fail_capture{false};
+
 protected:
     bool initImpl() override {
         return true;
@@ -404,6 +419,80 @@ TEST_F(StreamCacheResourceTest, testResourceContextReadsIgnoreRequestCacheSwitch
         resource_context.initCacheConfig(kv_cache_config);
         EXPECT_TRUE(resource_context.ignore_request_cache_switches);
     }
+}
+
+TEST_F(StreamCacheResourceTest, DecodePublicationConfigIsSnapshottedBeforeStreams) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    autil::EnvGuard synchronous("RTP_LLM_STREAM_ASYNC", "0");
+    ResourceContext context;
+    context.initCacheConfig(KVCacheConfig{});
+    ASSERT_TRUE(context.enable_decode_publication);
+    {
+        autil::EnvGuard changed("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+        EXPECT_TRUE(context.enable_decode_publication);
+        ResourceContext disabled;
+        disabled.initCacheConfig(KVCacheConfig{});
+        EXPECT_FALSE(disabled.enable_decode_publication);
+    }
+    {
+        autil::EnvGuard asynchronous("RTP_LLM_STREAM_ASYNC", "1");
+        ResourceContext disabled;
+        disabled.initCacheConfig(KVCacheConfig{});
+        EXPECT_FALSE(disabled.enable_decode_publication);
+    }
+}
+
+TEST_F(StreamCacheResourceTest, DecodePublicationOnlyCapturesSuccessfulReusableDecodeBeforeFree) {
+    for (const bool enabled : {false, true}) {
+        for (const bool request_reuse : {false, true}) {
+            for (const auto role : {RoleType::PREFILL, RoleType::DECODE, RoleType::PDFUSION}) {
+                for (const auto status : {StreamState::RUNNING, StreamState::FINISHED}) {
+                    SCOPED_TRACE("enabled=" + std::to_string(enabled) + " reuse=" + std::to_string(request_reuse)
+                                 + " role=" + std::to_string(static_cast<int>(role))
+                                 + " state=" + StreamStateToString(status));
+                    auto backend = prepareStorageBackendResource(/*block_matches=*/false, /*seed_host=*/false, role);
+                    auto& resource = stream_->streamCacheResource();
+                    // Prevent remote lookup from supplying this fixture's pages.
+                    resource.resource_context_.reuse_cache = false;
+                    ASSERT_TRUE(resource.initKVBlock().ok());
+                    ASSERT_GT(resource.curBlocksNum(), 0);
+                    resource.resource_context_.reuse_cache = true;
+                    resource.resource_context_.enable_decode_publication = enabled;
+                    stream_->generateConfig()->reuse_cache = request_reuse;
+                    stream_->setSeqLength(7);
+                    stream_->generate_status_->status = status;
+                    stream_->releaseResource();
+                    const bool captured = enabled && request_reuse && role == RoleType::DECODE
+                                          && status == StreamState::FINISHED;
+                    EXPECT_EQ(backend->capture_calls, captured ? 1u : 0u);
+                    if (captured) {
+                        EXPECT_EQ(backend->captured_end, 6u);
+                        EXPECT_TRUE(backend->capture_saw_blocks);
+                    }
+                    EXPECT_EQ(resource.curBlocksNum(), 0);
+                    backend->shutdown();
+                }
+            }
+        }
+    }
+}
+
+TEST_F(StreamCacheResourceTest, DecodePublicationAdmissionFailurePreservesNormalRelease) {
+    auto backend = prepareStorageBackendResource(/*block_matches=*/false, /*seed_host=*/false, RoleType::DECODE);
+    auto& resource = stream_->streamCacheResource();
+    resource.resource_context_.reuse_cache = false;
+    ASSERT_TRUE(resource.initKVBlock().ok());
+    resource.resource_context_.reuse_cache = true;
+    resource.resource_context_.enable_decode_publication = true;
+    stream_->generateConfig()->reuse_cache = true;
+    stream_->setSeqLength(7);
+    stream_->generate_status_->status = StreamState::FINISHED;
+    backend->fail_capture = true;
+    EXPECT_NO_THROW(stream_->releaseResource());
+    EXPECT_EQ(backend->capture_calls, 1u);
+    EXPECT_TRUE(backend->capture_saw_blocks);
+    EXPECT_EQ(resource.curBlocksNum(), 0);
+    backend->shutdown();
 }
 
 TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
