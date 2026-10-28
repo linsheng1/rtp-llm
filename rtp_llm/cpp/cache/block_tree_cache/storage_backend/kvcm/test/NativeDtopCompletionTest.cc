@@ -303,7 +303,66 @@ protected:
         }
         return b;
     }
+    template<typename C>
+    void checkSafeSdkRetry() {
+        if constexpr (kvcm::detail::HasExplicitBufferSafeCodes<C>::value) {
+            for (bool write : {false, true}) {
+                auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+                if (write) {
+                    EXPECT_CALL(*delegate, SaveKvCaches(_, _, _))
+                        .WillOnce(Return(std::make_pair(C::ER_SDK_ERROR_BUFFER_SAFE, Uris{})))
+                        .WillOnce(Return(std::make_pair(C::ER_OK, Uris{})));
+                } else {
+                    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _))
+                        .WillOnce(Return(C::ER_SDK_TIMEOUT_BUFFER_SAFE)).WillOnce(Return(C::ER_OK));
+                }
+                Client client(std::move(delegate), copy, context);
+                auto buffers = destinations({17});
+                if (write) {
+                    EXPECT_EQ(client.SaveKvCaches({"safe"}, buffers).first, C::ER_SDK_ERROR_BUFFER_SAFE);
+                    EXPECT_EQ(context->active_reservations, 0u);
+                    EXPECT_EQ(client.SaveKvCaches({"retry"}, buffers).first, C::ER_OK);
+                } else {
+                    EXPECT_EQ(client.LoadKvCaches({"safe"}, buffers), C::ER_SDK_TIMEOUT_BUFFER_SAFE);
+                    EXPECT_EQ(context->active_reservations, 0u);
+                    EXPECT_EQ(client.LoadKvCaches({"retry"}, buffers), C::ER_OK);
+                }
+                EXPECT_EQ(context->active_reservations, 0u);
+            }
+        } else {
+            GTEST_SKIP() << "SDK has no explicit buffer-safe failure contract";
+        }
+    }
+    template<typename C>
+    void checkMixedPeerSafety() {
+        if constexpr (kvcm::detail::HasExplicitBufferSafeCodes<C>::value) {
+            for (bool safe_first : {true, false}) {
+                auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+                EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(2)
+                    .WillRepeatedly(Invoke([](const Uris& uris, const Buffers&, auto) -> C {
+                        return uris.front() == "safe" ? C::ER_SDK_TIMEOUT_BUFFER_SAFE : C::ER_SDK_TIMEOUT;
+                    }));
+                int device = 0;
+                ASSERT_EQ(cudaGetDevice(&device), cudaSuccess);
+                Client client(std::move(delegate), copy, context,
+                              [device] { return cudaSetDevice(device) == cudaSuccess; });
+                const Uris uris = safe_first ? Uris{"safe", "unknown"} : Uris{"unknown", "safe"};
+                auto buffers = destinations({17, 17});
+                EXPECT_EQ(client.LoadKvCaches(uris, buffers), C::ER_SDK_TIMEOUT);
+                EXPECT_EQ(context->active_reservations, 1u);
+                EXPECT_EQ(client.LoadKvCaches(uris, buffers), C::ER_INVALID_LOCAL_BUFFERS);
+            }
+        } else {
+            GTEST_SKIP() << "SDK has no explicit buffer-safe failure contract";
+        }
+    }
 };
+TEST_F(NativeSsdGpuReadWindowTest, ExplicitSafeSdkFailureReleasesArenaAndPermitsRetry) {
+    checkSafeSdkRetry<Code>();
+}
+TEST_F(NativeSsdGpuReadWindowTest, AnyUnknownPeerDominatesSafeFailureInEitherOrder) {
+    checkMixedPeerSafety<Code>();
+}
 TEST_F(NativeSsdGpuReadWindowTest, ConcurrentWindowInitializesDeviceAndJoinsBeforeScatter) {
     auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
     int  device   = 0;

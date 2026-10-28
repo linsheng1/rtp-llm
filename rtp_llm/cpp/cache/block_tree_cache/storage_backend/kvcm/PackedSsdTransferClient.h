@@ -12,6 +12,7 @@
 #include <vector>
 #include "kvcm_client/transfer_client.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkTransferObserver.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm::kvcm {
@@ -141,7 +142,11 @@ public:
                     for (auto& read : reads) {
                         try {
                             const auto code = read.get();
-                            if (result == kv_cache_manager::ER_OK)
+                            // Any unproven peer dominates a buffer-safe failure.
+                            // Join every peer before deciding whether the arena
+                            // can be released or the caller may shut the SDK down.
+                            if (code != kv_cache_manager::ER_OK
+                                && (result == kv_cache_manager::ER_OK || !sdkCodeProvesBufferSafety(code)))
                                 result = code;
                         } catch (...) {
                             if (!failure)
@@ -155,7 +160,8 @@ public:
                     result = loadOne(*operation->calls[block]);
                 }
                 if (result != kv_cache_manager::ER_OK) {
-                    quarantine(operation);
+                    if (!sdkCodeProvesBufferSafety(result))
+                        quarantine(operation);
                     return result;
                 }
                 for (size_t block = range.first; block < range.second; ++block) {
@@ -206,7 +212,8 @@ public:
             try {
                 auto result = saveOne(*operation->calls[block]);
                 if (result.first != kv_cache_manager::ER_OK) {
-                    quarantine(operation);
+                    if (!sdkCodeProvesBufferSafety(result.first))
+                        quarantine(operation);
                     return {result.first, {}};
                 }
                 if (!result.second.empty()) {
