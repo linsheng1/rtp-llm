@@ -2,7 +2,7 @@
 
 更新时间：2026-10-28。目标分支：`alibaba/rtp-llm:feature/dsv41-dev-main-202161013`。
 
-**状态：真实 DRAM 切分恢复及输出对照通过；复制组 D 已发布，但 native rank 1 在关停阶段发生 SIGABRT，复制恢复和安全退出未通过。旧 SDK 关闭态模型检查仍待完成；测试修正的单例及完整 52 项已实际通过。当前不能宣称整体验收完成或已合入上游。** 本文是本批唯一汇总报告，后续结果在本文追加更新。
+**状态：真实 DRAM 切分恢复及输出对照通过；复制组 D 已发布，但 native rank 1 在关停阶段发生 SIGABRT，复制恢复和安全退出未通过。旧 SDK 远端缓存配置在 P 就绪前启动失败；原无远端缓存模式的普通／PD 关闭态检查仍待完成。测试修正的单例及完整 52 项已实际通过。当前不能宣称整体验收完成或已合入上游。** 本文是本批唯一汇总报告，后续结果在本文追加更新。
 
 ## 交付和运行输入
 
@@ -13,7 +13,7 @@
 
 | 用途 | SDK | 完整 wheel SHA256 | 实际结果 |
 | --- | --- | --- | --- |
-| 默认依赖编译和关闭兼容 | `2026_10_13_22_33-79404320` | `b28704ec0cd683721625f9b4d19c8bc62f9c32a9540d0c0caa3bd8ee9b5a3aa6` | 完整生产构建、独立安装与 CPU 加载/退出通过；实际关闭态模型检查待完成 |
+| 默认依赖编译和关闭兼容 | `2026_10_13_22_33-79404320` | `b28704ec0cd683721625f9b4d19c8bc62f9c32a9540d0c0caa3bd8ee9b5a3aa6` | 完整生产构建、独立安装与 CPU 加载/退出通过；远端缓存配置启动失败，无远端缓存原普通／PD 模型检查待完成 |
 | 开启功能 | `2026_10_25_15_21-cuda130.aarch64` | `e447920282e59e7760db94756faafa3d1d17c30017598b53dd826680213e5a21` | 完整生产构建、私有运行安装及切分恢复对照通过；复制组待完成 |
 
 配套 SDK 的编译头文件、链接输入和运行 DSO 来自同一 RPM，未使用旧头文件加新 DSO 的覆盖方式。功能构建仅对 ARM SDK 仓库输入使用显式版本补丁，派生输入 tree 为 `5cbee7872f2521b164b31961c49f561f6e61a2e6`；PR 中默认 SDK pin 保持上游值。
@@ -72,9 +72,17 @@ SSD 优化和已有数据保留，性能问题未解决；SSD、GDR、D 来源�
 
 ## 复制关停失败及关闭态输入补充
 
-复制样本源请求自然 EOS，P 已计算 1790、D 已计算 1826、提交终点 1792；17:30:32 已收到实际 DTOP 提交记录。17:32:41 两个 D native rank 同时收到正常停机信号并进入 `NormalEngine::stop()`，rank 0 正常退出；约 57 秒后 rank 1 出现 DeepGEMM `barrier.cuh:27` Timeout，随后在 `CachingHostAllocatorImpl::free` / `TensorImpl` 释放路径 terminate，17:33:39 发生 SIGABRT。原始 `waitpid` 明确记录 rank 1 为 signal 6；父启动器返回 0 不能覆盖该失败。尚未证明根因是发布功能或既有 DP 关停问题，也未完成复制模式 fresh P 恢复，因此不记为验收通过。已保全原始数据供后续恢复复用，不要求重跑 D 生成样本。
+复制样本源请求自然 EOS，P 已计算 1790、D 已计算 1826、提交终点 1792；17:30:32 已收到实际 DTOP 提交记录。17:32:41 两个 D native rank 同时收到正常停机信号并进入 `NormalEngine::stop()`，rank 0 正常退出；约 57 秒后 rank 1 出现 DeepGEMM `barrier.cuh:27` Timeout，随后在 `CachingHostAllocatorImpl::free` / `TensorImpl` 释放路径 terminate，17:33:39 发生 SIGABRT。原始 `waitpid` 明确记录 rank 1 为 signal 6；父启动器返回 0 不能覆盖该失败。尚未证明根因是发布功能或既有 DP 关停问题，也未完成复制模式 fresh P 恢复，因此不记为验收通过。已保全原始请求、日志和退出记录。原独立 DRAM Provider 随后按期限正常退出，实际载荷已失效；后续恢复验收需要按同一短 fixture 重建测试数据，不能把归档日志当作仍可读取的载荷。
 
 默认 SDK 关闭态独立 runtime 已逐项校验完整 wheel 的 2147 个安装成员、固定 RPM 的五个头文件和三份实际加载的原生库，CPU 加载退出 0，CUDA 未初始化。后续构建已复用共享 Bazel 临时输出，不能拿该临时目录替代旧 wheel 的历史构建输入证明；本次依据固定哈希的归档 wheel 和原始 RPM 独立核对，没有覆盖 A 的 SDK 或共享输出。
+
+## 默认 SDK 实际启动失败的范围
+
+默认完整 wheel `b28704ec...`、SDK794、发布开关 `0` 的首次远端缓存配置在 P 就绪前失败，两 rank 报 `CUDA error: no kernel image is available for execution on the device`；没有发出普通 P 或 PD 测试请求。父进程退出 1，两个 native rank 由失败清理流程以信号 15 结束，不能记录为正常退出通过。后续 controller 的 runc 查询错误属于 namespace 退出后的次生错误。
+
+只读 `cuobjdump` 核对发现：默认 SDK794 的实际 DSO 只含 `sm_103` cubin，无 PTX；配套 SDK1025 包含 `sm_100` 与 `sm_103` cubin。两包的主 RTP DSO 均有 sm100/103 镜像及 PTX，compute DSO 完全相同。这是 SDK 包能力差异证据；异步 CUDA 异常尚未锁定首个发起 kernel，不能据此直接认定 SDK、GDR 或新功能的因果。
+
+下一项检查仍保留准确的原完整 wheel 和 SDK、发布开关 `0`，仅采用上游既有 `--enable_remote_cache 0` 的普通／PD 模式。它只能证明该无 KVCM 远端缓存配置下的关闭兼容性，不能替代旧 SDK 远端缓存路径的验收，也不会热换运行库或改冻结源码。当前尚无成功模型结果。
 
 ## 原始证据索引
 
