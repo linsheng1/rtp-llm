@@ -55,33 +55,55 @@ native checks. Actual same-client SDK concurrency, error completion and buffer
 lifetime still require independent runtime validation. Later telemetry and
 safety changes must pass the final source's native and runtime gates.
 
-## Fixed measurement protocol
+## Two-turn, four-session measurement protocol
 
-Use the 32K by actual physical batch4 point first. Declare 21 alternating pairs
-before collecting formal samples; retain all samples and every exclusion with
-its reason. Compute paired absolute and relative changes and a 100000-resample
-paired bootstrap confidence interval with seed 20261028. Report the median,
-spread and individual pair changes. Do not select favorable pairs or expand
-the sequence-length scan to resolve an uncertain result.
+The current acceptance uses one A/B comparison per storage medium, not 21
+alternating pairs. Each arm has four concurrent independent sessions and two
+turns, for 16 requests across A and B. Both arms use the same committed source,
+complete wheel, matching SDK, model, physical layout, pool budgets and reader
+policy. Only Decode publication differs: disabled on D in A, enabled on D in B.
+Keep the Prefill reader adapter configuration identical in both arms and keep
+upstream Prefill local/remote caching enabled. Feature-off compatibility for the
+whole factory is a separate correctness gate.
 
-The serial control uses the same adapter, source, wheel, client and model as
-the bounded-concurrency arm, with the delegate serialized by a private per-client
-mutex. Call it the serialized-adapter control; it is not the historical SDK
-implementation. Switch arms only after an idle barrier. Keep physical batch,
-CP layout, block size, pool/reserve budgets, graph policy and cache state fixed.
+Generate each first-turn response with min_new_tokens=max_new_tokens=32768 and
+explicit EOS suppression. This is a length-controlled load test, not natural
+EOS or answer-quality validation. Four fixed, different token prefixes prevent
+cross-session prefix sharing; use the same first-turn input manifest in A and B.
+Record the actual computed KV endpoint and aligned committed endpoint rather
+than assuming that the last sampled token has computed KV. The prepared workload
+has 7680 input tokens, a 128-token follow-up suffix and at most 32 second-turn
+output tokens; reserve at least their full combined context (65536 is the
+proposed limit, subject to actual model and cache capacity checks).
 
-Include the production reporter's callback path and actual inner SDK payload
-observer in both arms. Record reporter/exporter configuration and its limits;
-callback-only results do not establish exporter CPU overhead. Profile callback
-cost, worker creation, D2D gather/scatter and each stream/device synchronization
-separately from inner SDK time. Collect diagnostic traces separately from
-formal samples. Avoid formal timing during same-host compilation or large IO.
+After all four first-turn streams reach normal EOF, issue the four second-turn
+requests immediately. Continue each session with its complete original input
+and actual output token IDs plus its fixed follow-up suffix. Do not retokenize
+the generated history. Do not add an unreported commit wait only to B: record
+EOF-to-commit and EOF-to-next-request separately, including publications still
+pending when the follow-up arrives. Preserve the ordinary Prefill prefix cache
+and report local reuse, remote reuse and proven coverage of D-computed ranges
+separately. A and B must use independent cache groups so A cannot restore B's
+published Decode history.
 
-Compare DRAM and recomputation controls under the same candidate and effective
-workload. Record actual SSD/provider reads and warm-cache state; do not call a
-page-cache read physical SSD throughput. Use private objects and namespaces,
-without flushing shared caches or changing other users' services. Report the
-remaining SSD/DRAM gap, transfer volume and the dominant residual costs.
+Client TTFT starts when each streaming request is sent and ends at its first
+valid generated token, excluding empty control frames. Keep the real request
+concurrency and observed physical batches distinct. Publish all four TTFTs per
+arm, their median and range, input/output hashes, complete token IDs, errors and
+cache state. Different generated histories make the next-turn input unequal;
+mark that comparison inconclusive instead of attributing the difference solely
+to the optimization. One comparison is not a P95 or statistical-significance
+claim, and no adaptive repetition is used to obtain a favorable result.
+
+Prewarm before timing and collect short diagnostic traces separately from the
+formal run. Include the production reporter and actual inner SDK payload
+observer consistently. Measure publication and restore stages, SDK time,
+thread creation, device/stream synchronization and GPU gather/scatter. For SSD,
+record the actual backend, data FD flags, Provider reads and warm-cache state;
+page-cache or DRAM hits are not physical SSD bandwidth. Do not flush shared
+caches, alter other users' services, compile on the timing host or change the SDK
+between the arms. Historical P-only results remain separate from real
+D-publication session gains.
 
 ## D publication timeline scope
 
@@ -113,7 +135,7 @@ observations were D2D, with no observed KV D2H/H2D. Those observations and the
 384 native regressions apply only to the historical candidate artifacts.
 
 Distinguish evidence of a positive paired effect from evidence that the effect
-stably exceeds 3%. The fixed 21-pair protocol above replaces adaptive extension
-for the new candidate. Estimates remain conditional on the recorded
+stably exceeds 3%. The historical fixed 21-pair proposal is superseded by the two-turn
+protocol above; these historical samples are not pooled with the new candidate. Estimates remain conditional on the recorded
 model/Provider run and SSD cache state. P-only read gains do not prove session
 net gains: include D publication cost and confirmed actual D-KV reuse.
