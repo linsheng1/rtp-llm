@@ -7,6 +7,7 @@
 #include <future>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <stdexcept>
 #include <thread>
 #include <utility>
@@ -458,6 +459,8 @@ public:
     ~ProtectedBackend() override { shutdown(); }
     std::shared_ptr<void> resources = std::make_shared<int>(1);
     std::atomic<bool> quiescent{false};
+    std::atomic<bool> external_unknown{false};
+    ExternalIoGuard trackWorkerIo() { return trackExternalIo(); }
     void proveQuiescence() {
         quiescent.store(true);
         notifyCompletionQuiescence();
@@ -465,6 +468,7 @@ public:
 protected:
     bool protectUnknownCompletion() const noexcept override { return true; }
     std::shared_ptr<void> completionResourceOwner() const override { return resources; }
+    bool hasUnresolvedExternalIo() const noexcept override { return external_unknown.load(); }
     bool quiesceUnknownOperations() noexcept override { return quiescent.load(); }
 };
 
@@ -649,6 +653,26 @@ TEST(StorageBackendTest, PostEntryAllocationFailureRetainsOwnersUntilExplicitQui
     EXPECT_EQ(budget.snapshot().jobs, 0u);
     EXPECT_EQ(pool->refCount(block), 1u);
     pool->decRef(block);
+}
+
+TEST(StorageBackendTest, WorkerTransactionRecordsUnknownBeforeShutdownCanDestroyTransport) {
+    auto pool = std::make_shared<TestBlockPool>();
+    auto backend = std::make_shared<ProtectedBackend>();
+    ASSERT_TRUE(initBackend(*backend, pool));
+    auto transaction = backend->trackWorkerIo();
+    ASSERT_TRUE(transaction);
+    BoundedThread<void> stopping([backend] { backend->shutdown(); });
+    EXPECT_EQ(stopping.waitFor(std::chrono::milliseconds(20)), std::future_status::timeout);
+    EXPECT_FALSE(backend->shutdownCalled());
+    backend->external_unknown.store(true);
+    transaction = {};
+    EXPECT_EQ(stopping.waitFor(std::chrono::milliseconds(20)), std::future_status::timeout);
+    EXPECT_FALSE(backend->shutdownCalled());
+    backend->proveQuiescence();
+    ASSERT_EQ(stopping.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    stopping.get();
+    EXPECT_TRUE(backend->shutdownCalled());
+    EXPECT_FALSE(backend->trackWorkerIo());
 }
 
 TEST(StorageBackendTest, ExplicitPayloadSafeFailureReleasesWithoutQuarantine) {

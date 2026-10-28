@@ -91,6 +91,28 @@ StorageWriteTask::StorageWriteTask(std::shared_ptr<storage_backend_detail::Stora
 
 StorageBackend::StorageBackend(std::shared_ptr<StorageBackendExecutor> executor): executor_(std::move(executor)) {}
 
+StorageBackend::ExternalIoGuard::ExternalIoGuard(ExternalIoGuard&& other) noexcept:
+    backend_(std::exchange(other.backend_, nullptr)) {}
+
+StorageBackend::ExternalIoGuard& StorageBackend::ExternalIoGuard::operator=(ExternalIoGuard&& other) noexcept {
+    if (this != &other) {
+        if (backend_) { backend_->taskFinished(); }
+        backend_ = std::exchange(other.backend_, nullptr);
+    }
+    return *this;
+}
+
+StorageBackend::ExternalIoGuard::~ExternalIoGuard() {
+    if (backend_) { backend_->taskFinished(); }
+}
+
+StorageBackend::ExternalIoGuard StorageBackend::trackExternalIo() {
+    std::lock_guard<std::mutex> lock(lifecycle_mutex_);
+    if (lifecycle_ != Lifecycle::ACCEPTING) { return {}; }
+    ++in_flight_;
+    return ExternalIoGuard(this);
+}
+
 StorageBackend::~StorageBackend() {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
     RTP_LLM_CHECK_WITH_INFO(lifecycle_ == Lifecycle::CREATED || lifecycle_ == Lifecycle::STOPPED,
@@ -233,7 +255,7 @@ void StorageBackend::shutdown() {
         // No forced teardown: an unresolved operation keeps this complete
         // backend session alive, including the actual SDK registration owner.
         quarantine_cv_.wait(lock, [this] {
-            return !protected_quarantine_ || quiesceUnknownOperations();
+            return (!protected_quarantine_ && !hasUnresolvedExternalIo()) || quiesceUnknownOperations();
         });
         retired = std::move(protected_quarantine_);
     }

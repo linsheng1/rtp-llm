@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 
 #include <memory>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <type_traits>

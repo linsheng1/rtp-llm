@@ -139,6 +139,20 @@ private:
 // before derived backend state starts destruction.
 class StorageBackend {
 public:
+    class ExternalIoGuard {
+    public:
+        ExternalIoGuard() = default;
+        ExternalIoGuard(ExternalIoGuard&& other) noexcept;
+        ExternalIoGuard& operator=(ExternalIoGuard&& other) noexcept;
+        ~ExternalIoGuard();
+        ExternalIoGuard(const ExternalIoGuard&) = delete;
+        ExternalIoGuard& operator=(const ExternalIoGuard&) = delete;
+        explicit operator bool() const { return backend_ != nullptr; }
+    private:
+        explicit ExternalIoGuard(StorageBackend* backend): backend_(backend) {}
+        StorageBackend* backend_{nullptr};
+        friend class StorageBackend;
+    };
     using MatchDone      = std::function<void(
         size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success)>;
     using Done           = std::function<void(ErrorInfo error)>;
@@ -168,6 +182,9 @@ public:
     void shutdown();
 
 protected:
+    // Worker RPC payloads bypass the executor. Count their whole transaction,
+    // including publishing an UNKNOWN outcome, before shutdown may finalize.
+    ExternalIoGuard trackExternalIo();
     const CacheTopology&      topology() const;
     const DeviceBlockPoolPtr& devicePool(const std::string& tag) const;
     std::vector<BlockInfo>    convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const;
@@ -187,6 +204,7 @@ protected:
                                                    const StorageQuarantineBreakdown&) noexcept {}
     virtual bool protectUnknownCompletion() const noexcept { return false; }
     virtual std::shared_ptr<void> completionResourceOwner() const { return {}; }
+    virtual bool hasUnresolvedExternalIo() const noexcept { return false; }
     // Called only after application I/O callbacks have joined. True requires
     // actual transport quiescence, not merely SDK method/worker completion.
     // This is a nonblocking predicate under the quarantine mutex; it must not
