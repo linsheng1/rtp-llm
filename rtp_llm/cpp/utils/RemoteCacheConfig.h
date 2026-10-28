@@ -24,8 +24,7 @@ struct DecodePublicationLimits {
 // Explicit positive MiB/jobs overrides are strict; malformed values or a byte
 // budget larger than the physical pool reject initialization. Disabled callers
 // must not parse these settings or create publication resources.
-std::optional<DecodePublicationLimits> remoteCacheDecodePublicationLimits(
-    size_t native_pool_bytes = 4ULL * 1024 * 1024 * 1024);
+std::optional<DecodePublicationLimits> remoteCacheDecodePublicationLimits(size_t native_pool_bytes);
 
 // Returns 0 when the environment variable is unset. Invalid or out-of-range
 // values return nullopt so backend initialization can fail explicitly.
