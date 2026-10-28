@@ -10,7 +10,6 @@ cc_test_wrapper(
     deps = [
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
-        "//rtp_llm/cpp/utils:core_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ] + torch_deps(),

@@ -22,14 +22,10 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 
 namespace rtp_llm {
-class BatchKVCacheResource;
 
 struct StorageBlockHandle {
     std::string  tag;
     BlockIdxType block{NULL_BLOCK_IDX};
-    // Additional same-pool physical pages used by one Decode checkpoint.
-    // prepareWrite pins every unique source before the request can release it.
-    std::vector<BlockIdxType> peer_blocks;
 };
 
 struct StorageBackendMatchMeta {
@@ -88,12 +84,6 @@ struct StorageRequest {
     // boundary are already available from Device/Host/Disk.
     size_t                 local_matched_blocks_num{0};
     std::optional<int64_t> request_id;
-    bool decode_completion{false};
-    size_t computed_tokens{0}, published_tokens{0};
-    std::optional<int64_t> prefill_computed_tokens;
-    // Opaque RAII ownership only: no observer or queue-state callbacks. Unknown
-    // completion retains this owner with the quarantined task across shutdown.
-    std::shared_ptr<void> completion_budget_lease;
 
     bool empty() const {
         for (const auto& key_handles : handles) {
@@ -155,11 +145,6 @@ public:
     // Must not be called from backend I/O or completion callbacks.
     void shutdown();
 
-    // Optional normal-Decode completion route; ordinary backends do not act.
-    virtual bool captureCompletedDecode(const BatchKVCacheResource&, size_t, bool = true) {
-        return false;
-    }
-
 protected:
     const CacheTopology&      topology() const;
     const DeviceBlockPoolPtr& devicePool(const std::string& tag) const;
@@ -215,9 +200,6 @@ private:
     size_t                     quarantined_block_count_{0};
     uint64_t                   quarantine_generation_{0};
     StorageQuarantineBreakdown quarantined_breakdown_{};
-    // Intrusive links live in pre-I/O task allocations. Retaining a completed-
-    // unknown publication must never require an allocation after DMA starts.
-    std::shared_ptr<storage_backend_detail::StorageTaskState> quarantined_completion_tasks_;
 
     friend class LoadAsyncContext;
 };
