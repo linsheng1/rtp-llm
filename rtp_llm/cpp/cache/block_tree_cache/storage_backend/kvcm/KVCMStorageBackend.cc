@@ -1582,12 +1582,14 @@ private:
         }
         if (decode_publication_enabled_) {
             kvcm::WorkerPayloadProof proof;
+            bool any_timeout = false;
             for (const auto& response : responses) {
                 if (!response.has_remote_response()) {
                     proof.observe(false, false, false);
                     continue;
                 }
                 const auto& payload = response.remote_response();
+                any_timeout = any_timeout || payload.transfer_status() == REMOTE_TRANSFER_STATUS_TIMEOUT;
                 proof.observe(payload.payload_buffer_safe(),
                               payload.transfer_status() == REMOTE_TRANSFER_STATUS_SUCCESS,
                               payload.transfer_status() == REMOTE_TRANSFER_STATUS_FAILED);
@@ -1596,14 +1598,11 @@ private:
             if (source_may_be_touched && disposition != kvcm::WorkerPayloadProof::Result::UNKNOWN) {
                 *source_may_be_touched = false;
             }
-            switch (disposition) {
-                case kvcm::WorkerPayloadProof::Result::SUCCESS:
-                    return responses;
-                case kvcm::WorkerPayloadProof::Result::BUFFER_SAFE_FAILURE:
-                    std::rethrow_exception(buffer_safe_failure_);
-                case kvcm::WorkerPayloadProof::Result::UNKNOWN:
-                    std::rethrow_exception(completion_unknown_failure_);
+            if (const auto failure = proof.failure(any_timeout, buffer_safe_failure_, completion_unknown_failure_,
+                                                    completion_timeout_failure_)) {
+                std::rethrow_exception(failure);
             }
+            return responses;
         }
         bool failed = false;
         for (const auto& response : responses) {

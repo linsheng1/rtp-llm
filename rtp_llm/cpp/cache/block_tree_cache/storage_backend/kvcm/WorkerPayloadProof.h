@@ -1,4 +1,5 @@
 #pragma once
+#include <exception>
 
 namespace rtp_llm::kvcm {
 
@@ -16,6 +17,18 @@ public:
     Result result() const noexcept {
         return !all_safe_ ? Result::UNKNOWN :
                all_success_ ? Result::SUCCESS : Result::BUFFER_SAFE_FAILURE;
+    }
+
+    std::exception_ptr failure(bool any_timeout,
+                               const std::exception_ptr& safe_failure,
+                               const std::exception_ptr& unknown_failure,
+                               const std::exception_ptr& timeout_failure) const noexcept {
+        switch (result()) {
+            case Result::SUCCESS: return {};
+            case Result::BUFFER_SAFE_FAILURE: return safe_failure;
+            case Result::UNKNOWN: return any_timeout ? timeout_failure : unknown_failure;
+        }
+        return unknown_failure;
     }
 
 private:

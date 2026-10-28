@@ -324,6 +324,46 @@ TEST(WorkerPayloadProofTest, LegacyUnspecifiedStatusIsNotProofWhenEnabled) {
     proof.observe(true, false, false);
     EXPECT_EQ(proof.result(), kvcm::WorkerPayloadProof::Result::UNKNOWN);
 }
+
+// Exercise the production proof-to-exception selection through StorageBackend's
+// real callback error mapping. No SDK is submitted; this is not a DMA fence.
+class ProofErrorBackend final: public StorageBackend {
+public:
+    explicit ProofErrorBackend(bool timeout): timeout_(timeout) {}
+    ~ProofErrorBackend() override { shutdown(); }
+protected:
+    bool initImpl() override { return true; }
+    StorageMatchResult matchImpl(const StorageRequest&) override { return {}; }
+    void writeImpl(const StorageRequest&) override {}
+    void readImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&) override {
+        kvcm::WorkerPayloadProof proof;
+        proof.observe(true, true, false);
+        proof.observe(false, false, !timeout_);
+        std::rethrow_exception(proof.failure(timeout_, safe_, unknown_, timed_out_));
+    }
+private:
+    bool timeout_;
+    const std::exception_ptr safe_ = std::make_exception_ptr(StorageOperationBufferSafeFailure("safe"));
+    const std::exception_ptr unknown_ = std::make_exception_ptr(
+        StorageOperationCompletionUnknown("unknown", StorageQuarantineReason::INVALID_RESPONSE));
+    const std::exception_ptr timed_out_ = std::make_exception_ptr(
+        StorageOperationTimeout("SDK timeout", StorageQuarantineReason::SDK_TIMEOUT));
+};
+TEST(WorkerPayloadProofTest, UnknownSdkTimeoutKeepsDeadlineExceededCallback) {
+    for (bool timeout : {false, true}) {
+        auto env = makeBackendEnvironment(timeout ? "worker_proof_timeout" : "worker_proof_unknown");
+        ProofErrorBackend backend(timeout);
+        ASSERT_TRUE(backend.init(env.cache_config.topologyPtr(), env.pools_by_tag,
+            [&](int layer, const std::string& tag, int block) { return environmentBuffers(env, layer, tag, block); }));
+        std::promise<ErrorCode> completed;
+        auto result = completed.get_future();
+        backend.read(makeGroupedStorageRequest(env, {101}, 0, {env.block_id}), nullptr,
+                     [&](ErrorInfo error) { completed.set_value(error.code()); });
+        ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        EXPECT_EQ(result.get(), timeout ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION);
+        backend.shutdown();
+    }
+}
 TEST_P(NativeDtopCompletionTest, WorkerPreflightFailureProvesNoPayloadSubmission) {
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), std::get<2>(GetParam()));
     RemoteOperationRequestPB request;
