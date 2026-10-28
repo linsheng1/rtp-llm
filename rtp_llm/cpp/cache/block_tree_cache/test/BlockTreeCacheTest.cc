@@ -851,16 +851,141 @@ TEST_F(BlockTreeCacheTest, InsertHardStopReportsOnceEvenWithoutAcceptedResources
             MultiNodeResource{index, Tier::DEVICE, {{node, resource.device_blocks}}}, BlockTreeRefType::CACHE);
         resource.evictFromTier(Tier::DEVICE);
         resource.host_block = 7;
+        resource.transfer_state = GroupSetTransferState::LOAD_PENDING;
     }
 
     cache_->insert({100, 200}, {{device, device}, {device, device}}, Tier::DEVICE);
     cache_->insert({100, 200}, {{device, device}, {device, device}}, Tier::DEVICE);
 
     kmonitor::MetricsTags tags("tier", "HOST");
-    tags.AddTag("operation", "idle");
+    tags.AddTag("operation", "load");
     EXPECT_EQ(metricSeriesCount(metric), 1u);
     EXPECT_DOUBLE_EQ(snapshotQps(metric, tags), 2);
     EXPECT_TRUE(node->children.empty());
+}
+
+TEST_F(BlockTreeCacheTest, InsertReplacesIdleLowerTierFullRefillsSwaAndRefreshesCandidates) {
+    for (Tier tier : {Tier::HOST, Tier::DISK}) {
+        SCOPED_TRACE(tierName(tier));
+        auto full = std::make_shared<FullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)},
+            block_tree_cache_test::makeHostPool(1, 4),
+            block_tree_cache_test::makeDiskPool(1, 4, std::make_unique<block_tree_cache_test::MemoryDiskBlockIO>()));
+        auto swa = std::make_shared<SWAGroupSet>(
+            128, 64, std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(1)}, nullptr, nullptr);
+        auto                 reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+        BlockTreeCacheConfig config;
+        config.enable_host_cache = true;
+        config.enable_disk_cache = true;
+        auto        cache        = makeBlockTreeCacheForTest({full, swa}, config, nullptr, nullptr, reporter);
+        IBlockPool* pool         = tier == Tier::HOST ? static_cast<IBlockPool*>(full->hostPool().get()) :
+                                                        static_cast<IBlockPool*>(full->diskPool().get());
+        const auto  old_blocks   = full->allocateBlocks(2, tier, BlockTreeRefType::STORE);
+        ASSERT_TRUE(old_blocks.has_value());
+        std::vector<std::vector<GroupSetResource>> original(2, std::vector<GroupSetResource>(2));
+        for (size_t index = 0; index < 2; ++index) {
+            original[index][0].setBlocks(tier, {(*old_blocks)[index]});
+        }
+        const auto seeded = cache->tree()->insertNode({100, 200}, original, true, false);
+        ASSERT_EQ(seeded.path.size(), 2u);
+        cache->evictor_.onInserted(seeded);
+        full->releaseBlocks(tier, *old_blocks, BlockTreeRefType::STORE);
+        EXPECT_EQ(cache->evictor_.candidateCount(0, tier), 1u);
+        auto before = cache->match({100, 200});
+        EXPECT_EQ(before.matched_device_blocks, 0u);
+        releaseRequestRefsForTest(*cache, before.matched_device_resources);
+        seeded.path[0]->group_set_resources[0].candidate_meta.tier_enter_time_us = 1;
+
+        std::vector<std::vector<GroupSetResource>> incoming(3, std::vector<GroupSetResource>(2));
+        for (size_t index = 0; index < 3; ++index) {
+            incoming[index][0].device_blocks = {static_cast<BlockIdxType>(42 + index)};
+            incoming[index][1].device_blocks = {static_cast<BlockIdxType>(52 + index)};
+        }
+        cache->insert({100, 200, 300}, incoming, Tier::DEVICE);
+
+        const auto path = cache->tree()->findNode({100, 200, 300});
+        ASSERT_EQ(path.size(), 3u);
+        EXPECT_EQ(path[0], seeded.path[0]);
+        EXPECT_EQ(path[1], seeded.path[1]);
+        for (size_t index = 0; index < path.size(); ++index) {
+            EXPECT_EQ(path[index]->group_set_resources[1].device_blocks,
+                      (BlockIndicesType{static_cast<BlockIdxType>(52 + index)}));
+        }
+        for (const auto block : *old_blocks) {
+            EXPECT_FALSE(pool->isAllocated(block));
+        }
+        EXPECT_EQ(cache->evictor_.candidateCount(0, Tier::HOST), 0u);
+        EXPECT_EQ(cache->evictor_.candidateCount(0, Tier::DISK), 0u);
+        EXPECT_EQ(cache->evictor_.candidateCount(0, Tier::DEVICE), 1u);
+        EXPECT_EQ(cache->evictor_.candidateCount(1, Tier::DEVICE), 3u);
+        EXPECT_GT(path[0]->group_set_resources[0].candidate_meta.tier_enter_time_us, 1);
+        EXPECT_EQ(metricSeriesCount(reporter->getMetricsGroup<RtpLLMCacheInsertMetrics>()->insert_hard_stop_qps_metric),
+                  0u);
+        EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, tier), 0);
+
+        auto after = cache->match({100, 200, 300});
+        EXPECT_EQ(after.matched_device_blocks, 3u);
+        EXPECT_EQ(cache->matchedBlocksForGroup("group0", after.matched_device_resources),
+                  (BlockIndicesType{42, 43, 44}));
+        EXPECT_EQ(cache->matchedBlocksForGroup("group1", after.matched_device_resources), (BlockIndicesType{53, 54}));
+        releaseRequestRefsForTest(*cache, after.matched_device_resources);
+    }
+}
+
+TEST_F(BlockTreeCacheTest, InsertClearsOnlyReplacedFullSourceTierCandidates) {
+    auto full = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(0)},
+        block_tree_cache_test::makeHostPool(1, 4),
+        block_tree_cache_test::makeDiskPool(1, 4, std::make_unique<block_tree_cache_test::MemoryDiskBlockIO>()));
+    auto                 swa = std::make_shared<SWAGroupSet>(128,
+                                             64,
+                                             std::vector<DeviceBlockPoolPtr>{makeStructuralDevicePool(1)},
+                                             block_tree_cache_test::makeHostPool(1, 4),
+                                             nullptr);
+    BlockTreeCacheConfig config;
+    config.enable_host_cache = true;
+    config.enable_disk_cache = true;
+    auto       cache         = makeBlockTreeCacheForTest({full, swa}, config);
+    const auto full_host     = full->allocateBlocks(2, Tier::HOST, BlockTreeRefType::STORE);
+    const auto full_disk     = full->allocateBlocks(1, Tier::DISK, BlockTreeRefType::STORE);
+    const auto swa_host      = swa->allocateBlocks(1, Tier::HOST, BlockTreeRefType::STORE);
+    ASSERT_TRUE(full_host.has_value());
+    ASSERT_TRUE(full_disk.has_value());
+    ASSERT_TRUE(swa_host.has_value());
+    std::vector<std::vector<GroupSetResource>> original(2, std::vector<GroupSetResource>(2));
+    original[0][0].host_block = (*full_host)[0];
+    original[0][1].host_block = (*swa_host)[0];
+    original[1][0].disk_block = (*full_disk)[0];
+    const auto seeded         = cache->tree()->insertNode({100, 200}, original, true, false);
+    cache->evictor_.onInserted(seeded);
+    GroupSetResource sibling_resource;
+    sibling_resource.host_block = (*full_host)[1];
+    const auto sibling          = cache->tree()->insertNode({300}, {{sibling_resource, {}}}, true, false);
+    cache->evictor_.onInserted(sibling);
+    full->releaseBlocks(Tier::HOST, *full_host, BlockTreeRefType::STORE);
+    full->releaseBlocks(Tier::DISK, *full_disk, BlockTreeRefType::STORE);
+    swa->releaseBlocks(Tier::HOST, *swa_host, BlockTreeRefType::STORE);
+    ASSERT_EQ(seeded.path.size(), 2u);
+    ASSERT_EQ(sibling.path.size(), 1u);
+    EXPECT_FALSE(seeded.path[0]->children.empty());
+    EXPECT_EQ(cache->evictor_.candidateCount(0, Tier::HOST), 2u);
+    GroupSetResource incoming_full;
+    GroupSetResource incoming_swa;
+    incoming_full.device_blocks = {42};
+    incoming_swa.device_blocks  = {52};
+
+    cache->insert({100}, {{incoming_full, incoming_swa}}, Tier::DEVICE);
+
+    EXPECT_EQ(cache->tree()->findNode({100, 200}), seeded.path);
+    EXPECT_EQ(cache->evictor_.candidateNodes(0, Tier::HOST), sibling.path);
+    EXPECT_EQ(cache->evictor_.candidateNodes(0, Tier::DISK), (std::vector<TreeNode*>{seeded.path[1]}));
+    EXPECT_EQ(cache->evictor_.candidateNodes(1, Tier::HOST), (std::vector<TreeNode*>{seeded.path[0]}));
+    EXPECT_EQ(cache->evictor_.candidateNodes(0, Tier::DEVICE), (std::vector<TreeNode*>{seeded.path[0]}));
+    EXPECT_FALSE(full->hostPool()->isAllocated((*full_host)[0]));
+    EXPECT_TRUE(full->hostPool()->isAllocated((*full_host)[1]));
+    EXPECT_TRUE(full->diskPool()->isAllocated((*full_disk)[0]));
+    EXPECT_TRUE(swa->hostPool()->isAllocated((*swa_host)[0]));
+    EXPECT_EQ(swa->devicePools()[0]->treeRefCount(52), 0u);
 }
 
 TEST(BlockTreeCacheMetricsTest, BusinessQueueWaitReportsQpsLatencyOperationAndPool) {
@@ -1321,6 +1446,12 @@ TEST_F(BlockTreeCacheTest, ForceDropTriggerQpsCountsOneSuccessfulRequest) {
     force_drop_tags.AddTag("tier", tierName(Tier::DEVICE));
     force_drop_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
     EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_trigger_qps_metric, force_drop_tags), 1);
+    kmonitor::MetricsTags required_tags = force_drop_tags;
+    required_tags.AddTag("block_type", "required");
+    kmonitor::MetricsTags scheduled_tags = force_drop_tags;
+    scheduled_tags.AddTag("block_type", "scheduled");
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_count_metric, required_tags), 2);
+    EXPECT_DOUBLE_EQ(snapshotQps(eviction_metrics->eviction_blocks_count_metric, scheduled_tags), 2);
     kmonitor::MetricsTags lifetime_tags("tier", tierName(Tier::DEVICE));
     lifetime_tags.AddTag("trigger_type", "force_drop");
     lifetime_tags.AddTag("group_type", metricCacheGroupTypeName(CacheGroupType::FULL));
@@ -1925,7 +2056,7 @@ TEST_F(BlockTreeCacheTest, ForceDropRequiresEveryDevicePoolMemberToBeReclaimable
     }
 }
 
-TEST_F(BlockTreeCacheTest, ForceDropPreservesRequestHeldCascadeResource) {
+TEST_F(BlockTreeCacheTest, FullForceDropKeepsRequestHeldCascadePhysicallyAlive) {
     const std::vector<DeviceBlockPoolPtr> pools = {makeStructuralDevicePool(0), makeStructuralDevicePool(1)};
     std::vector<GroupSetPtr> groups;
     for (const auto& pool : pools) {
@@ -1941,14 +2072,16 @@ TEST_F(BlockTreeCacheTest, ForceDropPreservesRequestHeldCascadeResource) {
     cache->insert({100}, resources, Tier::DEVICE);
 
     const size_t initial_free = pools[0]->freeBlocksNum();
-    EXPECT_EQ(cache->evictForGroup("group0", 1), 0);
-    EXPECT_EQ(pools[0]->freeBlocksNum(), initial_free);
-    EXPECT_EQ(pools[0]->refCount(42), 1u);
-    EXPECT_EQ(pools[1]->refCount(42), 2u);
-    EXPECT_FALSE(cache->tree()->findNode({100}).empty());
+    EXPECT_EQ(cache->evictForGroup("group0", 1), 1);
+    EXPECT_EQ(pools[0]->freeBlocksNum(), initial_free + 1);
+    EXPECT_FALSE(pools[0]->isAllocated(42));
+    EXPECT_TRUE(pools[1]->isAllocated(42));
+    EXPECT_EQ(pools[1]->refCount(42), 1u);
+    EXPECT_EQ(pools[1]->treeRefCount(42), 0u);
+    EXPECT_TRUE(cache->tree()->findNode({100}).empty());
 
     pools[1]->decRef(42);
-    EXPECT_EQ(cache->evictForGroup("group0", 1), 1);
+    EXPECT_EQ(cache->evictForGroup("group0", 1), 0);
     EXPECT_FALSE(pools[0]->isAllocated(42));
     EXPECT_FALSE(pools[1]->isAllocated(42));
     EXPECT_TRUE(cache->tree()->findNode({100}).empty());

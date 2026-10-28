@@ -76,6 +76,7 @@ _TESTS = [
     "test_engram_cuda",
     "test_flash_mla_heads",
     "test_v41_cross_layer_mhc",
+    "test_engram_transition_cuda",
     "test_v41_aux_capture_mhc",
     "test_v41_decode_rope_metadata",
     "test_v41_delayed_hc",
@@ -143,7 +144,7 @@ py_test(
         tags = ["dsv41_cuda13"],
         legacy_create_init = 0,
     )
-    for name in ["test_prefill_workspace", "test_strategy_select", "test_gate_routing_metadata", "test_v41_aux_capture_mhc", "test_v41_cross_layer_mhc", "test_v41_mega_mhc", "test_mega_gate", "test_mhc_moe_inputs", "test_fake_balance_expert", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup", "test_engram_decode_prefetch", "test_engram_quantized"] + _ENGRAM_SM100_TESTS
+    for name in ["test_prefill_workspace", "test_strategy_select", "test_gate_routing_metadata", "test_v41_aux_capture_mhc", "test_v41_cross_layer_mhc", "test_v41_mega_mhc", "test_mega_gate", "test_private_gate_pack_eplb", "test_mhc_moe_inputs", "test_fake_balance_expert", "test_v41_query_quant", "test_dsv41_kernel_jit_warmup", "test_engram_decode_prefetch", "test_engram_quantized"] + _ENGRAM_SM100_TESTS
 ]
 
 dsv4_sm100_py_test(

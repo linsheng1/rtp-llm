@@ -2,6 +2,18 @@ load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_library(
+    name = "dspark_adaptive_budget",
+    hdrs = ["speculative/DSparkAdaptiveBudget.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "dspark_sample_seed",
+    hdrs = ["speculative/DSparkSampleSeed.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "normal_engine",
     hdrs = glob([
         "*.h",

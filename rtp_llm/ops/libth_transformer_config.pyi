@@ -327,7 +327,6 @@ class EPLBConfig:
     eplb_rearrange_p2p_groups: int
     eplb_metrics_report_interval: int
     eplb_metrics_snapshot_max_files: int
-    eplb_control_step: int
     eplb_stats_window_size: int
     eplb_update_time: int
     redundant_expert: int
@@ -1739,6 +1738,11 @@ class SpeculativeExecutionConfig:
     sp_max_token_match: int
     sp_min_token_match: int
     tree_decode_config: str
+    sp_dspark_confidence_mode: str
+    sp_dspark_confidence_temperature: float
+    sp_dspark_verify_budget: int
+    sp_dspark_verify_mode: str
+    sp_dspark_verify_budget_mode: str
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
