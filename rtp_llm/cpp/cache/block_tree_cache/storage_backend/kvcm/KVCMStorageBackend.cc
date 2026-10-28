@@ -6,8 +6,10 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstdint>
+#include <exception>
 #include <limits>
 #include <mutex>
+#include <numeric>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -22,6 +24,8 @@
 #include "autil/EnvUtil.h"
 #include "autil/legacy/jsonizable.h"
 #include "kvcm_client/HostCacheStateCompat.h"
+#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/GroupPolicy.h"
@@ -29,6 +33,7 @@
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/DecodePublicationBudget.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
@@ -90,6 +95,40 @@ public:
         TIMEOUT,
     };
 
+    // No back-reference to Impl/StorageBackend. A quarantined task can retain
+    // the registered SDK and its unresolved remote session after owner shutdown
+    // was requested. Pool ownership lives in the generic task's pinned pages.
+    struct CompletionResources {
+        struct Session {
+            explicit Session(std::string value): id(std::move(value)) {}
+            std::string id;
+            std::shared_ptr<Session> next;
+        };
+        explicit CompletionResources(std::shared_ptr<kvcm::ClientWrapper> value): client(std::move(value)) {}
+        std::shared_ptr<Session> holdSession(const std::string& id) {
+            auto session = std::make_shared<Session>(id);  // before payload I/O
+            std::lock_guard<std::mutex> lock(mutex);
+            session->next = std::move(sessions);
+            sessions = session;
+            return session;
+        }
+        void releaseSession(const std::shared_ptr<Session>& session) noexcept {
+            std::lock_guard<std::mutex> lock(mutex);
+            auto* link = &sessions;
+            while (*link && *link != session) {
+                link = &(*link)->next;
+            }
+            if (*link) {
+                *link = std::move(session->next);
+            }
+        }
+        std::shared_ptr<kvcm::ClientWrapper> client;
+        std::mutex mutex;
+        std::shared_ptr<Session> sessions;
+    };
+
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DtopCompletionBridge.inc"
+
     Impl(const CacheConfig&                            cache_config,
          const KVCacheConfig&                          kv_cache_config,
          const RuntimeConfig&                          runtime_config,
@@ -99,6 +138,8 @@ public:
          bool                                          gdr_enabled,
          std::shared_ptr<kmonitor::MetricsReporter>    metrics_reporter,
          std::shared_ptr<kvcm::ClientWrapper>          client_wrapper):
+        decode_publication_enabled_(remoteCacheDecodePublicationEnabled()),
+        is_decode_role_(parallelism_config.role_type == RoleType::DECODE),
         cache_config_(cache_config),
         kv_cache_config_(kv_cache_config),
         runtime_config_(runtime_config),
@@ -114,6 +155,9 @@ public:
               StorageBackend::BufferResolver                                      buffer_resolver,
               const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver) {
         RTP_LLM_LOG_INFO("start init BlockTree KVCM storage backend");
+        if (!configureDecodePublication(topology, buffer_resolver, pool_resolver)) {
+            return false;
+        }
         const auto quarantine_abort_ratio = remoteCacheQuarantineAbortRatio();
         if (!quarantine_abort_ratio.has_value()) {
             RTP_LLM_LOG_ERROR("RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO must be a finite number in [0, 1]");
@@ -143,7 +187,7 @@ public:
             } else {
                 other_group_tags.push_back(group.tag);
             }
-            group_block_size_bytes.emplace(group.tag, cache_config_.blockSizeBytesForGroup(group.tag));
+            group_block_size_bytes.emplace(group.tag, publicationWireBytes(group.tag));
         }
         if (other_group_tags.empty()) {
             group_policy_ = std::make_unique<kvcm::FullLayerGroupPolicy>(
@@ -286,6 +330,9 @@ public:
             RTP_LLM_LOG_ERROR("create BlockTree KVCM clients failed");
             return false;
         }
+        if (decode_publication_enabled_) {
+            completion_resources_ = std::make_shared<CompletionResources>(client_wrapper_);
+        }
         const auto tp_rank = parallelism_config_.tp_rank;
         RTP_LLM_LOG_INFO("BlockTree KVCM storage backend initialized, tp_rank=%ld tp_size=%ld policy={%s}",
                          tp_rank,
@@ -300,6 +347,9 @@ public:
     }
 
     StorageMatchResult match(const StorageRequest& request) {
+        if (decode_publication_enabled_ && completion_stopped_.load()) {
+            return {request.local_matched_blocks_num, nullptr};
+        }
         RTP_LLM_CHECK_WITH_INFO(parallelism_config_.tp_rank == 0,
                                 "KVCM metadata match must run on tp rank 0, got %ld",
                                 parallelism_config_.tp_rank);
@@ -375,6 +425,32 @@ public:
     }
 
     void read(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) {
+        if (!decode_publication_enabled_) {
+            readTransaction(request, match_meta, nullptr);
+            return;
+        }
+        if (completion_stopped_.load()) {
+            throw StorageOperationBufferSafeFailure("KVCM publication backend stopped before read submission");
+        }
+        bool source_may_be_touched = false;
+        const auto safe_failure = std::make_exception_ptr(StorageOperationBufferSafeFailure(
+            "KVCM read failed before submission or after completed payload"));
+        const auto unknown = std::make_exception_ptr(StorageOperationCompletionUnknown(
+            "KVCM read target completion unknown", StorageQuarantineReason::INVALID_RESPONSE));
+        try {
+            readTransaction(request, match_meta, &source_may_be_touched);
+        } catch (const StorageOperationBufferSafeFailure&) {
+            throw;
+        } catch (const StorageOperationCompletionUnknown&) {
+            throw;
+        } catch (...) {
+            std::rethrow_exception(source_may_be_touched ? unknown : safe_failure);
+        }
+    }
+
+    void readTransaction(const StorageRequest& request,
+                         const std::shared_ptr<StorageBackendMatchMeta>& match_meta,
+                         bool* source_may_be_touched) {
         RTP_LLM_CHECK_WITH_INFO(parallelism_config_.tp_rank == 0,
                                 "KVCM metadata read must run on tp rank 0, got %ld",
                                 parallelism_config_.tp_rank);
@@ -426,7 +502,13 @@ public:
                 remote->add_uris(std::string(location_spec.uri));
             }
         }
+        if (source_may_be_touched) {
+            *source_may_be_touched = true;
+        }
         (void)dispatchRequests(requests, kv_cache_config_.kvcm_get_broadcast_timeout, request.request_id);
+        if (source_may_be_touched) {
+            *source_may_be_touched = false;
+        }
         // A canonical CP key already covers every shard. Do not multiply this
         // logical token count by the number of TP ranks or payload groups.
         collector.remote_read_token_num =
@@ -435,6 +517,40 @@ public:
     }
 
     void write(const StorageRequest& request) {
+        if (decode_publication_enabled_ && is_decode_role_ && !request.decode_completion) {
+            return;
+        }
+        if (!decode_publication_enabled_) {
+            writeTransaction(request, nullptr);
+            return;
+        }
+        if (completion_stopped_.load()) {
+            throw StorageOperationBufferSafeFailure("KVCM publication backend stopped before write submission");
+        }
+        bool source_may_be_touched = false;
+        // Error payloads are allocated before the first SDK operation. Metadata
+        // failures before submission/after complete payloads are buffer-safe.
+        const auto safe_failure = std::make_exception_ptr(StorageOperationBufferSafeFailure(
+            "KVCM write failed before submission or after completed payload"));
+        const auto unknown = std::make_exception_ptr(StorageOperationCompletionUnknown(
+            "KVCM write source completion unknown", StorageQuarantineReason::INVALID_RESPONSE));
+        try {
+            writeTransaction(request, &source_may_be_touched);
+        } catch (const StorageOperationBufferSafeFailure&) {
+            throw;
+        } catch (const StorageOperationCompletionUnknown&) {
+            throw;
+        } catch (...) {
+            std::rethrow_exception(source_may_be_touched ? unknown : safe_failure);
+        }
+    }
+
+    void writeTransaction(const StorageRequest& request, bool* source_may_be_touched) {
+        if (decode_publication_enabled_ && is_decode_role_ && !request.decode_completion) {
+            // Decode publishes only completed immutable checkpoints. Prefill
+            // keeps its ordinary write path, including local hot caching.
+            return;
+        }
         RTP_LLM_CHECK_WITH_INFO(parallelism_config_.tp_rank == 0,
                                 "KVCM metadata write must run on tp rank 0, got %ld",
                                 parallelism_config_.tp_rank);
@@ -466,8 +582,17 @@ public:
         RTP_LLM_CHECK_WITH_INFO(success, "KVCM StartWrite failed");
         static const kv_cache_manager::Locations empty_locations;
         bool                                     finish_attempted = false;
+        bool                                     decode_transfer_attempted = false;
+        auto session = completion_resources_ && !write_location.write_session_id.empty() ?
+                           completion_resources_->holdSession(write_location.write_session_id) : nullptr;
+        block_tree_cache_detail::ScopeRollback release_known_session([&] {
+            if (session && (!source_may_be_touched || !*source_may_be_touched)) {
+                completion_resources_->releaseSession(session);
+            }
+        });
         try {
-            std::vector<FunctionRequestPB> requests(static_cast<size_t>(parallelism_config_.tp_size));
+            std::vector<FunctionRequestPB> requests(static_cast<size_t>(
+                request.decode_completion ? target_prefill_cp_ : parallelism_config_.tp_size));
             ActualUriGather                actual_uri_gather(requests.size());
             initializeRequests(requests, REMOTE_OPERATION_WRITE, trace_id);
             const auto key_indices = unmaskedKeyIndices(write_location.block_mask, valid_keys_size);
@@ -516,7 +641,8 @@ public:
                     const size_t rank   = static_cast<size_t>(info->second.tp_rank);
                     auto*        remote = requests.at(rank).mutable_remote_request();
                     remote->add_group_tags(info->second.tag);
-                    remote->add_block_ids(handle->block);
+                    remote->add_block_ids(request.decode_completion && !handle->peer_blocks.empty() ?
+                                              handle->peer_blocks.at(rank) : handle->block);
                     remote->add_uris(location_spec.uri);
                     actual_uri_gather[rank].push_back(&location_spec);
                 }
@@ -526,7 +652,18 @@ public:
                 const auto                             stage_start = Clock::now();
                 block_tree_cache_detail::ScopeRollback timer(
                     [&] { collector.remote_write_broadcast_time_us = elapsedTimeUs(stage_start); });
-                return dispatchRequests(requests, kv_cache_config_.kvcm_put_broadcast_timeout, request.request_id);
+                if (request.decode_completion) {
+                    RTP_LLM_CHECK(source_may_be_touched != nullptr);
+                    return transferCompletedDecode(requests, decode_transfer_attempted, *source_may_be_touched);
+                }
+                if (source_may_be_touched) {
+                    *source_may_be_touched = true;
+                }
+                auto response = dispatchRequests(requests, kv_cache_config_.kvcm_put_broadcast_timeout, request.request_id);
+                if (source_may_be_touched) {
+                    *source_may_be_touched = false;
+                }
+                return response;
             }();
             bool has_actual_uri = false;
             for (size_t rank = 0; rank < responses.size(); ++rank) {
@@ -558,8 +695,17 @@ public:
             }
             collector.remote_write_cache_block_num = static_cast<int64_t>(write_location.locations.size());
             collector.remote_write_fail_qps        = false;
+            if (request.decode_completion) {
+                RTP_LLM_LOG_INFO("DTOP committed computed=%zu published=%zu prefill=%ld keys=%zu CPU_snapshot_bytes=0",
+                                 request.computed_tokens, request.published_tokens,
+                                 request.prefill_computed_tokens.value_or(-1), request.keys->size());
+            }
         } catch (...) {
-            if (!finish_attempted) {
+            if (decode_transfer_attempted && !finish_attempted) {
+                // A failed payload operation may still touch its destination.
+                // Keep the Manager lease rather than recycling it via abort.
+                RTP_LLM_LOG_WARNING("DTOP retains uncertain remote session [%s]", write_location.write_session_id.c_str());
+            } else if (!finish_attempted) {
                 const auto                             stage_start = Clock::now();
                 block_tree_cache_detail::ScopeRollback timer(
                     [&] { collector.remote_finish_write_time_us += elapsedTimeUs(stage_start); });
@@ -621,9 +767,19 @@ public:
     }
 
     void shutdown() noexcept {
+        if (completion_budget_) {
+            completion_budget_->stopAdmission();
+        }
         if (client_wrapper_) {
             client_wrapper_->shutdown();
         }
+    }
+
+    bool protectsUnknownCompletion() const noexcept {
+        return decode_publication_enabled_;
+    }
+    std::shared_ptr<void> completionResourceOwner() const {
+        return completion_resources_;
     }
 
     void reportQuarantineEvent(bool is_write, StorageQuarantineReason reason, size_t block_count) const noexcept {
@@ -651,6 +807,18 @@ public:
                                size_t                            task_count,
                                size_t                            block_count,
                                const StorageQuarantineBreakdown& breakdown) noexcept {
+        if (decode_publication_enabled_) {
+            if (task_count > 0) {
+                completion_stopped_.store(true);
+                if (completion_budget_) {
+                    completion_budget_->stopAdmission();
+                }
+            }
+            reportQuarantineMetrics(generation, task_count, block_count, breakdown);
+            // Protected mode retains the whole unknown session. The legacy
+            // abort-ratio guard below belongs only to the disabled route.
+            return;
+        }
         reportQuarantineMetrics(generation, task_count, block_count, breakdown);
         if (parallelism_config_.tp_rank == 0 && quarantine_abort_ratio_ > 0.0 && total_device_block_count_ > 0) {
             const long double threshold = static_cast<long double>(total_device_block_count_) * quarantine_abort_ratio_;
@@ -819,15 +987,16 @@ private:
         auto infos  = std::make_shared<kvcm::KVCMConfig::LocationSpecInfoMap>();
         auto groups = std::make_shared<kvcm::KVCMConfig::LocationSpecGroups>();
         RTP_LLM_CHECK_WITH_INFO(
-            group_policy_->buildLocationSpecGroups(static_cast<int>(parallelism_config_.tp_size),
+            group_policy_->buildLocationSpecGroups(static_cast<int>(
+                                                        decode_publication_enabled_ ? target_prefill_cp_ : parallelism_config_.tp_size),
                                                     *groups,
                                                     runtime_config_.model_name),
             "failed to build KVCM location spec groups");
         for (const auto& [group_id, group] : group_policy_->groups()) {
-            for (int rank = 0; rank < parallelism_config_.tp_size; ++rank) {
+            for (int rank = 0; rank < (decode_publication_enabled_ ? target_prefill_cp_ : parallelism_config_.tp_size); ++rank) {
                 const std::string spec_name =
                     kvcm::genLocationSpecName(rank, group.group_name, runtime_config_.model_name);
-                infos->emplace(spec_name, cache_config_.blockSizeBytesForGroup(group.tag));
+                infos->emplace(spec_name, group.block_size_bytes);
             }
         }
         return {std::move(infos), std::move(groups)};
@@ -853,6 +1022,11 @@ private:
         std::string       extra      = kv_cache_config_.kvcm_model_extra_info;
         extra += '/' + autil::EnvUtil::getEnv("BIZ_NAME", std::string("")) + '/'
                  + std::to_string(hashString(autil::EnvUtil::getEnv("CHECKPOINT_PATH", std::string(""))));
+        if (decode_publication_enabled_) {
+            extra += "/decode-publish-v3/cp=" + std::to_string(target_prefill_cp_)
+                     + "/shards=" + std::to_string(target_physical_shards_)
+                     + "/base=" + std::to_string(cache_config_.seq_size_per_block);
+        }
         std::string draft_info;
         if (!cache_config_.mtp_sub_configs.empty()) {
             draft_info = '{' + sp_config_.to_string() + '}';
@@ -861,8 +1035,9 @@ private:
         identity << "instance_group: " << kv_cache_config_.kvcm_instance_group
                  << ";block_size:" << cache_config_.seq_size_per_block << ";model_name:" << model_name
                  << ";dtype_str:" << dtype << ";use_mla:" << cache_config_.use_mla
-                 << ";fp8_kv_cache:" << kv_cache_config_.fp8_kv_cache << ";tp_size:" << parallelism_config_.tp_size
-                 << ";dp_size:" << parallelism_config_.dp_size << ";extra_info:" << extra
+                 << ";fp8_kv_cache:" << kv_cache_config_.fp8_kv_cache << ";tp_size:"
+                 << (decode_publication_enabled_ ? target_prefill_cp_ : parallelism_config_.tp_size)
+                 << ";dp_size:" << (decode_publication_enabled_ ? 1 : parallelism_config_.dp_size) << ";extra_info:" << extra
                  << ";location_spec_info:" << autil::legacy::ToJsonString(location_infos, true)
                  << ";location_spec_groups:" << autil::legacy::ToJsonString(location_groups, true)
                  << ";default_query_type:" << default_query_type_
@@ -887,8 +1062,8 @@ private:
                                                kvcm::ModelDeployment(model_name,
                                                                      dtype,
                                                                      cache_config_.use_mla,
-                                                                     static_cast<int32_t>(parallelism_config_.tp_size),
-                                                                     static_cast<int32_t>(parallelism_config_.dp_size),
+                                                                     static_cast<int32_t>(decode_publication_enabled_ ? target_prefill_cp_ : parallelism_config_.tp_size),
+                                                                     static_cast<int32_t>(decode_publication_enabled_ ? 1 : parallelism_config_.dp_size),
                                                                      1,
                                                                      extra,
                                                                      kv_cache_config_.kvcm_model_user_data));
@@ -934,22 +1109,29 @@ private:
                 total_device_block_count += pool_block_count;
             }
             bool use_gdr = false;
+            bool use_gpu_descriptor = false;
 #if USING_CUDA
             use_gdr = gdr_enabled_ && pool->where() == MemoryType::MEMORY_GPU && pool->usesDedicatedDeviceAllocation()
                       && pool->getAllocationSizeBytes() > 0 && pool->deviceIndex() >= 0;
+            use_gpu_descriptor = use_gdr || (decode_publication_enabled_
+                                             && pool->where() == MemoryType::MEMORY_GPU && pool->deviceIndex() >= 0);
 #endif
+            if (decode_publication_enabled_ && !use_gpu_descriptor) {
+                RTP_LLM_LOG_ERROR("Decode publication requires actual GPU registration descriptors, tag=%s", tag.c_str());
+                return {};
+            }
             const size_t registration_size = use_gdr ? pool->getAllocationSizeBytes() : pool->getTotalSizeBytes();
             kvcm::ClientWrapper::PoolRegistration registration{
                 {pool->getBaseAddress(), registration_size},
                 kvcm::genLocationSpecName(static_cast<int>(parallelism_config_.tp_rank),
                                           groups.at(group_id).group_name,
                                           runtime_config_.model_name)};
-            if (use_gdr) {
+            if (use_gpu_descriptor) {
 #if USING_CUDA
                 const long page_size = sysconf(_SC_PAGESIZE);
-                if (page_size <= 0
+                if (use_gdr && (page_size <= 0
                     || reinterpret_cast<uintptr_t>(pool->getBaseAddress()) % static_cast<size_t>(page_size) != 0
-                    || pool->getAllocationSizeBytes() % static_cast<size_t>(page_size) != 0) {
+                    || pool->getAllocationSizeBytes() % static_cast<size_t>(page_size) != 0)) {
                     RTP_LLM_LOG_ERROR("RemoteCache GDR registration span must be page aligned for group %d: "
                                       "base=%p size=%zu page_size=%ld",
                                       group_id,
@@ -960,7 +1142,7 @@ private:
                 }
                 kv_cache_manager::ClientMemoryRegistrations memory_registrations;
                 memory_registrations.gpu.push_back(
-                    {pool->getBaseAddress(), pool->getAllocationSizeBytes(), pool->deviceIndex()});
+                    {pool->getBaseAddress(), registration_size, pool->deviceIndex()});
                 registration.memory_registrations = std::move(memory_registrations);
 #endif
             }
@@ -977,11 +1159,21 @@ private:
             RTP_LLM_LOG_INFO("KVCM pool registration group=%d tag=%s mode=%s span_size=%zu",
                              group_id,
                              tag.c_str(),
-                             use_gdr ? "gdr" : "standard",
+                             use_gdr ? "gdr" : use_gpu_descriptor ? "gpu_descriptor" : "standard",
                              registration_size);
             pools_by_tag.emplace(tag, pool);
-            registration_tags.push_back(tag);
-            registrations.push_back(std::move(registration));
+            if (decode_publication_enabled_ && is_decode_role_) {
+                for (int peer = 0; peer < target_prefill_cp_; ++peer) {
+                    auto projected = registration;
+                    projected.location_spec_name = kvcm::genLocationSpecName(
+                        peer, groups.at(group_id).group_name, runtime_config_.model_name);
+                    registration_tags.push_back(publicationPeerTag(tag, peer));
+                    registrations.push_back(std::move(projected));
+                }
+            } else {
+                registration_tags.push_back(tag);
+                registrations.push_back(std::move(registration));
+            }
         }
         pools_by_tag_      = std::move(pools_by_tag);
         registration_tags_ = std::move(registration_tags);
@@ -1306,6 +1498,13 @@ private:
     }
 
 private:
+    const bool decode_publication_enabled_;
+    const bool is_decode_role_;
+    std::atomic<bool> completion_stopped_{false};
+    int target_prefill_cp_{1}, target_physical_shards_{1};
+    StorageBackend::BufferResolver publication_resolver_;
+    std::shared_ptr<DecodePublicationBudget> completion_budget_;
+    std::shared_ptr<CompletionResources> completion_resources_;
     CacheConfig                          cache_config_;
     KVCacheConfig                        kv_cache_config_;
     RuntimeConfig                        runtime_config_;
@@ -1356,7 +1555,10 @@ KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                       
                                  std::move(metrics_reporter),
                                  std::move(client_wrapper))) {}
 
-KVCMStorageBackend::~KVCMStorageBackend() = default;
+KVCMStorageBackend::~KVCMStorageBackend() {
+    // Drain while Impl and the derived virtual hooks are still alive.
+    shutdown();
+}
 
 bool KVCMStorageBackend::initImpl() {
     return impl_->init(
@@ -1384,6 +1586,14 @@ void KVCMStorageBackend::shutdownImpl() noexcept {
     impl_->shutdown();
 }
 
+bool KVCMStorageBackend::protectUnknownCompletion() const noexcept {
+    return impl_->protectsUnknownCompletion();
+}
+
+std::shared_ptr<void> KVCMStorageBackend::completionResourceOwner() const {
+    return impl_->completionResourceOwner();
+}
+
 void KVCMStorageBackend::onQuarantined(bool is_write, StorageQuarantineReason reason, size_t block_count) noexcept {
     impl_->reportQuarantineEvent(is_write, reason, block_count);
 }
@@ -1397,6 +1607,31 @@ void KVCMStorageBackend::onQuarantineChanged(uint64_t                          g
 
 bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {
     return impl_->execute(request, response);
+}
+
+bool KVCMStorageBackend::captureCompletedDecode(const BatchKVCacheResource& resource,
+                                                size_t computed_end,
+                                                bool finished) {
+    if (!finished) {
+        return true;
+    }
+    try {
+        auto request = impl_->planCompletedDecode(resource, computed_end);
+        if (request.empty()) {
+            return true;
+        }
+        auto task = prepareWrite(std::move(request));
+        const bool admitted = write(std::move(task));
+        if (admitted) {
+            resource.decodeCompletionSubmitted() = true;
+        }
+        RTP_LLM_LOG_INFO("DTOP EOS_queued=%d computed=%zu", static_cast<int>(admitted), computed_end);
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_ERROR("DTOP optional publication not admitted: %s", error.what());
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("DTOP optional publication not admitted: unknown error");
+    }
+    return true;
 }
 
 }  // namespace rtp_llm
