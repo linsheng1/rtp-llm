@@ -16,6 +16,7 @@ cc_library(
     hdrs = [
         "KVCMStorageBackend.h",
         "DtopCompletionBridge.inc",
+        "WorkerPayloadProof.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

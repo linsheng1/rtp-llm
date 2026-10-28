@@ -7,6 +7,10 @@ bool configureDecodePublication(const CacheTopology& topology,
     if (!decode_publication_enabled_) {
         return true;
     }
+#if !USING_CUDA
+    RTP_LLM_LOG_ERROR("Decode publication requires the CUDA backend");
+    return false;
+#endif
     try {
         kvcm::SdkWrapperConfig sdk;
         sdk.parseBackendConfigs(kv_cache_config_.kvcm_model_sdk_config);
@@ -232,7 +236,11 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
     // One EOS fence while the request still owns every source page. The
     // generic prepareWrite then pins the same pages before request release.
     setCudaDevice();
+#if USING_CUDA
     check_cuda_value(cudaDeviceSynchronize());
+#else
+    return {};
+#endif
     RTP_LLM_LOG_INFO("DTOP retained computed=%zu published=%zu tail=%zu bytes=%zu CPU_snapshot_bytes=0",
                      computed_end, end, computed_end - end, bytes);
     return request;

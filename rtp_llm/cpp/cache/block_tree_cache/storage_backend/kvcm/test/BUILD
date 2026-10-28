@@ -197,6 +197,9 @@ cc_test_wrapper(
     target_compatible_with = select({
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],
+    }) + select({
+        "//:using_cuda": [],
+        "//conditions:default": ["@platforms//:incompatible"],
     }),
     deps = kvcm_backend_test_deps + [
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",

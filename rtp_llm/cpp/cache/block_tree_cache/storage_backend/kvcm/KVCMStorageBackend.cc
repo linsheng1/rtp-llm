@@ -29,6 +29,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/GroupPolicy.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/WorkerPayloadProof.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
@@ -657,6 +658,12 @@ public:
                 // Keep the legacy task QPS, but report no payload blocks or
                 // transfer time when all keys already have enough replicas.
                 collector.remote_write_fail_qps = false;
+                if (request.decode_completion) {
+                    RTP_LLM_LOG_INFO("DTOP already_present trace=%s session=%s request=%ld computed=%zu published=%zu "
+                                     "requested_keys=%zu payload_keys=0 payload_locations=0 CPU_snapshot_bytes=0",
+                                     trace_id.c_str(), write_session_id.c_str(), request.request_id.value_or(-1),
+                                     request.computed_tokens, request.published_tokens, keys.size());
+                }
                 return;
             }
             const auto& spec_info = group_policy_->spec_info_map();
@@ -729,9 +736,14 @@ public:
             collector.remote_write_cache_block_num = static_cast<int64_t>(write_location.locations.size());
             collector.remote_write_fail_qps        = false;
             if (request.decode_completion) {
-                RTP_LLM_LOG_INFO("DTOP committed computed=%zu published=%zu prefill=%ld keys=%zu CPU_snapshot_bytes=0",
+                size_t payload_locations = 0;
+                for (const auto& row : write_location.locations) payload_locations += row.size();
+                RTP_LLM_LOG_INFO("DTOP committed trace=%s session=%s request=%ld computed=%zu published=%zu prefill=%ld "
+                                 "requested_keys=%zu payload_keys=%zu payload_locations=%zu CPU_snapshot_bytes=0",
+                                 trace_id.c_str(), write_session_id.c_str(), request.request_id.value_or(-1),
                                  request.computed_tokens, request.published_tokens,
-                                 request.prefill_computed_tokens.value_or(-1), request.keys->size());
+                                 request.prefill_computed_tokens.value_or(-1), keys.size(),
+                                 write_location.locations.size(), payload_locations);
             }
         } catch (...) {
             if (decode_transfer_attempted && !finish_attempted) {
@@ -803,6 +815,9 @@ public:
     }
 
     bool executeProtectedPayload(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {
+        // Preflight rejection cannot have submitted a payload. The SDK scope
+        // below replaces this proof before any potentially asynchronous I/O.
+        response.set_payload_buffer_safe(true);
         if (completion_stopped_.load() || request.group_tags_size() != request.block_ids_size()
             || request.group_tags_size() != request.uris_size()) {
             response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
@@ -841,12 +856,14 @@ public:
         bool unknown = false, attempted = false;
         completion_resources_->holdOperation(operation);
         block_tree_cache_detail::ScopeRollback retain_worker_unknown([&] {
+            response.set_payload_buffer_safe(!unknown);
             completion_resources_->completeOperation(operation, unknown);
             if (unknown) {
                 completion_stopped_.store(true);
                 if (completion_budget_) completion_budget_->stopAdmission();
             }
         });
+        response.set_payload_buffer_safe(false);
         const auto result = executeTagTransfers(request.op(), operation->tags, operation->blocks,
             operation->uris, operation->buffers, response, &unknown, &attempted);
         response.set_transfer_status(result == TransferResult::SUCCESS ? REMOTE_TRANSFER_STATUS_SUCCESS :
@@ -1558,6 +1575,27 @@ private:
             throw StorageOperationCompletionUnknown("KVCM worker response count mismatch",
                                                     StorageQuarantineReason::INVALID_RESPONSE);
         }
+        if (decode_publication_enabled_) {
+            kvcm::WorkerPayloadProof proof;
+            for (const auto& response : responses) {
+                if (!response.has_remote_response()) {
+                    proof.observe(false, false, false);
+                    continue;
+                }
+                const auto& payload = response.remote_response();
+                proof.observe(payload.payload_buffer_safe(),
+                              payload.transfer_status() == REMOTE_TRANSFER_STATUS_SUCCESS,
+                              payload.transfer_status() == REMOTE_TRANSFER_STATUS_FAILED);
+            }
+            switch (proof.result()) {
+                case kvcm::WorkerPayloadProof::Result::SUCCESS:
+                    return responses;
+                case kvcm::WorkerPayloadProof::Result::BUFFER_SAFE_FAILURE:
+                    std::rethrow_exception(buffer_safe_failure_);
+                case kvcm::WorkerPayloadProof::Result::UNKNOWN:
+                    std::rethrow_exception(completion_unknown_failure_);
+            }
+        }
         bool failed = false;
         for (const auto& response : responses) {
             if (!response.has_remote_response()) {
@@ -1726,6 +1764,7 @@ bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, Remote
     }
     auto guard = trackExternalIo();
     if (!guard) {
+        response.set_payload_buffer_safe(true);
         response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
         return false;
     }

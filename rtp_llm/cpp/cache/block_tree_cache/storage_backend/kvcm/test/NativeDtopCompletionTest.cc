@@ -1,6 +1,8 @@
 // Native CUDA pages plus a recording SDK. Host copies are assertion oracles,
 // never an application snapshot or a real-model/GDR acceptance claim.
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/WorkerPayloadProof.h"
+#include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include <cuda_runtime.h>
 #include <map>
 #include <sstream>
@@ -292,5 +294,74 @@ TEST_P(NativeDtopCompletionTest, DisabledFeatureIgnoresUnusedBudgetAndRetainsNoR
 }
 INSTANTIATE_TEST_SUITE_P(GenericCPAndIndependentDP, NativeDtopCompletionTest,
     ::testing::Combine(::testing::Values(1, 2, 4, 8), ::testing::Bool(), ::testing::Values(1, 3)));
+
+TEST(WorkerPayloadProofTest, AllWorkersMustExplicitlyProveSafety) {
+    kvcm::WorkerPayloadProof proof;
+    proof.observe(true, true, false);
+    proof.observe(false, true, false);  // old worker's default field is false
+    EXPECT_EQ(proof.result(), kvcm::WorkerPayloadProof::Result::UNKNOWN);
+}
+TEST(WorkerPayloadProofTest, SafeFailureDoesNotMaskAnotherWorkersUnknown) {
+    kvcm::WorkerPayloadProof proof;
+    proof.observe(true, false, true);  // NOT_SUBMITTED or completed payload
+    proof.observe(false, false, true); // genuinely unknown payload completion
+    EXPECT_EQ(proof.result(), kvcm::WorkerPayloadProof::Result::UNKNOWN);
+}
+TEST(WorkerPayloadProofTest, AllSafeFailedWorkersAllowSourceRelease) {
+    kvcm::WorkerPayloadProof proof;
+    proof.observe(true, true, false);
+    proof.observe(true, false, true);
+    EXPECT_EQ(proof.result(), kvcm::WorkerPayloadProof::Result::BUFFER_SAFE_FAILURE);
+}
+TEST(WorkerPayloadProofTest, AllSafeSuccessfulWorkersComplete) {
+    kvcm::WorkerPayloadProof proof;
+    proof.observe(true, true, false);
+    proof.observe(true, true, false);
+    EXPECT_EQ(proof.result(), kvcm::WorkerPayloadProof::Result::SUCCESS);
+}
+TEST(WorkerPayloadProofTest, LegacyUnspecifiedStatusIsNotProofWhenEnabled) {
+    kvcm::WorkerPayloadProof proof;
+    proof.observe(true, false, false);
+    EXPECT_EQ(proof.result(), kvcm::WorkerPayloadProof::Result::UNKNOWN);
+}
+TEST_P(NativeDtopCompletionTest, WorkerPreflightFailureProvesNoPayloadSubmission) {
+    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), std::get<2>(GetParam()));
+    RemoteOperationRequestPB request;
+    request.set_op(REMOTE_OPERATION_WRITE);
+    request.add_group_tags("unregistered");
+    request.add_block_ids(0);
+    request.add_uris("pace://unused");
+    RemoteOperationResponsePB response;
+    EXPECT_FALSE(s.backend->execute(request, response));
+    EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_FAILED);
+    EXPECT_TRUE(response.payload_buffer_safe());
+    EXPECT_EQ(s.saves, 0u);
+    EXPECT_FALSE(s.backend->hasUnresolvedExternalIo());
+}
+TEST_P(NativeDtopCompletionTest, CompletedWorkerPayloadHasExplicitSafeProof) {
+    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), std::get<2>(GetParam()));
+    RemoteOperationRequestPB request;
+    request.set_op(REMOTE_OPERATION_WRITE);
+    request.add_group_tags("full");
+    request.add_block_ids(s.blocks.at("full").front());
+    request.add_uris("pace://full/0/0");
+    RemoteOperationResponsePB response;
+    ASSERT_TRUE(s.backend->execute(request, response));
+    EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_SUCCESS);
+    EXPECT_TRUE(response.payload_buffer_safe());
+    EXPECT_EQ(s.saves, 1u);
+    EXPECT_FALSE(s.backend->hasUnresolvedExternalIo());
+}
+TEST_P(NativeDtopCompletionTest, DisabledWorkerDoesNotRequireNewResponseProof) {
+    autil::EnvGuard off("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), std::get<2>(GetParam()), false);
+    RemoteOperationRequestPB request;
+    request.set_op(REMOTE_OPERATION_WRITE);
+    RemoteOperationResponsePB response;
+    EXPECT_TRUE(s.backend->execute(request, response));
+    EXPECT_EQ(response.transfer_status(), REMOTE_TRANSFER_STATUS_SUCCESS);
+    EXPECT_FALSE(response.payload_buffer_safe()); // default proto value, accepted on legacy route
+    EXPECT_EQ(s.saves, 0u);
+}
 } // namespace
 } // namespace rtp_llm
