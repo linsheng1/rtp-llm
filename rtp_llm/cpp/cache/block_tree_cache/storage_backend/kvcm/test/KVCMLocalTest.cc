@@ -442,7 +442,7 @@ BackendHandle makeCompletionProofBackend(const BackendEnvironment&              
     parallel.prefill_cp_config.prefill_cp_size = 1;
     RuntimeConfig runtime;
     runtime.model_name = "kvcm_test_model";
-    return BackendHandle(std::make_unique<KVCMStorageBackend>(environment.cache_config,
+    return BackendHandle(std::make_unique<MockQuiescentKVCMBackend>(environment.cache_config,
                                                               config,
                                                               runtime,
                                                               parallel,
@@ -583,7 +583,7 @@ TEST(KVCMLocalTest, EnabledReadQuarantinesUnprovenSdkErrorsButNotExplicitSafeRes
             EXPECT_CALL(*client, shutdown()).Times(1);
             auto backend = makeCompletionProofBackend(environment, client);
             ASSERT_TRUE(initSingleRank(*backend.backend, environment));
-            kv_cache_manager::Locations locations{{{"tp0_Fdefault", "read_uri"}}};
+            kv_cache_manager::Locations locations{{{"tp0_Fdefault", "pace://read_uri"}}};
             EXPECT_CALL(*client, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
             auto request     = makeStorageRequest(environment);
             auto observation = match(*backend.backend, request);
@@ -594,11 +594,11 @@ TEST(KVCMLocalTest, EnabledReadQuarantinesUnprovenSdkErrorsButNotExplicitSafeRes
             EXPECT_FALSE(error.ok());
             ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
             const bool unknown = enabled && !safe;
-            EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), unknown);
-            EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), unknown ? 1u : 0u);
+            EXPECT_EQ(static_cast<bool>(backend.backend->protected_quarantine_), unknown);
+            EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
             std::lock_guard<std::mutex> lock(backend.backend->quarantine_mutex_);
             EXPECT_EQ(
-                backend.backend->quarantined_breakdown_[0][static_cast<size_t>(StorageQuarantineReason::SDK_ERROR)]
+                backend.backend->quarantined_breakdown_[0][static_cast<size_t>(StorageQuarantineReason::INVALID_RESPONSE)]
                     .task_count,
                 unknown ? 1u : 0u);
         }
@@ -620,7 +620,7 @@ TEST(KVCMLocalTest, CallerBufferSafetyDoesNotProveRemoteAllocationQuiescence) {
             kv_cache_manager::WriteLocation allocation;
             allocation.write_session_id = "pending-session";
             allocation.block_mask       = kv_cache_manager::BlockMaskOffset{0};
-            allocation.locations        = {{{"tp0_Fdefault", "write_uri"}}};
+            allocation.locations        = {{{"tp0_Fdefault", "pace://write_uri"}}};
             EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
                 .WillOnce(Return(std::make_pair(true, allocation)));
             const bool unknown = enabled && !safe;
@@ -634,7 +634,8 @@ TEST(KVCMLocalTest, CallerBufferSafetyDoesNotProveRemoteAllocationQuiescence) {
             ASSERT_TRUE(static_cast<bool>(task));
             ASSERT_TRUE(backend.backend->write(std::move(task)));
             ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-            EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), unknown);
+            EXPECT_EQ(static_cast<bool>(backend.backend->protected_quarantine_), unknown);
+            EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
         }
     }
 }

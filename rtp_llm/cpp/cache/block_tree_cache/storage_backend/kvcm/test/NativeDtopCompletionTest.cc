@@ -590,7 +590,7 @@ protected:
         BlockIndicesType                    full, state;
         BatchKVCacheResource                resource;
         std::shared_ptr<MockClientWrapper>  client = std::make_shared<MockClientWrapper>();
-        std::unique_ptr<KVCMStorageBackend> backend;
+        std::unique_ptr<MockQuiescentKVCMBackend> backend;
         std::map<std::string, std::string>  specs;
         std::atomic<int>                    starts{0}, saves{0}, finishes{0}, aborts{0};
         bool                                block_start = false, fail_save = false, lose_commit = false;
@@ -659,10 +659,10 @@ protected:
                             kv_cache_manager::Location one;
                             for (int peer = 0; peer < cp; ++peer) {
                                 const auto suffix = std::to_string(key) + ":" + std::to_string(peer);
-                                one.push_back({specs.at("full#cp" + std::to_string(peer)), "F:" + suffix});
+                                one.push_back({specs.at("full#cp" + std::to_string(peer)), "pace://F:" + suffix});
                                 if (keys.size() - key
                                     <= env.cache_config.topology().group("state").reuseBlockCount(keys.size()))
-                                    one.push_back({specs.at("state#cp" + std::to_string(peer)), "S:" + suffix});
+                                    one.push_back({specs.at("state#cp" + std::to_string(peer)), "pace://S:" + suffix});
                             }
                             location.locations.push_back(one);
                         }
@@ -674,9 +674,11 @@ protected:
                     EXPECT_EQ(uris.size(), buffers.size());
                     kv_cache_manager::UriStrVec actual;
                     for (size_t i = 0; i < uris.size(); ++i) {
-                        const int key = std::stoi(uris[i].substr(2)), peer = std::stoi(uris[i].substr(4));
-                        EXPECT_EQ(tag, (uris[i][0] == 'F' ? "full#cp" : "state#cp") + std::to_string(peer));
-                        const int expected = uris[i][0] == 'F' ? key * shards + (shards > 1 ? peer : 0) + 1 : 100 + key;
+                        const auto payload = uris[i].substr(7);
+                        const int key = std::stoi(payload.substr(2)), peer = std::stoi(payload.substr(4));
+                        // The first registered PACE client owns every GPU span.
+                        EXPECT_EQ(tag, "full#cp0");
+                        const int expected = payload[0] == 'F' ? key * shards + (shards > 1 ? peer : 0) + 1 : 100 + key;
                         for (const auto& iov : buffers[i].iovs) {
                             EXPECT_EQ(iov.type, kv_cache_manager::MemoryType::GPU);
                             std::vector<unsigned char> bytes(iov.size);
@@ -720,14 +722,16 @@ protected:
             parallel.prefill_cp_config.kv_cache_sharded = sharded;
             RuntimeConfig rt;
             rt.model_name = "eos_gpu";
-            backend       = std::make_unique<KVCMStorageBackend>(
+            backend       = std::make_unique<MockQuiescentKVCMBackend>(
                 env.cache_config, k, rt, parallel, SpeculativeExecutionConfig{}, nullptr, true, nullptr, client);
             EXPECT_TRUE(initSingleRank(*backend, env));
         }
         ~Scenario() {
             unblock();
-            if (backend)
+            if (backend) {
+                backend->proveMockQuiescence();
                 backend->shutdown();
+            }
             dropRequestRefs();
         }
         void unblock() {
@@ -854,7 +858,7 @@ TEST_P(EosGpuCompletionTest, KnownPrefillBoundarySkipsCheckpointWithoutNewDecode
     }
 }
 
-TEST_P(EosGpuCompletionTest, UnknownSdkCompletionFreezesPagesAndKeepsAdmissionCharged) {
+TEST_P(EosGpuCompletionTest, UnknownSdkCompletionRetainsPagesAndWaitsForExplicitMockQuiescence) {
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
     s.fail_save = true;
     ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end(), true));
@@ -866,20 +870,23 @@ TEST_P(EosGpuCompletionTest, UnknownSdkCompletionFreezesPagesAndKeepsAdmissionCh
     EXPECT_EQ(s.aborts, 0);
     for (int i = 0; i < s.count * s.shards; ++i)
         EXPECT_TRUE(s.env.pools_by_tag.at("full")->isAllocated(s.full[i]));
-    EXPECT_GT(s.env.pools_by_tag.at("full")->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
-    EXPECT_EQ(s.backend->quarantined_completion_admissions_.size(), 1u);
+    EXPECT_TRUE(s.backend->protected_quarantine_);
+    EXPECT_EQ(s.backend->quarantined_task_count_, 1u);
     BatchKVCacheResource other        = s.resource;
     other.decodeCompletionSubmitted() = false;
     ASSERT_TRUE(s.backend->captureCompletedDecode(other, s.end(), true));
     EXPECT_FALSE(other.decodeCompletionSubmitted());
     EXPECT_EQ(s.starts, 1);
-    s.backend->shutdown();
-    EXPECT_TRUE(s.backend->quarantined_completion_admissions_.empty());
-    // Upstream keeps uncertain DMA pages FROZEN until pool destruction.
-    for (int i = 0; i < s.count * s.shards; ++i) {
-        EXPECT_TRUE(s.env.pools_by_tag.at("full")->isFrozen(s.full[i]));
+    auto stopped = std::async(std::launch::async, [&] { s.backend->shutdown(); });
+    EXPECT_EQ(stopped.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
+    for (int i = 0; i < s.count * s.shards; ++i)
         EXPECT_TRUE(s.env.pools_by_tag.at("full")->isAllocated(s.full[i]));
-    }
+    s.backend->proveMockQuiescence();
+    EXPECT_EQ(stopped.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    stopped.get();
+    EXPECT_FALSE(s.backend->protected_quarantine_);
+    for (int i = 0; i < s.count * s.shards; ++i)
+        EXPECT_FALSE(s.env.pools_by_tag.at("full")->isAllocated(s.full[i]));
 }
 TEST_P(EosGpuCompletionTest, DuplicateEosAndFullAdmissionDoNotDoublePinOrPublish) {
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));

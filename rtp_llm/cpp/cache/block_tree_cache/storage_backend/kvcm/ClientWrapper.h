@@ -49,6 +49,8 @@ public:
     enum class TransferCompletion {
         NOT_STARTED,
         BUFFER_SAFE,
+        NOT_SUBMITTED = NOT_STARTED,
+        PAYLOAD_COMPLETE = BUFFER_SAFE,
         UNKNOWN
     };
     static TransferCompletion sdkResultCompletion(kv_cache_manager::ClientErrorCode ec);
@@ -152,6 +154,19 @@ private:
     // Shutdown takes this lock exclusively before destroying the pool transfer clients.
     std::shared_mutex transfer_mutex_;
     TransferObserver  transfer_observer_;
+    // Borrowed URI/IOV/trace descriptors must survive an SDK error or throw
+    // whose payload completion is unknown, together with the registered client.
+    struct PendingTransfer {
+        kv_cache_manager::UriStrVec uris;
+        kv_cache_manager::BlockBuffers buffers;
+        std::shared_ptr<kv_cache_manager::TransferTraceInfo> trace;
+        std::shared_ptr<PendingTransfer> next;
+    };
+    void retainTransfer(const std::shared_ptr<PendingTransfer>& transfer);
+    void releaseTransfer(const std::shared_ptr<PendingTransfer>& transfer);
+    std::mutex pending_transfer_mutex_;
+    std::shared_ptr<PendingTransfer> pending_transfers_;
+
 
     // when slaver reaches 3, need reinitAllMetaClients
     std::atomic<int> grpc_error_count_{0};

@@ -86,7 +86,7 @@ public:
     std::shared_ptr<Lease>
     tryAcquire(size_t bytes, std::optional<Clock::time_point> eos_at, Clock::time_point now = Clock::now()) {
         std::lock_guard<std::mutex> guard(mutex_);
-        if (bytes > byte_limit_ || bytes_ > byte_limit_ - bytes || entries_.size() >= job_limit_
+        if (!accepting_ || bytes > byte_limit_ || bytes_ > byte_limit_ - bytes || entries_.size() >= job_limit_
             || next_id_ == std::numeric_limits<uint64_t>::max())
             return {};
         // An unarmed lease cannot recursively lock this mutex if allocation of
@@ -97,6 +97,11 @@ public:
         bytes_ += bytes;
         lease->armed_ = true;
         return lease;
+    }
+
+    void stopAdmission() noexcept {
+        std::lock_guard<std::mutex> guard(mutex_);
+        accepting_ = false;
     }
 
     Snapshot snapshot(Clock::time_point now = Clock::now()) const {
@@ -215,6 +220,7 @@ private:
     std::mutex                sampler_mutex_;
     std::condition_variable   sampler_cv_;
     bool                      stopping_{false};
+    bool                      accepting_{true};
     std::thread               sampler_;
 };
 

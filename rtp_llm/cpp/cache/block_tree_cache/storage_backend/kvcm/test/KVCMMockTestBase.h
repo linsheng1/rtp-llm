@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <future>
 #include <memory>
@@ -239,6 +240,23 @@ struct BackendEnvironment {
     }
 };
 
+// All transfer callbacks in these fixtures are synchronous mocks. This fence
+// is test-owned proof that the mock has no detached SDK/GPU work; production
+// KVCM must never infer quiescence from an error return or elapsed time.
+class MockQuiescentKVCMBackend: public KVCMStorageBackend {
+public:
+    using KVCMStorageBackend::KVCMStorageBackend;
+    ~MockQuiescentKVCMBackend() override { proveMockQuiescence(); shutdown(); }
+    void proveMockQuiescence() {
+        mock_quiescent_.store(true);
+        notifyCompletionQuiescence();
+    }
+protected:
+    bool quiesceUnknownOperations() noexcept override { return mock_quiescent_.load(); }
+private:
+    std::atomic<bool> mock_quiescent_{false};
+};
+
 struct BackendHandle {
     std::unique_ptr<KVCMStorageBackend> backend;
 
@@ -250,6 +268,8 @@ struct BackendHandle {
     BackendHandle& operator=(const BackendHandle&) = delete;
     ~BackendHandle() {
         if (backend) {
+            if (auto* mock = dynamic_cast<MockQuiescentKVCMBackend*>(backend.get()))
+                mock->proveMockQuiescence();
             backend->shutdown();
         }
     }

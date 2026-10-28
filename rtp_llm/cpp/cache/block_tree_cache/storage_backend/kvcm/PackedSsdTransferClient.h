@@ -24,6 +24,12 @@ class PackedSsdTransferClient final: public kv_cache_manager::TransferClient, pu
     using Uris    = kv_cache_manager::UriStrVec;
     using Trace   = std::shared_ptr<kv_cache_manager::TransferTraceInfo>;
 
+    struct InnerIo {
+        Uris uris;
+        Buffers buffers;
+        Trace trace;
+    };
+
 public:
     struct GpuPackingContext {
         explicit GpuPackingContext(std::shared_ptr<void> storage): memory(std::move(storage)) {
@@ -96,6 +102,8 @@ public:
         auto operation = makeOperation(uris, destination, false, read_thread_init_ ? max_read_window_objects : 1);
         if (!operation)
             return kv_cache_manager::ER_INVALID_LOCAL_BUFFERS;
+        for (size_t block = 0; block < uris.size(); ++block)
+            operation->calls[block]->trace = blockTrace(trace, block, uris.size());
         auto scatter = [&](size_t block) {
             size_t offset = 0;
             for (const auto& iov : destination[block].iovs) {
@@ -123,12 +131,10 @@ public:
                     for (size_t block = range.first; block < range.second; ++block) {
                         reads.emplace_back(std::async(std::launch::async,
                                                       [this,
-                                                       uri       = uris[block],
-                                                       buffer    = operation->buffers[block],
-                                                       one_trace = blockTrace(trace, block, uris.size())]() mutable {
+                                                       call = operation->calls[block]]() {
                                                           if (!read_thread_init_())
                                                               return kv_cache_manager::ER_CUDAMEMCPY_ERROR;
-                                                          return loadOne(uri, buffer, std::move(one_trace));
+                                                          return loadOne(*call);
                                                       }));
                     }
                     std::exception_ptr failure;
@@ -146,7 +152,7 @@ public:
                         std::rethrow_exception(failure);
                 } else {
                     const auto block = range.first;
-                    result = loadOne(uris[block], operation->buffers[block], blockTrace(trace, block, uris.size()));
+                    result = loadOne(*operation->calls[block]);
                 }
                 if (result != kv_cache_manager::ER_OK) {
                     quarantine(operation);
@@ -173,6 +179,8 @@ public:
         auto operation = makeOperation(uris, source, true);
         if (!operation)
             return {kv_cache_manager::ER_INVALID_LOCAL_BUFFERS, {}};
+        for (size_t block = 0; block < uris.size(); ++block)
+            operation->calls[block]->trace = blockTrace(trace, block, uris.size());
         auto gather = [&](size_t block) {
             size_t offset = 0;
             for (const auto& iov : source[block].iovs) {
@@ -196,7 +204,7 @@ public:
                 return {kv_cache_manager::ER_CUDAMEMCPY_ERROR, {}};
             }
             try {
-                auto result = saveOne(uris[block], operation->buffers[block], blockTrace(trace, block, uris.size()));
+                auto result = saveOne(*operation->calls[block]);
                 if (result.first != kv_cache_manager::ER_OK) {
                     quarantine(operation);
                     return {result.first, {}};
@@ -235,33 +243,27 @@ private:
             }
         }
     }
-    Code loadOne(const std::string& uri, const kv_cache_manager::BlockBuffer& buffer, Trace trace) {
-        // Prepare descriptors before the attempted-I/O boundary. Allocation or
-        // trace failures here have not called the SDK and report no unknown I/O.
-        const Uris    uris{uri};
-        const Buffers buffers{buffer};
-        Code          code;
+    Code loadOne(const InnerIo& call) {
+        Code code;
         try {
-            code = inner_->LoadKvCaches(uris, buffers, std::move(trace));
+            code = inner_->LoadKvCaches(call.uris, call.buffers, call.trace);
         } catch (...) {
             observe(true, 0, true);
             throw;
         }
-        observe(true, code == kv_cache_manager::ER_OK ? buffer.iovs.front().size : 0, code != kv_cache_manager::ER_OK);
+        observe(true, code == kv_cache_manager::ER_OK ? call.buffers.front().iovs.front().size : 0,
+                code != kv_cache_manager::ER_OK);
         return code;
     }
-    std::pair<Code, Uris> saveOne(const std::string& uri, const kv_cache_manager::BlockBuffer& buffer, Trace trace) {
-        const Uris            uris{uri};
-        const Buffers         buffers{buffer};
+    std::pair<Code, Uris> saveOne(const InnerIo& call) {
         std::pair<Code, Uris> result;
         try {
-            result = inner_->SaveKvCaches(uris, buffers, std::move(trace));
+            result = inner_->SaveKvCaches(call.uris, call.buffers, call.trace);
         } catch (...) {
             observe(false, 0, true);
             throw;
         }
-        observe(false,
-                result.first == kv_cache_manager::ER_OK ? buffer.iovs.front().size : 0,
+        observe(false, result.first == kv_cache_manager::ER_OK ? call.buffers.front().iovs.front().size : 0,
                 result.first != kv_cache_manager::ER_OK);
         return result;
     }
@@ -302,6 +304,7 @@ private:
         std::shared_ptr<GpuRangeLease>         gpu_lease;
         std::vector<std::shared_ptr<void>>     bytes;
         Buffers                                buffers;
+        std::vector<std::shared_ptr<InnerIo>> calls;
         std::vector<std::pair<size_t, size_t>> read_ranges;
         ~Operation() {
             process_bytes_.fetch_sub(charged);
@@ -388,6 +391,10 @@ private:
             operation->bytes[i] = std::shared_ptr<void>(
                 gpu_context_->memory, static_cast<unsigned char*>(gpu_context_->memory.get()) + offset + offsets[i]);
             operation->buffers[i].iovs.push_back({staging_type_, operation->bytes[i].get(), sizes[i], false});
+            auto call = std::make_shared<InnerIo>();
+            call->uris.push_back(uris[i]);
+            call->buffers.push_back(operation->buffers[i]);
+            operation->calls.push_back(std::move(call));
             // Reuse only after the previous window completed and scattered.
         }
         return operation;

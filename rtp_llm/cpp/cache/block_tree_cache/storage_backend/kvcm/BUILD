@@ -37,7 +37,7 @@ config_setting(
 cc_library(
     name = "kvcm_storage_backend",
     srcs = ["KVCMStorageBackend.cc"],
-    hdrs = ["KVCMStorageBackend.h", "DtopCompletionBridge.inc"],
+    hdrs = ["KVCMStorageBackend.h", "DtopCompletionBridge.inc", "WorkerPayloadProof.h"],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [

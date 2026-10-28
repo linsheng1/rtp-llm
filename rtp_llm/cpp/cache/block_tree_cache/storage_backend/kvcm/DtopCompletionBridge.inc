@@ -72,7 +72,7 @@ bool configureDecodePublication(const CacheTopology&                            
             if (!group.policy.enable_prefix_reuse)
                 continue;
             const auto& pool = pool_resolver(group.tag);
-            if (!pool || pool->getTotalSizeBytes() == 0) {
+            if (!pool || pool->where() != MemoryType::MEMORY_GPU || pool->getTotalSizeBytes() == 0) {
                 RTP_LLM_LOG_ERROR("Decode publication has no native pool for tag=%s", group.tag.c_str());
                 return false;
             }
@@ -125,6 +125,12 @@ bool configureDecodePublication(const CacheTopology&                            
             completion_limits_.bytes, completion_limits_.jobs, std::move(snapshots), std::move(events));
         file_resolver_ = resolver;
     }
+    buffer_safe_failure_ = std::make_exception_ptr(StorageOperationBufferSafeFailure(
+        "KVCM operation failed before submission or after completed payload"));
+    completion_unknown_failure_ = std::make_exception_ptr(StorageOperationCompletionUnknown(
+        "KVCM payload completion unknown", StorageQuarantineReason::INVALID_RESPONSE));
+    completion_timeout_failure_ = std::make_exception_ptr(StorageOperationTimeout(
+        "KVCM payload transfer timed out", StorageQuarantineReason::SDK_TIMEOUT));
     return true;
 }
 
@@ -175,7 +181,7 @@ std::string publicationPeerTag(const std::string& tag, int peer) const {
 StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end) {
     StorageRequest request;
     if (!decode_publication_enabled_ || !is_decode_role_ || parallelism_config_.tp_rank != 0
-        || resource.decodeCompletionSubmitted())
+        || completion_stopped_.load() || resource.decodeCompletionSubmitted())
         return request;
     if (resource.batchSize() != 1 || computed_end == 0)
         return request;
@@ -320,66 +326,86 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
 // The P transaction builds identical spec/tag batches and commits actual URIs
 // with the same masks and FinishWrite rules. Only the source projection differs:
 // D owns all P peers' FULL pages and the unsliced native STATE/SWA page locally.
-std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<FunctionRequestPB>& requests) {
+std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<FunctionRequestPB>& requests,
+                                                       bool& transfer_attempted,
+                                                       bool& source_may_be_touched) {
     setCudaDevice();
-    struct Batch {
-        std::vector<std::string>       tags;
-        std::vector<int32_t>           blocks;
-        kv_cache_manager::UriStrVec    uris;
-        kv_cache_manager::BlockBuffers buffers;
-    };
-    std::vector<Batch> batches(requests.size());
-    CPSlotMapper       mapper(0, target_physical_shards_, cache_config_.seq_size_per_block);
-    // Validate and resolve every source before submitting any SDK operation.
+    using Batch = CompletionResources::Operation;
+    std::vector<std::shared_ptr<Batch>> batches;
+    batches.reserve(requests.size());
+    std::vector<FunctionResponsePB> responses(requests.size());
+    CPSlotMapper mapper(0, target_physical_shards_, cache_config_.seq_size_per_block);
+    // Prebuild error payloads and all source descriptors before the first SDK
+    // operation. A failure after any peer begins is conservatively unknown.
+    const auto unknown = completion_unknown_failure_;
+    const auto timeout = completion_timeout_failure_;
     for (size_t peer = 0; peer < requests.size(); ++peer) {
         const auto& remote = requests[peer].remote_request();
-        auto&       batch  = batches[peer];
+        (void)responses[peer].mutable_remote_response();
+        RTP_LLM_CHECK(remote.block_ids_size() == remote.group_tags_size()
+                      && remote.block_ids_size() == remote.uris_size());
+        auto operation = std::make_shared<Batch>();
+        operation->client = client_wrapper_;
+        for (const auto& pool : pools_by_tag_) operation->pools.push_back(pool.second);
+        auto& batch = *operation;
         for (int i = 0; i < remote.block_ids_size(); ++i) {
-            const auto& tag   = remote.group_tags(i);
-            const int   block = remote.block_ids(i);
+            const auto& tag = remote.group_tags(i);
+            const int block = remote.block_ids(i);
+            RTP_LLM_CHECK_WITH_INFO(remote.uris(i).compare(0, 7, "pace://") == 0,
+                                    "Decode DRAM publication received a non-PACE destination");
             batch.tags.push_back(publicationPeerTag(tag, peer));
             batch.blocks.push_back(block);
             batch.uris.push_back(remote.uris(i));
             batch.buffers.emplace_back();
             size_t bytes = 0;
             for (int layer : cache_config_.layerIdsForGroup(tag)) {
-                const auto parts =
-                    mapper.sliceBlockForPeer(cache_config_, tag, file_resolver_(layer, tag, block), peer);
+                const auto parts = mapper.sliceBlockForPeer(
+                    cache_config_, tag, file_resolver_(layer, tag, block), peer);
                 for (const auto& part : parts) {
-                    RTP_LLM_CHECK_WITH_INFO(part.is_cuda && part.addr && part.size_bytes, "invalid EOS GPU source");
+                    RTP_LLM_CHECK(part.is_cuda && part.addr && part.size_bytes);
                     batch.buffers.back().iovs.push_back(
                         {kv_cache_manager::MemoryType::GPU, part.addr, part.size_bytes, false});
+                    RTP_LLM_CHECK(part.size_bytes <= std::numeric_limits<size_t>::max() - bytes);
                     bytes += part.size_bytes;
                 }
             }
-            RTP_LLM_CHECK_WITH_INFO(bytes == publicationWireBytes(tag), "EOS source wire size mismatch tag=%s", tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(bytes == publicationWireBytes(tag), "Decode wire size mismatch tag=%s", tag.c_str());
         }
+        batches.push_back(std::move(operation));
     }
-    std::vector<FunctionResponsePB> responses(requests.size());
     try {
         for (size_t peer = 0; peer < batches.size(); ++peer) {
-            auto&      b        = batches[peer];
-            auto&      response = *responses[peer].mutable_remote_response();
-            const auto result =
-                executeTagTransfers(REMOTE_OPERATION_WRITE, b.tags, b.blocks, b.uris, b.buffers, response);
-            if (result == TransferResult::TIMEOUT)
-                throw StorageOperationTimeout("EOS SDK transfer timeout", StorageQuarantineReason::SDK_TIMEOUT);
-            if (result == TransferResult::COMPLETION_UNKNOWN)
-                throw StorageOperationCompletionUnknown("EOS SDK failure cannot prove DMA completion",
-                                                        StorageQuarantineReason::SDK_ERROR);
-            if (result != TransferResult::SUCCESS)
-                throw BufferSafeTransferFailure("EOS SDK failure is buffer-safe");
+            const auto operation = batches[peer];
+            auto& batch = *operation;
+            if (batch.tags.empty()) {
+                continue;
+            }
+            auto& response = *responses[peer].mutable_remote_response();
+            completion_resources_->holdOperation(operation);
+            block_tree_cache_detail::ScopeRollback hold_unknown_descriptors([&] {
+                completion_resources_->completeOperation(operation, source_may_be_touched);
+                if (source_may_be_touched) {
+                    completion_stopped_.store(true);
+                    if (completion_accounting_) completion_accounting_->stopAdmission();
+                }
+            });
+            const auto result = executeTagTransfers(
+                REMOTE_OPERATION_WRITE, batch.tags, batch.blocks, batch.uris, batch.buffers, response,
+                &source_may_be_touched, &transfer_attempted);
+            if (result == TransferResult::TIMEOUT) {
+                std::rethrow_exception(timeout);
+            }
+            if (result != TransferResult::SUCCESS) {
+                std::rethrow_exception(source_may_be_touched ? unknown : buffer_safe_failure_);
+            }
             response.set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
         }
     } catch (const StorageOperationCompletionUnknown&) {
-        throw;
-    } catch (const BufferSafeTransferFailure&) {
-        throw;
-    } catch (const std::exception& error) {
-        throw StorageOperationCompletionUnknown(error.what(), StorageQuarantineReason::INVALID_RESPONSE);
+        if (source_may_be_touched) throw;
+        std::rethrow_exception(buffer_safe_failure_);
     } catch (...) {
-        throw StorageOperationCompletionUnknown("EOS SDK completion unknown",
-                                                StorageQuarantineReason::INVALID_RESPONSE);
+        std::rethrow_exception(source_may_be_touched ? unknown : buffer_safe_failure_);
     }
+    source_may_be_touched = false;
     return responses;
 }

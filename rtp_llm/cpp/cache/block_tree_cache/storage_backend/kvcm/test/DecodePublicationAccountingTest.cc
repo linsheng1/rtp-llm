@@ -190,4 +190,16 @@ TEST(DecodePublicationAccountingTest, MissingActualEosNeverFabricatesLatencyAtAd
     EXPECT_FALSE(observed);
 }
 }  // namespace
+TEST(DecodePublicationAccountingTest, StopAdmissionPreservesExistingLeaseUntilItIsReleased) {
+    auto state = std::make_shared<DecodePublicationAccounting>(128, 2);
+    auto lease = state->tryAcquire(64, std::nullopt);
+    ASSERT_TRUE(lease);
+    state->stopAdmission();
+    EXPECT_FALSE(state->tryAcquire(1, std::nullopt));
+    EXPECT_EQ(state->snapshot().bytes, 64u);
+    lease.reset();
+    EXPECT_EQ(state->snapshot().bytes, 0u);
+    EXPECT_FALSE(state->tryAcquire(1, std::nullopt));
+}
+
 }  // namespace rtp_llm::kvcm

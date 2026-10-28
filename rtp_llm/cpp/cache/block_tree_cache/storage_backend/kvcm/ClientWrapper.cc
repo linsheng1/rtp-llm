@@ -255,6 +255,10 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
     };
     const auto clear_failed_init = [&] {
         transfer_clients_.clear();
+        {
+            std::lock_guard<std::mutex> lock(pending_transfer_mutex_);
+            pending_transfers_.reset();
+        }
         tag_to_index_.clear();
         meta_client_map_.clear();
         subscriber_.reset();
@@ -636,6 +640,19 @@ bool ClientWrapper::reinitAllMetaClients() {
     }
 }
 
+void ClientWrapper::retainTransfer(const std::shared_ptr<PendingTransfer>& transfer) {
+    std::lock_guard<std::mutex> lock(pending_transfer_mutex_);
+    transfer->next = std::move(pending_transfers_);
+    pending_transfers_ = transfer;
+}
+
+void ClientWrapper::releaseTransfer(const std::shared_ptr<PendingTransfer>& transfer) {
+    std::lock_guard<std::mutex> lock(pending_transfer_mutex_);
+    auto* link = &pending_transfers_;
+    while (*link && *link != transfer) link = &(*link)->next;
+    if (*link) *link = std::move(transfer->next);
+}
+
 void ClientWrapper::setTransferObserver(TransferObserver observer) {
     std::unique_lock lock(transfer_mutex_);
     const bool       had_observer = static_cast<bool>(transfer_observer_);
@@ -713,11 +730,25 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
         return kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS;
     }
     for (const auto& range : ranges) {
-        kv_cache_manager::UriStrVec uris(uri_str_vec.begin() + range.begin, uri_str_vec.begin() + range.end);
+        auto retained = std::make_shared<PendingTransfer>();
+        retained->uris.assign(uri_str_vec.begin() + range.begin, uri_str_vec.begin() + range.end);
+        auto& uris = retained->uris;
         // Shallow pointer descriptors; caller pins own all payloads for the whole operation.
-        kv_cache_manager::BlockBuffers buffers(block_buffers.begin() + range.begin, block_buffers.begin() + range.end);
+        retained->buffers.assign(block_buffers.begin() + range.begin, block_buffers.begin() + range.end);
+        auto& buffers = retained->buffers;
         const auto                     began      = std::chrono::steady_clock::now();
         const auto                     part_trace = traceForRange(trace_info, range);
+        retained->trace = part_trace;
+        auto local_completion = TransferCompletion::UNKNOWN;
+        retainTransfer(retained);
+        struct RetainedScope {
+            ClientWrapper* owner;
+            const std::shared_ptr<PendingTransfer>& transfer;
+            TransferCompletion& completion;
+            ~RetainedScope() {
+                if (completion != TransferCompletion::UNKNOWN) owner->releaseTransfer(transfer);
+            }
+        } preserve_unknown{this, retained, local_completion};
         try {
             if (completion)
                 *completion = TransferCompletion::UNKNOWN;
@@ -727,8 +758,9 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
                 observeTransfer(/*is_read=*/true, 0, /*completion_unknown=*/true);
             throw;
         }
+        local_completion = sdkResultCompletion(ec);
         if (completion)
-            *completion = sdkResultCompletion(ec);
+            *completion = local_completion;
         if (!inner_observation) {
             observeTransfer(/*is_read=*/true,
                             ec == kv_cache_manager::ClientErrorCode::ER_OK ? range.bytes : 0,
@@ -819,11 +851,25 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
         return {kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS, {}};
     }
     for (const auto& range : ranges) {
-        kv_cache_manager::UriStrVec uris(uri_str_vec.begin() + range.begin, uri_str_vec.begin() + range.end);
+        auto retained = std::make_shared<PendingTransfer>();
+        retained->uris.assign(uri_str_vec.begin() + range.begin, uri_str_vec.begin() + range.end);
+        auto& uris = retained->uris;
         // Shallow pointer descriptors; caller pins own all payloads for the whole operation.
-        kv_cache_manager::BlockBuffers buffers(block_buffers.begin() + range.begin, block_buffers.begin() + range.end);
+        retained->buffers.assign(block_buffers.begin() + range.begin, block_buffers.begin() + range.end);
+        auto& buffers = retained->buffers;
         const auto                     began      = std::chrono::steady_clock::now();
         const auto                     part_trace = traceForRange(trace_info, range);
+        retained->trace = part_trace;
+        auto local_completion = TransferCompletion::UNKNOWN;
+        retainTransfer(retained);
+        struct RetainedScope {
+            ClientWrapper* owner;
+            const std::shared_ptr<PendingTransfer>& transfer;
+            TransferCompletion& completion;
+            ~RetainedScope() {
+                if (completion != TransferCompletion::UNKNOWN) owner->releaseTransfer(transfer);
+            }
+        } preserve_unknown{this, retained, local_completion};
         auto                           saved      = [&] {
             try {
                 if (completion)
@@ -836,8 +882,9 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
             }
         }();
         ec = saved.first;
+        local_completion = sdkResultCompletion(ec);
         if (completion)
-            *completion = sdkResultCompletion(ec);
+            *completion = local_completion;
         if (!inner_observation) {
             observeTransfer(/*is_read=*/false,
                             ec == kv_cache_manager::ClientErrorCode::ER_OK ? range.bytes : 0,
