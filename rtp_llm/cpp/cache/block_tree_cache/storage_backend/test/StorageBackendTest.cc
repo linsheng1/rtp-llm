@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/utils/DecodePublicationBudget.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
@@ -1310,6 +1311,118 @@ TEST(StorageBackendTest, ResolvesGpuBufferAndGroupMetadataFromBoundResources) {
     ASSERT_EQ(buffers.size(), 1u);
     EXPECT_EQ(buffers.front().addr, reinterpret_cast<void*>(4));
     backend.shutdown();
+}
+
+TEST(StorageBackendTest, DecodePeerSourcesArePinnedOnceBeforeSubmission) {
+    auto pool = std::make_shared<TestBlockPool>();
+    const auto first = pool->malloc().value();
+    const auto peer = pool->malloc().value();
+    pool->incRef(first);
+    pool->incRef(peer);
+    TestBackend backend;
+    ASSERT_TRUE(initBackend(backend, pool));
+    DecodePublicationBudget budget(128, 1);
+    auto request = makeRequest(first, 2);
+    request.decode_completion = true;
+    request.completion_budget_lease = budget.tryAcquire(128);
+    for (auto& row : request.handles) {
+        row.front().peer_blocks = {peer, first, peer};
+    }
+    auto task = backend.prepareWrite(std::move(request));
+    EXPECT_EQ(pool->refCount(first), 2u);
+    EXPECT_EQ(pool->refCount(peer), 2u);
+    EXPECT_EQ(budget.snapshot().jobs, 1u);
+    task = {};
+    EXPECT_EQ(pool->refCount(first), 1u);
+    EXPECT_EQ(pool->refCount(peer), 1u);
+    EXPECT_EQ(budget.snapshot().jobs, 0u);
+    backend.shutdown();
+    pool->decRef(first);
+    pool->decRef(peer);
+}
+
+TEST(StorageBackendTest, CompletionLeasesFollowSuccessFailureAndExecutorRejection) {
+    for (const std::string mode : {"success", "known_failure", "rejected"}) {
+        SCOPED_TRACE(mode);
+        auto pool = std::make_shared<TestBlockPool>();
+        const auto block = pool->malloc().value();
+        pool->incRef(block);
+        auto executor = std::make_shared<HoldingExecutor>();
+        TestBackend backend(true, executor);
+        ASSERT_TRUE(initBackend(backend, pool));
+        DecodePublicationBudget budget(128, 1);
+        auto request = makeRequest(block);
+        request.decode_completion = true;
+        request.completion_budget_lease = budget.tryAcquire(128);
+        if (mode == "known_failure") {
+            backend.failNextWrite();
+        }
+        if (mode == "rejected") {
+            executor->setReject(true);
+        }
+        EXPECT_EQ(backend.write(backend.prepareWrite(std::move(request))), mode != "rejected");
+        if (mode != "rejected") {
+            EXPECT_EQ(budget.snapshot().jobs, 1u);
+            EXPECT_EQ(executor->runAll(), 1u);
+        }
+        EXPECT_EQ(budget.snapshot().bytes, 0u);
+        EXPECT_EQ(budget.snapshot().jobs, 0u);
+        EXPECT_FALSE(pool->isFrozen(block));
+        EXPECT_EQ(pool->refCount(block), 1u);
+        backend.shutdown();
+        pool->decRef(block);
+    }
+}
+
+TEST(StorageBackendTest, UnknownCompletionRetainsBudgetAcrossBackendShutdown) {
+    auto pool = std::make_shared<TestBlockPool>();
+    const auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto executor = std::make_shared<HoldingExecutor>();
+    QuarantineObservingBackend backend(true, executor);
+    ASSERT_TRUE(initBackend(backend, pool));
+    DecodePublicationBudget budget(128, 1);
+    auto request = makeRequest(block);
+    request.decode_completion = true;
+    request.completion_budget_lease = budget.tryAcquire(128);
+    backend.write_action = [] {
+        throw StorageOperationCompletionUnknown("no completion proof", StorageQuarantineReason::INVALID_RESPONSE);
+    };
+    ASSERT_TRUE(backend.write(backend.prepareWrite(std::move(request))));
+    ASSERT_EQ(executor->runAll(), 1u);
+    EXPECT_TRUE(pool->isFrozen(block));
+    EXPECT_EQ(pool->refCount(block), 2u);
+    EXPECT_EQ(budget.snapshot().bytes, 128u);
+    EXPECT_FALSE(budget.tryAcquire(1));
+    backend.shutdown();
+    // A local executor drain does not prove remote DMA quiescence. The
+    // quarantined task continues owning its admission after shutdown returns.
+    EXPECT_EQ(budget.snapshot().bytes, 128u);
+    EXPECT_EQ(budget.snapshot().jobs, 1u);
+    EXPECT_TRUE(pool->isFrozen(block));
+    pool->decRef(block);
+}
+
+TEST(StorageBackendTest, OrdinaryRequestsCannotSmuggleDecodePeerPages) {
+    auto pool = std::make_shared<TestBlockPool>();
+    const auto first = pool->malloc().value();
+    const auto peer = pool->malloc().value();
+    pool->incRef(first);
+    pool->incRef(peer);
+    TestBackend backend;
+    ASSERT_TRUE(initBackend(backend, pool));
+    auto request = makeRequest(first);
+    request.handles.front().front().peer_blocks = {peer};
+    EXPECT_ANY_THROW(backend.prepareWrite(request));
+    EXPECT_EQ(pool->refCount(first), 1u);
+    EXPECT_EQ(pool->refCount(peer), 1u);
+    request.decode_completion = true;
+    request.handles.front().front().peer_blocks = {NULL_BLOCK_IDX};
+    EXPECT_ANY_THROW(backend.prepareWrite(request));
+    EXPECT_EQ(pool->refCount(first), 1u);
+    backend.shutdown();
+    pool->decRef(first);
+    pool->decRef(peer);
 }
 
 }  // namespace

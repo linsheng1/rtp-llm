@@ -38,6 +38,7 @@ struct StorageTaskState {
     };
 
     StorageRequest   request;
+    std::shared_ptr<StorageTaskState> completion_quarantine_next;
     std::vector<Pin> pins;
     std::once_flag   finish_once;
     void             finish() {
@@ -251,6 +252,10 @@ void StorageBackend::quarantineTask(const std::shared_ptr<storage_backend_detail
     StorageQuarantineBreakdown breakdown;
     {
         std::lock_guard<std::mutex> lock(quarantine_mutex_);
+        if (state->request.completion_budget_lease) {
+            state->completion_quarantine_next = std::move(quarantined_completion_tasks_);
+            quarantined_completion_tasks_ = state;
+        }
         quarantined_block_count_ += pinned_block_count;
         task_count  = ++quarantined_task_count_;
         block_count = quarantined_block_count_;
@@ -275,14 +280,31 @@ std::shared_ptr<storage_backend_detail::StorageTaskState> StorageBackend::prepar
     state->request = std::move(request);
     RTP_LLM_CHECK(initialized_);
 
+    if (state->request.decode_completion) {
+        size_t capacity = 0;
+        for (const auto& row : state->request.handles) {
+            for (const auto& handle : row) {
+                capacity += 1 + handle.peer_blocks.size();
+            }
+        }
+        // Allocate before acquiring any extra page references. The normal
+        // request route retains its original allocation behavior below.
+        state->pins.reserve(capacity);
+    }
     std::unordered_set<BlockKey, BlockKeyHash> pinned;
     for (const auto& key_handles : state->request.handles) {
         for (const StorageBlockHandle& handle : key_handles) {
-            const auto&    pool = devicePool(handle.tag);
-            const BlockKey key{pool.get(), handle.block};
-            if (pinned.insert(key).second) {
-                pool->incRef(handle.block, DeviceBlockRefType::REMOTE_CONNECTOR);
-                state->pins.push_back({pool, handle.block});
+            const auto& pool = devicePool(handle.tag);
+            auto pin = [&](BlockIdxType block) {
+                const BlockKey key{pool.get(), block};
+                if (pinned.insert(key).second) {
+                    pool->incRef(block, DeviceBlockRefType::REMOTE_CONNECTOR);
+                    state->pins.push_back({pool, block});
+                }
+            };
+            pin(handle.block);
+            for (const auto peer : handle.peer_blocks) {
+                pin(peer);
             }
         }
     }
@@ -304,6 +326,11 @@ void StorageBackend::validateRequest(const StorageRequest& request, bool allow_n
                                     "storage request has duplicate tag=%s at key=%zu",
                                     handle.tag.c_str(),
                                     key_index);
+            RTP_LLM_CHECK_WITH_INFO(handle.peer_blocks.empty() || request.decode_completion,
+                                    "peer source pages require a Decode completion write");
+            for (const auto peer : handle.peer_blocks) {
+                RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(peer), "null Decode peer source page");
+            }
             RTP_LLM_CHECK_WITH_INFO(allow_null_blocks || !isNullBlockIdx(handle.block),
                                     "storage request has null block for tag=%s at key=%zu",
                                     handle.tag.c_str(),
