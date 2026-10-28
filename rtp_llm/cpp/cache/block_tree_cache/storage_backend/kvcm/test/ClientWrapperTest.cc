@@ -237,6 +237,7 @@ TEST(ClientWrapperTest, HostStatePreservesP2pSelectionAndSdkFailureWithPublicati
 // Reproduce the legacy Manager response observed on the real PACE fixture.
 // Every result remains indexed by the original key, including masks and misses.
 TEST(ClientWrapperTest, BackendMasksPreserveOriginalKeyPositions) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     using namespace kv_cache_manager;
     const auto             type = StorageType::ST_TAIRMEMPOOL;
     const BackendLocations all{
@@ -296,6 +297,7 @@ TEST(ClientWrapperTest, BackendMasksPreserveOriginalKeyPositions) {
 }
 
 TEST(ClientWrapperTest, BackendRejectsMalformedShapeAndPropagatesSdkFailure) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     using namespace kv_cache_manager;
     const auto                                                type = StorageType::ST_TAIRMEMPOOL;
     const BackendLocations                                    all(3, {{type, 16, {{"full", "uri"}}}});
@@ -325,6 +327,48 @@ TEST(ClientWrapperTest, BackendRejectsMalformedShapeAndPropagatesSdkFailure) {
     EXPECT_FALSE(ok);
     EXPECT_TRUE(result.empty());
     wrapper->shutdown();
+}
+
+TEST(ClientWrapperTest, FeatureOffPreservesBackendResponseAndSdkError) {
+    autil::EnvGuard disabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    using namespace kv_cache_manager;
+    const auto type = StorageType::ST_TAIRMEMPOOL;
+    const BackendLocations all{
+        {{type, 16, {{"full", "uri101"}}}}, {{type, 16, {{"full", "uri102"}}}}, {{type, 16, {{"full", "uri103"}}}}};
+    const std::vector<std::pair<BlockMask, BackendLocations>> cases{
+        {BlockMaskOffset{1}, all},
+        {BlockMaskVector{true, false, true}, all},
+        {BlockMaskOffset{4}, all},
+        {BlockMaskOffset{0}, BackendLocations{all[0], all[1]}},
+    };
+    std::array<char, 32> data{};
+    RegistSpan span{data.data(), data.size()};
+    InitObservation observation;
+    MockMetaClient* meta = nullptr;
+    auto destroyed = std::make_shared<int>(0);
+    auto wrapper = initializeClient(false, "direct", span, observation, destroyed, &meta);
+    ASSERT_NE(wrapper, nullptr);
+    for (const auto& [mask, response] : cases) {
+        EXPECT_CALL(*meta, GetCacheLocationsByBackend("legacy", _, _, mask, _, type, _))
+            .WillOnce(Return(std::make_pair(ClientErrorCode::ER_OK, response)));
+        auto [ok, result] = wrapper->getCacheLocationsByBackend("", "legacy", {101, 102, 103}, {}, mask, {}, type);
+        ASSERT_TRUE(ok);
+        ASSERT_EQ(result.size(), response.size());
+        for (size_t i = 0; i < result.size(); ++i) {
+            ASSERT_EQ(result[i].size(), 1u);
+            ASSERT_EQ(result[i][0].location_specs.size(), 1u);
+            EXPECT_EQ(result[i][0].location_specs[0].spec_name, response[i][0].location_specs[0].spec_name);
+            EXPECT_EQ(result[i][0].location_specs[0].uri, response[i][0].location_specs[0].uri);
+        }
+    }
+    EXPECT_CALL(*meta, GetCacheLocationsByBackend("legacy_error", _, _, _, _, type, _))
+        .WillOnce(Return(std::make_pair(ClientErrorCode::ER_INVALID_PARAMS, all)));
+    auto [ok, result] = wrapper->getCacheLocationsByBackend(
+        "", "legacy_error", {101, 102, 103}, {}, BlockMaskOffset{0}, {}, type);
+    EXPECT_FALSE(ok);
+    EXPECT_TRUE(result.empty());
+    wrapper->shutdown();
+    EXPECT_EQ(*destroyed, 1);
 }
 
 TEST(ClientWrapperTest, RejectsInvalidTagsBeforeCreatingClients) {

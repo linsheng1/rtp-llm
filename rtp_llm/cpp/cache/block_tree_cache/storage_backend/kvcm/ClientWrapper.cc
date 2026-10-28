@@ -489,6 +489,11 @@ ClientWrapper::getCacheLocationsByBackend(const std::string& unique_id, const st
                                           const std::vector<std::string>& location_spec_names,
                                           kv_cache_manager::StorageType backend_type) {
     CHECK_INIT2(unique_id);
+    if (!remoteCacheDecodePublicationEnabled()) {
+        // Preserve the upstream SDK response contract when publication is off.
+        CALL_CLIENT2(GetCacheLocationsByBackend, trace_id, keys, tokens, block_mask, location_spec_names,
+                     backend_type, kv_cache_manager::BackendSelectStrategy::LSS_WEIGHTED_RANDOM);
+    }
     auto [ec, locations] =
         client->GetCacheLocationsByBackend(trace_id,
                                            keys,
