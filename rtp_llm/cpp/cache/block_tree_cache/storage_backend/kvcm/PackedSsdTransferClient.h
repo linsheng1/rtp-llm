@@ -29,6 +29,7 @@ class PackedSsdTransferClient final: public kv_cache_manager::TransferClient, pu
         Uris uris;
         Buffers buffers;
         Trace trace;
+        size_t payload_bytes{0};
     };
 
 public:
@@ -71,6 +72,8 @@ public:
     static constexpr size_t max_process_bytes       = 512ULL * 1024 * 1024;
     static constexpr size_t max_read_window_bytes   = 256ULL * 1024;
     static constexpr size_t max_read_window_objects = 4;
+    static constexpr size_t max_write_window_bytes  = 2ULL * 1024 * 1024;
+    static constexpr size_t max_write_window_objects = 64;
 
     PackedSsdTransferClient(std::unique_ptr<kv_cache_manager::TransferClient> inner,
                             Copy                                              copy,
@@ -185,8 +188,15 @@ public:
         auto operation = makeOperation(uris, source, true);
         if (!operation)
             return {kv_cache_manager::ER_INVALID_LOCAL_BUFFERS, {}};
-        for (size_t block = 0; block < uris.size(); ++block)
-            operation->calls[block]->trace = blockTrace(trace, block, uris.size());
+        // Prepare trace slices before the first gather or SDK submission.
+        for (size_t window = 0; window < operation->write_ranges.size(); ++window) {
+            if (trace) {
+                const auto& range = operation->write_ranges[window];
+                auto slice = std::make_shared<kv_cache_manager::TransferTraceInfo>(*trace);
+                slice->block_ids = {trace->block_ids.begin() + range.first, trace->block_ids.begin() + range.second};
+                operation->write_calls[window]->trace = std::move(slice);
+            }
+        }
         auto gather = [&](size_t block) {
             size_t offset = 0;
             for (const auto& iov : source[block].iovs) {
@@ -202,31 +212,37 @@ public:
             return true;
         };
         auto actual = uris;
-        for (size_t block = 0; block < uris.size(); ++block) {
-            // The delegate consumes one URI at a time. Pack just that URI,
-            // and never overwrite its range before confirmed completion.
-            if (!gather(block)) {
-                quarantine(operation);
-                return {kv_cache_manager::ER_CUDAMEMCPY_ERROR, {}};
-            }
+        for (size_t window = 0; window < operation->write_ranges.size(); ++window) {
+            const auto& range = operation->write_ranges[window];
+            // Each URI has a disjoint GPU subspan. Complete every gather in the
+            // window before submitting its single multi-URI SDK operation.
             try {
-                auto result = saveOne(*operation->calls[block]);
+                for (size_t block = range.first; block < range.second; ++block) {
+                    if (!gather(block)) {
+                        quarantine(operation);
+                        return {kv_cache_manager::ER_CUDAMEMCPY_ERROR, {}};
+                    }
+                }
+                auto result = saveBatch(*operation->write_calls[window]);
                 if (result.first != kv_cache_manager::ER_OK) {
                     if (!sdkCodeProvesBufferSafety(result.first))
                         quarantine(operation);
                     return {result.first, {}};
                 }
                 if (!result.second.empty()) {
-                    if (result.second.size() != 1) {
+                    if (result.second.size() != range.second - range.first) {
                         quarantine(operation);
                         return {kv_cache_manager::ER_INVALID_PARAMS, {}};
                     }
-                    actual[block] = std::move(result.second.front());
+                    for (size_t i = 0; i < result.second.size(); ++i)
+                        actual[range.first + i] = std::move(result.second[i]);
                 }
             } catch (...) {
                 quarantine(operation);
                 throw;
             }
+            // Only successful completion permits the next window to reuse
+            // these addresses. Unknown completion retains the entire lease.
         }
         return {kv_cache_manager::ER_OK, std::move(actual)};
     }
@@ -262,7 +278,7 @@ private:
                 code != kv_cache_manager::ER_OK);
         return code;
     }
-    std::pair<Code, Uris> saveOne(const InnerIo& call) {
+    std::pair<Code, Uris> saveBatch(const InnerIo& call) {
         std::pair<Code, Uris> result;
         try {
             result = inner_->SaveKvCaches(call.uris, call.buffers, call.trace);
@@ -270,7 +286,7 @@ private:
             observe(false, 0, true);
             throw;
         }
-        observe(false, result.first == kv_cache_manager::ER_OK ? call.buffers.front().iovs.front().size : 0,
+        observe(false, result.first == kv_cache_manager::ER_OK ? call.payload_bytes : 0,
                 result.first != kv_cache_manager::ER_OK);
         return result;
     }
@@ -313,6 +329,8 @@ private:
         Buffers                                buffers;
         std::vector<std::shared_ptr<InnerIo>> calls;
         std::vector<std::pair<size_t, size_t>> read_ranges;
+        std::vector<std::pair<size_t, size_t>> write_ranges;
+        std::vector<std::shared_ptr<InnerIo>> write_calls;
         ~Operation() {
             process_bytes_.fetch_sub(charged);
         }
@@ -346,22 +364,25 @@ private:
         auto                operation = std::make_shared<Operation>();
         std::vector<size_t> offsets(sizes.size(), 0);
         size_t              charge = 0;
+        const size_t window_objects = write ? max_write_window_objects : read_window_objects;
+        const size_t window_bytes = write ? max_write_window_bytes : max_read_window_bytes;
+        auto& ranges = write ? operation->write_ranges : operation->read_ranges;
         for (size_t begin = 0; begin < sizes.size();) {
             size_t end = begin, bytes = 0;
-            while (end < sizes.size() && end - begin < read_window_objects) {
+            while (end < sizes.size() && end - begin < window_objects) {
                 // A single large state/SWA object is allowed alone, bounded
                 // by max_operation_bytes, and cannot bring a sibling with it.
-                if (end > begin && sizes[end] > max_read_window_bytes - std::min(bytes, max_read_window_bytes))
+                if (end > begin && sizes[end] > window_bytes - std::min(bytes, window_bytes))
                     break;
                 offsets[end] = bytes;
                 bytes += sizes[end++];
             }
-            operation->read_ranges.emplace_back(begin, end);
+            ranges.emplace_back(begin, end);
             charge = std::max(charge, bytes);
             begin  = end;
         }
         // Charge the largest simultaneously live GPU window, not the whole
-        // logical request. Writes remain single-object and unchanged.
+        // logical request. A large object still reserves its own window.
         size_t previous = process_bytes_.load();
         do {
             if (previous > max_process_bytes - charge)
@@ -398,11 +419,24 @@ private:
             operation->bytes[i] = std::shared_ptr<void>(
                 gpu_context_->memory, static_cast<unsigned char*>(gpu_context_->memory.get()) + offset + offsets[i]);
             operation->buffers[i].iovs.push_back({staging_type_, operation->bytes[i].get(), sizes[i], false});
-            auto call = std::make_shared<InnerIo>();
-            call->uris.push_back(uris[i]);
-            call->buffers.push_back(operation->buffers[i]);
-            operation->calls.push_back(std::move(call));
-            // Reuse only after the previous window completed and scattered.
+            if (!write) {
+                auto call = std::make_shared<InnerIo>();
+                call->uris.push_back(uris[i]);
+                call->buffers.push_back(operation->buffers[i]);
+                operation->calls.push_back(std::move(call));
+            }
+        }
+        if (write) {
+            operation->write_calls.reserve(operation->write_ranges.size());
+            for (const auto& range : operation->write_ranges) {
+                auto call = std::make_shared<InnerIo>();
+                call->uris.assign(uris.begin() + range.first, uris.begin() + range.second);
+                call->buffers.assign(operation->buffers.begin() + range.first,
+                                     operation->buffers.begin() + range.second);
+                for (size_t i = range.first; i < range.second; ++i)
+                    call->payload_bytes += sizes[i];
+                operation->write_calls.push_back(std::move(call));
+            }
         }
         return operation;
     }
