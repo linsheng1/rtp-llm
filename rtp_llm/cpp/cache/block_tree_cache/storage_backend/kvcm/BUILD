@@ -65,6 +65,7 @@ cc_library(
         "ClientFactory.h",
         "ClientWrapper.h",
         "KVCMConfig.h",
+        "SdkBufferSafety.h",
     ],
     copts = copts(),
     visibility = ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:__subpackages__"],
