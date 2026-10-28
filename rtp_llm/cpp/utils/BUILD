@@ -32,6 +32,7 @@ cc_library(
         "Logger.h",
         "RemoteCacheConfig.h",
         "DecodePublicationLifecycle.h",
+        "DecodePublicationBudget.h",
         "StringUtil.h",
         "StatusUtil.h",
         "Exception.h",
