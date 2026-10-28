@@ -45,8 +45,18 @@ single-object path remains for callers without a worker-device initializer.
 Every concurrent object has a disjoint GPU span. All siblings are joined before
 scatter, including after an SDK error, exception, device-initialization failure
 or worker-launch exception. Uncertain operations retain the whole window until
-SDK shutdown; no CPU payload fallback is introduced. Writes retain their
-single-object completion ordering.
+actual transport quiescence is established; SDK shutdown alone is not proof of
+DMA completion. No CPU payload fallback is introduced.
+
+Writes use sequential windows of at most 64 objects and 2MiB. Each URI owns a
+disjoint packed GPU range; all synchronous gathers finish before one SDK Save
+for the window. The next window reuses that lease only after confirmed
+completion. An oversized object stays alone within the existing 64MiB limit.
+All window descriptors and trace slices are allocated before GPU copies or SDK
+submission. Unknown completion, exceptions and malformed returned URI counts
+retain the entire lease. Explicit SDK buffer-safe failures preserve the existing
+release contract. Payload reporting sums confirmed successful windows, including
+a successful prefix before a later failure. No SDK or Manager changes are needed.
 
 Native tests cover count/concurrency, device selection, disjoint data and
 trace slices, byte admission, oversized state objects, device-init failure and
