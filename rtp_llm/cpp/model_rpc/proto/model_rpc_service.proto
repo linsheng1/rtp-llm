@@ -970,6 +970,11 @@ message RemoteOperationResponsePB {
     RemoteTransferStatusPB transfer_status = 3;
     repeated RemoteHostCacheMatchPB hosts = 4;
     repeated RemoteBackendKeyLocationsPB backend_locations = 5;
+    // Explicit caller-buffer proof for the opt-in Decode publication path.
+    // True means this worker submitted no payload I/O, or that all of its
+    // submitted payload I/O completed. It does not prove a metadata commit
+    // or remote target drain. Absent/false remains unknown to an enabled peer.
+    bool payload_buffer_safe = 6;
 }
 
 message FunctionResponsePB {
