@@ -1353,6 +1353,7 @@ TEST_F(StreamCacheResourceTest, RemoteTimeoutAllocationRetryKeepsLocalLookupAndS
         block_tree_cache_detail::ScopeRollback release_read([&] { backend->releaseReads(); });
         backend->timeoutNextRead();
         ASSERT_TRUE(resource.initKVBlock().ok());
+        const auto retry_keys = resource.kvCache().cacheKeys(0);
         ASSERT_TRUE(backend->waitForReadsFor(1));
         auto context = std::dynamic_pointer_cast<LoadAsyncContext>(resource.allocator_load_context_);
         ASSERT_NE(context, nullptr);
@@ -1371,13 +1372,30 @@ TEST_F(StreamCacheResourceTest, RemoteTimeoutAllocationRetryKeepsLocalLookupAndS
         EXPECT_EQ(stream_->reuseLength(), 0);
         pool->decRef(*held);
         release_held.dismiss();
+        // Request-reference release does not require eviction of a tree-owned
+        // ordinary prefix. Read the settled physical state before retry rather
+        // than inferring eviction from the residency policy alone.
+        bool device_prefix_available = false;
+        {
+            auto& cache = cache_manager_->block_tree_cache_;
+            std::lock_guard<std::mutex> lock(cache->mutex_);
+            const auto path = cache->tree()->findNode(retry_keys);
+            if (!path.empty()) {
+                ASSERT_EQ(path.front()->group_set_resources.size(), 1u);
+                const auto& cached = path.front()->group_set_resources.front();
+                EXPECT_FALSE(cached.hasTier(Tier::HOST));
+                EXPECT_FALSE(cached.hasTier(Tier::DISK));
+                device_prefix_available = cached.isMatchUsable() && cached.hasCompleteDeviceValue();
+            }
+        }
+        if (resident) {
+            ASSERT_TRUE(device_prefix_available);
+        }
         ASSERT_TRUE(resource.initKVBlock().ok());
         ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
         EXPECT_EQ(backend->matchCalls(), 1u);
-        // Detaching under pressure may evict an ordinary prefix. A resident
-        // prefix survives and must remain eligible for local lookup on retry.
-        EXPECT_EQ(stream_->reuseLength(), resident ? 2 : 0);
-        EXPECT_EQ(stream_->deviceReuseLength(), resident ? 2 : 0);
+        EXPECT_EQ(stream_->reuseLength(), device_prefix_available ? 2 : 0);
+        EXPECT_EQ(stream_->deviceReuseLength(), device_prefix_available ? 2 : 0);
         EXPECT_EQ(stream_->remoteReuseLength(), 0);
     }
 }
