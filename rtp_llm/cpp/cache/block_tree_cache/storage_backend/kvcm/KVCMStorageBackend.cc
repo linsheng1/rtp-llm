@@ -533,7 +533,8 @@ public:
         if (source_may_be_touched) {
             *source_may_be_touched = true;
         }
-        (void)dispatchRequests(requests, kv_cache_config_.kvcm_get_broadcast_timeout, request.request_id);
+        (void)dispatchRequests(requests, kv_cache_config_.kvcm_get_broadcast_timeout, request.request_id,
+                               source_may_be_touched);
         if (source_may_be_touched) {
             *source_may_be_touched = false;
         }
@@ -619,6 +620,7 @@ public:
         static const kv_cache_manager::Locations empty_locations;
         bool                                     finish_attempted = false;
         bool                                     decode_transfer_attempted = false;
+        bool                                     protected_peer_dispatch_attempted = false;
         block_tree_cache_detail::ScopeRollback release_known_session([&] {
             if (session && (!source_may_be_touched || !*source_may_be_touched)) {
                 completion_resources_->releaseSession(session);
@@ -699,7 +701,9 @@ public:
                 if (source_may_be_touched) {
                     *source_may_be_touched = true;
                 }
-                auto response = dispatchRequests(requests, kv_cache_config_.kvcm_put_broadcast_timeout, request.request_id);
+                protected_peer_dispatch_attempted = decode_publication_enabled_;
+                auto response = dispatchRequests(requests, kv_cache_config_.kvcm_put_broadcast_timeout,
+                                                  request.request_id, source_may_be_touched);
                 if (source_may_be_touched) {
                     *source_may_be_touched = false;
                 }
@@ -746,7 +750,7 @@ public:
                                  write_location.locations.size(), payload_locations);
             }
         } catch (...) {
-            if (decode_transfer_attempted && !finish_attempted) {
+            if ((decode_transfer_attempted || protected_peer_dispatch_attempted) && !finish_attempted) {
                 // A failed payload operation may still touch its destination.
                 // Keep the Manager lease rather than recycling it via abort.
                 RTP_LLM_LOG_WARNING("DTOP retains uncertain remote session [%s]", write_session_id.c_str());
@@ -1525,7 +1529,8 @@ private:
 
     std::vector<FunctionResponsePB> dispatchRequests(const std::vector<FunctionRequestPB>& requests,
                                                      int                                   timeout_ms,
-                                                     std::optional<int64_t>                request_id) {
+                                                     std::optional<int64_t>                request_id,
+                                                     bool* source_may_be_touched = nullptr) {
         const auto&                     remote    = requests.front().remote_request();
         const std::string               direction = remote.op() == REMOTE_OPERATION_READ ? "REMOTE2D" : "D2REMOTE";
         std::vector<FunctionResponsePB> responses;
@@ -1587,7 +1592,11 @@ private:
                               payload.transfer_status() == REMOTE_TRANSFER_STATUS_SUCCESS,
                               payload.transfer_status() == REMOTE_TRANSFER_STATUS_FAILED);
             }
-            switch (proof.result()) {
+            const auto disposition = proof.result();
+            if (source_may_be_touched && disposition != kvcm::WorkerPayloadProof::Result::UNKNOWN) {
+                *source_may_be_touched = false;
+            }
+            switch (disposition) {
                 case kvcm::WorkerPayloadProof::Result::SUCCESS:
                     return responses;
                 case kvcm::WorkerPayloadProof::Result::BUFFER_SAFE_FAILURE:
