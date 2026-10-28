@@ -472,6 +472,25 @@ protected:
     bool quiesceUnknownOperations() noexcept override { return quiescent.load(); }
 };
 
+class PredicateBoundaryBackend: public ProtectedBackend {
+public:
+    using ProtectedBackend::ProtectedBackend;
+    ~PredicateBoundaryBackend() override { shutdown(); }
+    std::promise<void> predicate_entered, resume_predicate;
+    std::shared_future<void> resume = resume_predicate.get_future().share();
+protected:
+    bool quiesceUnknownOperations() noexcept override {
+        const bool safe = quiescent.load();
+        if (!safe && !paused_.exchange(true)) {
+            predicate_entered.set_value();
+            resume.wait();
+        }
+        return safe;
+    }
+private:
+    std::atomic<bool> paused_{false};
+};
+
 std::shared_ptr<const CacheTopology> makeTopology() {
     auto      spec = std::make_shared<MHAKVCacheSpec>("default", 1, 1, 1);
     GroupBase group;
@@ -673,6 +692,40 @@ TEST(StorageBackendTest, WorkerTransactionRecordsUnknownBeforeShutdownCanDestroy
     stopping.get();
     EXPECT_TRUE(backend->shutdownCalled());
     EXPECT_FALSE(backend->trackWorkerIo());
+}
+
+TEST(StorageBackendTest, QuiescenceNotificationCannotBeLostAtPredicateWaitBoundary) {
+    auto pool = std::make_shared<TestBlockPool>();
+    const auto block = pool->malloc().value();
+    pool->incRef(block);
+    auto executor = std::make_shared<HoldingExecutor>();
+    auto backend = std::make_shared<PredicateBoundaryBackend>(true, executor);
+    ASSERT_TRUE(initBackend(*backend, pool));
+    backend->write_action = [] { throw std::bad_alloc(); };
+    auto request = makeRequest(block);
+    request.decode_completion = true;
+    ASSERT_TRUE(backend->write(backend->prepareWrite(std::move(request))));
+    ASSERT_EQ(executor->runAll(), 1u);
+    auto entered = backend->predicate_entered.get_future();
+    BoundedThread<void> stopping([backend] { backend->shutdown(); });
+    ASSERT_EQ(entered.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    auto announced = std::make_shared<std::promise<void>>();
+    auto notifying = announced->get_future();
+    BoundedThread<void> notifier([backend, announced] {
+        announced->set_value();
+        backend->proveQuiescence();
+    });
+    ASSERT_EQ(notifying.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    // The predicate deliberately holds the registry mutex after reading false.
+    // Notification must wait for that mutex, so it cannot slip before wait().
+    EXPECT_EQ(notifier.waitFor(std::chrono::milliseconds(100)), std::future_status::timeout);
+    backend->resume_predicate.set_value();
+    ASSERT_EQ(notifier.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    notifier.get();
+    ASSERT_EQ(stopping.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    stopping.get();
+    EXPECT_EQ(pool->refCount(block), 1u);
+    pool->decRef(block);
 }
 
 TEST(StorageBackendTest, ExplicitPayloadSafeFailureReleasesWithoutQuarantine) {
