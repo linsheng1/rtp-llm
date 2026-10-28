@@ -1218,7 +1218,7 @@ bool CoordinatorCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batc
         for (const auto& [new_idx, old_idx] : retained_slots) {
             staged_resource.moveBatchResource(new_idx, std::move(batch_kv_cache_resource->cacheResource(old_idx)));
         }
-        batch_kv_cache_resource->swap(staged_resource);
+        batch_kv_cache_resource->swapBlockStorage(staged_resource);
         block_update_mapping.swap(staged_mapping);
         return true;
     }
