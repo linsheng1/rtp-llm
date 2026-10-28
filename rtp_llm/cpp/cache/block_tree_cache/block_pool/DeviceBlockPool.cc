@@ -82,7 +82,6 @@ void DeviceBlockPool::releaseRemotePublicationPin(BlockIdxType block, const std:
         const auto type = static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR);
         RTP_LLM_CHECK(refcounts_by_type_[type][block] > 0);
         const auto free_before = availableFreeBlocksNoLock();
-        const auto available_before = available_blocks_num_;
         const bool was_active = isActiveNoLock(block);
         const bool was_available = isAvailableNoLock(block);
         --refcounts_[block];
@@ -94,7 +93,7 @@ void DeviceBlockPool::releaseRemotePublicationPin(BlockIdxType block, const std:
         }
         updateActiveBlocksNumNoLock(block, was_active);
         updateAvailableBlocksNumNoLock(block, was_available);
-        capacity_grew = availableFreeBlocksNoLock() > free_before || available_blocks_num_ > available_before;
+        capacity_grew = availableFreeBlocksNoLock() > free_before || (!was_available && isAvailableNoLock(block));
     }
     // The callback was snapshotted before pin acquisition. Notification cannot
     // turn an already-completed decrement into an ambiguous retry.
