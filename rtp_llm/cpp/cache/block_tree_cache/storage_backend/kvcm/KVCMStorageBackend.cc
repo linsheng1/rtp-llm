@@ -430,19 +430,20 @@ public:
             return;
         }
         if (completion_stopped_.load()) {
-            throw StorageOperationBufferSafeFailure("KVCM publication backend stopped before read submission");
+            std::rethrow_exception(buffer_safe_failure_);
         }
         bool source_may_be_touched = false;
-        const auto safe_failure = std::make_exception_ptr(StorageOperationBufferSafeFailure(
-            "KVCM read failed before submission or after completed payload"));
-        const auto unknown = std::make_exception_ptr(StorageOperationCompletionUnknown(
-            "KVCM read target completion unknown", StorageQuarantineReason::INVALID_RESPONSE));
+        const auto safe_failure = buffer_safe_failure_;
+        const auto unknown = completion_unknown_failure_;
         try {
             readTransaction(request, match_meta, &source_may_be_touched);
         } catch (const StorageOperationBufferSafeFailure&) {
             throw;
         } catch (const StorageOperationCompletionUnknown&) {
-            throw;
+            if (source_may_be_touched) {
+                throw;
+            }
+            std::rethrow_exception(safe_failure);
         } catch (...) {
             std::rethrow_exception(source_may_be_touched ? unknown : safe_failure);
         }
@@ -525,21 +526,22 @@ public:
             return;
         }
         if (completion_stopped_.load()) {
-            throw StorageOperationBufferSafeFailure("KVCM publication backend stopped before write submission");
+            std::rethrow_exception(buffer_safe_failure_);
         }
         bool source_may_be_touched = false;
         // Error payloads are allocated before the first SDK operation. Metadata
         // failures before submission/after complete payloads are buffer-safe.
-        const auto safe_failure = std::make_exception_ptr(StorageOperationBufferSafeFailure(
-            "KVCM write failed before submission or after completed payload"));
-        const auto unknown = std::make_exception_ptr(StorageOperationCompletionUnknown(
-            "KVCM write source completion unknown", StorageQuarantineReason::INVALID_RESPONSE));
+        const auto safe_failure = buffer_safe_failure_;
+        const auto unknown = completion_unknown_failure_;
         try {
             writeTransaction(request, &source_may_be_touched);
         } catch (const StorageOperationBufferSafeFailure&) {
             throw;
         } catch (const StorageOperationCompletionUnknown&) {
-            throw;
+            if (source_may_be_touched) {
+                throw;
+            }
+            std::rethrow_exception(safe_failure);
         } catch (...) {
             std::rethrow_exception(source_may_be_touched ? unknown : safe_failure);
         }
@@ -1186,7 +1188,9 @@ private:
                                          const std::vector<int32_t>&        blocks,
                                          const kv_cache_manager::UriStrVec& uris,
                                          kv_cache_manager::BlockBuffers&    buffers,
-                                         kv_cache_manager::UriStrVec&       actual_uris) {
+                                         kv_cache_manager::UriStrVec&       actual_uris,
+                                         bool* source_may_be_touched = nullptr,
+                                         bool* transfer_attempted = nullptr) {
         const auto                           trace_info = makeTransferTraceInfo(blocks);
         RtpLLMRemoteCacheSDKMetricsCollector collector;
         collector.remote_sdk_block_num               = static_cast<int64_t>(blocks.size());
@@ -1197,7 +1201,11 @@ private:
                                                              operation == REMOTE_OPERATION_READ ? "read" : "write");
         });
         if (operation == REMOTE_OPERATION_READ) {
+            if (source_may_be_touched) *source_may_be_touched = true;
+            if (transfer_attempted) *transfer_attempted = true;
             const auto ec = client_wrapper_->loadKvCachesForTagWithStatus(client_tag, uris, buffers, trace_info);
+            if (source_may_be_touched && ec == kv_cache_manager::ClientErrorCode::ER_OK)
+                *source_may_be_touched = false;
             if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
                 return TransferResult::TIMEOUT;
             }
@@ -1205,7 +1213,11 @@ private:
                 return TransferResult::FAILED;
             }
         } else {
+            if (source_may_be_touched) *source_may_be_touched = true;
+            if (transfer_attempted) *transfer_attempted = true;
             auto [ec, result] = client_wrapper_->saveKvCachesForTagWithStatus(client_tag, uris, buffers, trace_info);
+            if (source_may_be_touched && ec == kv_cache_manager::ClientErrorCode::ER_OK)
+                *source_may_be_touched = false;
             if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
                 return TransferResult::TIMEOUT;
             }
@@ -1223,7 +1235,9 @@ private:
                                        const std::vector<int32_t>&        blocks,
                                        const kv_cache_manager::UriStrVec& uris,
                                        kv_cache_manager::BlockBuffers&    buffers,
-                                       RemoteOperationResponsePB&         response) {
+                                       RemoteOperationResponsePB&         response,
+                                       bool* source_may_be_touched = nullptr,
+                                       bool* transfer_attempted = nullptr) {
         if (operation != REMOTE_OPERATION_READ && operation != REMOTE_OPERATION_WRITE) {
             RTP_LLM_LOG_WARNING("KVCM transfer has invalid operation [%d]", operation);
             return TransferResult::FAILED;
@@ -1233,7 +1247,8 @@ private:
             // The first client owns all PACE GPU registrations. Forward the whole
             // request unchanged; the SDK selects normal or gather/scatter mode.
             const auto result =
-                executeClientTransfer(operation, registration_tags_.front(), blocks, uris, buffers, actual_uris);
+                executeClientTransfer(operation, registration_tags_.front(), blocks, uris, buffers, actual_uris,
+                                      source_may_be_touched, transfer_attempted);
             if (result != TransferResult::SUCCESS) {
                 return result;
             }
@@ -1505,6 +1520,7 @@ private:
     StorageBackend::BufferResolver publication_resolver_;
     std::shared_ptr<DecodePublicationBudget> completion_budget_;
     std::shared_ptr<CompletionResources> completion_resources_;
+    std::exception_ptr buffer_safe_failure_, completion_unknown_failure_, completion_timeout_failure_;
     CacheConfig                          cache_config_;
     KVCacheConfig                        kv_cache_config_;
     RuntimeConfig                        runtime_config_;

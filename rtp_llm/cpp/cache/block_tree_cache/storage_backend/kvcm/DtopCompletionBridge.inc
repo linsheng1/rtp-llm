@@ -64,6 +64,14 @@ bool configureDecodePublication(const CacheTopology& topology,
         RTP_LLM_LOG_INFO("DTOP budget pool=%zu bytes=%zu jobs=%zu cp=%d shards=%d",
                          bytes, limits->bytes, limits->jobs, target_prefill_cp_, target_physical_shards_);
     }
+    // Allocate error payloads once at enabled startup, never in the interval
+    // between task preparation and a submit proof or after uncertain I/O.
+    buffer_safe_failure_ = std::make_exception_ptr(StorageOperationBufferSafeFailure(
+        "KVCM operation failed before submission or after completed payload"));
+    completion_unknown_failure_ = std::make_exception_ptr(StorageOperationCompletionUnknown(
+        "KVCM payload completion unknown", StorageQuarantineReason::INVALID_RESPONSE));
+    completion_timeout_failure_ = std::make_exception_ptr(StorageOperationTimeout(
+        "KVCM payload transfer timed out", StorageQuarantineReason::SDK_TIMEOUT));
     return true;
 }
 
@@ -245,10 +253,8 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
     CPSlotMapper mapper(0, target_physical_shards_, cache_config_.seq_size_per_block);
     // Prebuild error payloads and all source descriptors before the first SDK
     // operation. A failure after any peer begins is conservatively unknown.
-    const auto unknown = std::make_exception_ptr(StorageOperationCompletionUnknown(
-        "Decode PACE source completion unknown", StorageQuarantineReason::INVALID_RESPONSE));
-    const auto timeout = std::make_exception_ptr(StorageOperationTimeout(
-        "Decode PACE transfer timed out", StorageQuarantineReason::SDK_TIMEOUT));
+    const auto unknown = completion_unknown_failure_;
+    const auto timeout = completion_timeout_failure_;
     for (size_t peer = 0; peer < requests.size(); ++peer) {
         const auto& remote = requests[peer].remote_request();
         (void)responses[peer].mutable_remote_response();
@@ -258,6 +264,8 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
         for (int i = 0; i < remote.block_ids_size(); ++i) {
             const auto& tag = remote.group_tags(i);
             const int block = remote.block_ids(i);
+            RTP_LLM_CHECK_WITH_INFO(remote.uris(i).compare(0, 7, "pace://") == 0,
+                                    "Decode DRAM publication received a non-PACE destination");
             batch.tags.push_back(publicationPeerTag(tag, peer));
             batch.blocks.push_back(block);
             batch.uris.push_back(remote.uris(i));
@@ -284,22 +292,22 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
                 continue;
             }
             auto& response = *responses[peer].mutable_remote_response();
-            transfer_attempted = true;
-            source_may_be_touched = true;
             const auto result = executeTagTransfers(
-                REMOTE_OPERATION_WRITE, batch.tags, batch.blocks, batch.uris, batch.buffers, response);
+                REMOTE_OPERATION_WRITE, batch.tags, batch.blocks, batch.uris, batch.buffers, response,
+                &source_may_be_touched, &transfer_attempted);
             if (result == TransferResult::TIMEOUT) {
                 std::rethrow_exception(timeout);
             }
             if (result != TransferResult::SUCCESS) {
-                std::rethrow_exception(unknown);
+                std::rethrow_exception(source_may_be_touched ? unknown : buffer_safe_failure_);
             }
             response.set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
         }
     } catch (const StorageOperationCompletionUnknown&) {
-        throw;
+        if (source_may_be_touched) throw;
+        std::rethrow_exception(buffer_safe_failure_);
     } catch (...) {
-        std::rethrow_exception(unknown);
+        std::rethrow_exception(source_may_be_touched ? unknown : buffer_safe_failure_);
     }
     source_may_be_touched = false;
     return responses;
