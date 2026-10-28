@@ -30,7 +30,8 @@ protected:
         std::future<void> started = entered.get_future();
         std::shared_future<void> release = released.get_future().share();
         std::map<std::string, std::vector<std::vector<std::vector<uint8_t>>>> expected;
-        Scenario(int target_cp, bool sharded, int dp, bool enabled = true, bool bounded = true):
+        Scenario(int target_cp, bool sharded, int dp, bool enabled = true, bool bounded = true,
+                 bool record_handoff = true):
             cp(target_cp), shards(sharded ? cp : 1) {
             auto full = defaultCacheGroupPolicy(CacheGroupType::FULL);
             auto state = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
@@ -90,7 +91,9 @@ protected:
                 keys.push_back(101 + i);
             }
             resource.setBatchCacheKeys(0, keys);
-            EXPECT_TRUE(resource.decodeCompletionLifecycle().recordPrefillComputedEnd(unit()));
+            if (record_handoff) {
+                EXPECT_TRUE(resource.decodeCompletionLifecycle().recordPrefillComputedEnd(unit()));
+            }
             EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Invoke(
                 [&](const auto&, auto, const auto& registrations, const auto& tags) {
                     EXPECT_EQ(registrations.size(), tags.size());
@@ -273,8 +276,7 @@ TEST_P(NativeDtopCompletionTest, UnboundedSwaRequiresEveryHistoricalState) {
     ASSERT_TRUE(waitForBackendOperationsForTest(*s.backend)); EXPECT_EQ(s.starts, 0u);
 }
 TEST_P(NativeDtopCompletionTest, MissingHandoffAndMultiBatchDoNotGuessSourceBoundary) {
-    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), std::get<2>(GetParam()));
-    s.resource.decodeCompletionLifecycle().reset();
+    Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), std::get<2>(GetParam()), true, true, false);
     ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end()));
     EXPECT_EQ(s.starts, 0u);
     s.resource.resetBatchSize(2);
