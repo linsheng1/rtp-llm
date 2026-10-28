@@ -242,13 +242,9 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
                                                        bool& transfer_attempted,
                                                        bool& source_may_be_touched) {
     setCudaDevice();
-    struct Batch {
-        std::vector<std::string> tags;
-        std::vector<int32_t> blocks;
-        kv_cache_manager::UriStrVec uris;
-        kv_cache_manager::BlockBuffers buffers;
-    };
-    std::vector<Batch> batches(requests.size());
+    using Batch = CompletionResources::Operation;
+    std::vector<std::shared_ptr<Batch>> batches;
+    batches.reserve(requests.size());
     std::vector<FunctionResponsePB> responses(requests.size());
     CPSlotMapper mapper(0, target_physical_shards_, cache_config_.seq_size_per_block);
     // Prebuild error payloads and all source descriptors before the first SDK
@@ -260,7 +256,10 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
         (void)responses[peer].mutable_remote_response();
         RTP_LLM_CHECK(remote.block_ids_size() == remote.group_tags_size()
                       && remote.block_ids_size() == remote.uris_size());
-        auto& batch = batches[peer];
+        auto operation = std::make_shared<Batch>();
+        operation->client = client_wrapper_;
+        for (const auto& pool : pools_by_tag_) operation->pools.push_back(pool.second);
+        auto& batch = *operation;
         for (int i = 0; i < remote.block_ids_size(); ++i) {
             const auto& tag = remote.group_tags(i);
             const int block = remote.block_ids(i);
@@ -284,14 +283,24 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
             }
             RTP_LLM_CHECK_WITH_INFO(bytes == publicationWireBytes(tag), "Decode wire size mismatch tag=%s", tag.c_str());
         }
+        batches.push_back(std::move(operation));
     }
     try {
         for (size_t peer = 0; peer < batches.size(); ++peer) {
-            auto& batch = batches[peer];
+            const auto operation = batches[peer];
+            auto& batch = *operation;
             if (batch.tags.empty()) {
                 continue;
             }
             auto& response = *responses[peer].mutable_remote_response();
+            completion_resources_->holdOperation(operation);
+            block_tree_cache_detail::ScopeRollback hold_unknown_descriptors([&] {
+                completion_resources_->completeOperation(operation, source_may_be_touched);
+                if (source_may_be_touched) {
+                    completion_stopped_.store(true);
+                    completion_budget_->stopAdmission();
+                }
+            });
             const auto result = executeTagTransfers(
                 REMOTE_OPERATION_WRITE, batch.tags, batch.blocks, batch.uris, batch.buffers, response,
                 &source_may_be_touched, &transfer_attempted);

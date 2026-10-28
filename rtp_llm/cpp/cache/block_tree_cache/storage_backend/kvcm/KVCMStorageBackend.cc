@@ -99,18 +99,27 @@ public:
     // the registered SDK and its unresolved remote session after owner shutdown
     // was requested. Pool ownership lives in the generic task's pinned pages.
     struct CompletionResources {
+        struct Operation {
+            std::vector<std::string> tags;
+            std::vector<int32_t> blocks;
+            kv_cache_manager::UriStrVec uris;
+            kv_cache_manager::BlockBuffers buffers;
+            std::vector<DeviceBlockPoolPtr> pools;
+            std::shared_ptr<kvcm::ClientWrapper> client;
+            std::shared_ptr<Operation> next;
+        };
         struct Session {
-            explicit Session(std::string value): id(std::move(value)) {}
             std::string id;
             std::shared_ptr<Session> next;
         };
         explicit CompletionResources(std::shared_ptr<kvcm::ClientWrapper> value): client(std::move(value)) {}
-        std::shared_ptr<Session> holdSession(const std::string& id) {
-            auto session = std::make_shared<Session>(id);  // before payload I/O
+        void holdSession(const std::shared_ptr<Session>& session, std::string id) {
+            // Preserve identity without allocating after StartWrite. This does
+            // not renew the unchanged Manager lease or prove destination drain.
+            session->id = std::move(id);
             std::lock_guard<std::mutex> lock(mutex);
             session->next = std::move(sessions);
             sessions = session;
-            return session;
         }
         void releaseSession(const std::shared_ptr<Session>& session) noexcept {
             std::lock_guard<std::mutex> lock(mutex);
@@ -122,9 +131,26 @@ public:
                 *link = std::move(session->next);
             }
         }
+        void holdOperation(const std::shared_ptr<Operation>& operation) noexcept {
+            std::lock_guard<std::mutex> lock(mutex);
+            operation->next = std::move(operations);
+            operations = operation;
+        }
+        void completeOperation(const std::shared_ptr<Operation>& operation, bool unknown) noexcept {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (unknown) {
+                ++unresolved;
+                return;
+            }
+            auto* link = &operations;
+            while (*link && *link != operation) link = &(*link)->next;
+            if (*link) *link = std::move(operation->next);
+        }
         std::shared_ptr<kvcm::ClientWrapper> client;
         std::mutex mutex;
         std::shared_ptr<Session> sessions;
+        std::shared_ptr<Operation> operations;
+        std::atomic<size_t> unresolved{0};
     };
 
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DtopCompletionBridge.inc"
@@ -572,6 +598,9 @@ public:
         RTP_LLM_CHECK_WITH_INFO(group_policy_->getNeedWriteGroups(request, valid_keys_size, location_spec_group_names),
                                 "KVCM write group selection failed");
         const std::string trace_id     = nextTraceId("write", write_trace_sequence_);
+        // Reserve the independent owner before Manager allocation. Moving the
+        // returned id and linking this node then require no allocation.
+        auto session = completion_resources_ ? std::make_shared<CompletionResources::Session>() : nullptr;
         auto [success, write_location] = [&] {
             const auto stage_start = Clock::now();
             block_tree_cache_detail::ScopeRollback timer([&] {
@@ -582,11 +611,13 @@ public:
                 kv_cache_config_.kvcm_min_replica_count);
         }();
         RTP_LLM_CHECK_WITH_INFO(success, "KVCM StartWrite failed");
+        if (session) {
+            completion_resources_->holdSession(session, std::move(write_location.write_session_id));
+        }
+        const std::string& write_session_id = session ? session->id : write_location.write_session_id;
         static const kv_cache_manager::Locations empty_locations;
         bool                                     finish_attempted = false;
         bool                                     decode_transfer_attempted = false;
-        auto session = completion_resources_ && !write_location.write_session_id.empty() ?
-                           completion_resources_->holdSession(write_location.write_session_id) : nullptr;
         block_tree_cache_detail::ScopeRollback release_known_session([&] {
             if (session && (!source_may_be_touched || !*source_may_be_touched)) {
                 completion_resources_->releaseSession(session);
@@ -603,7 +634,7 @@ public:
                                     key_indices.size(),
                                     write_location.locations.size());
             if (write_location.locations.empty()) {
-                if (!write_location.write_session_id.empty()) {
+                if (!write_session_id.empty()) {
                     // The server can create an empty, short-lived session when
                     // every key already has enough replicas. Close it normally.
                     finish_attempted = true;
@@ -614,13 +645,13 @@ public:
                     try {
                         if (!client_wrapper_->finishWrite(
                             "", nextTraceId("finish_write", finish_write_trace_sequence_),
-                            write_location.write_session_id, kv_cache_manager::BlockMaskOffset{0}, empty_locations)) {
+                            write_session_id, kv_cache_manager::BlockMaskOffset{0}, empty_locations)) {
                             RTP_LLM_LOG_WARNING("KVCM failed to close empty write session [%s]",
-                                                write_location.write_session_id.c_str());
+                                                write_session_id.c_str());
                         }
                     } catch (...) {
                         RTP_LLM_LOG_WARNING("KVCM failed to close empty write session [%s]",
-                                            write_location.write_session_id.c_str());
+                                            write_session_id.c_str());
                     }
                 }
                 // Keep the legacy task QPS, but report no payload blocks or
@@ -690,7 +721,7 @@ public:
                 RTP_LLM_CHECK_WITH_INFO(
                     client_wrapper_->finishWrite("",
                                                  nextTraceId("finish_write", finish_write_trace_sequence_),
-                                                 write_location.write_session_id,
+                                                 write_session_id,
                                                  write_location.locations.size(),
                                                  actual_locations),
                     "KVCM FinishWrite failed");
@@ -706,7 +737,7 @@ public:
             if (decode_transfer_attempted && !finish_attempted) {
                 // A failed payload operation may still touch its destination.
                 // Keep the Manager lease rather than recycling it via abort.
-                RTP_LLM_LOG_WARNING("DTOP retains uncertain remote session [%s]", write_location.write_session_id.c_str());
+                RTP_LLM_LOG_WARNING("DTOP retains uncertain remote session [%s]", write_session_id.c_str());
             } else if (!finish_attempted) {
                 const auto                             stage_start = Clock::now();
                 block_tree_cache_detail::ScopeRollback timer(
@@ -714,15 +745,15 @@ public:
                 try {
                     if (!client_wrapper_->finishWrite("",
                                                       nextTraceId("abort_write", finish_write_trace_sequence_),
-                                                      write_location.write_session_id,
+                                                      write_session_id,
                                                       /*block_mask=*/kv_cache_manager::BlockMaskOffset{0},
                                                       empty_locations)) {
                         RTP_LLM_LOG_WARNING("KVCM failed to abort write session [%s]",
-                                            write_location.write_session_id.c_str());
+                                            write_session_id.c_str());
                     }
                 } catch (...) {
                     RTP_LLM_LOG_WARNING("KVCM abort write session threw, session=[%s]",
-                                        write_location.write_session_id.c_str());
+                                        write_session_id.c_str());
                 }
             }
             throw;
@@ -732,6 +763,9 @@ public:
     bool execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {
         if (request.op() != REMOTE_OPERATION_READ && request.op() != REMOTE_OPERATION_WRITE) {
             return executeMetadata(request, response);
+        }
+        if (decode_publication_enabled_) {
+            return executeProtectedPayload(request, response);
         }
         const std::vector<std::string>    tags(request.group_tags().begin(), request.group_tags().end());
         const std::vector<int32_t>        blocks(request.block_ids().begin(), request.block_ids().end());
@@ -768,6 +802,59 @@ public:
         return result == TransferResult::SUCCESS;
     }
 
+    bool executeProtectedPayload(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {
+        if (completion_stopped_.load() || request.group_tags_size() != request.block_ids_size()
+            || request.group_tags_size() != request.uris_size()) {
+            response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
+            return false;
+        }
+        if (request.group_tags_size() == 0) {
+            response.set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
+            return true;
+        }
+        auto operation = std::make_shared<CompletionResources::Operation>();
+        operation->tags.assign(request.group_tags().begin(), request.group_tags().end());
+        operation->blocks.assign(request.block_ids().begin(), request.block_ids().end());
+        operation->uris.assign(request.uris().begin(), request.uris().end());
+        if (!std::all_of(operation->uris.begin(), operation->uris.end(), [](const auto& uri) {
+                return uri.compare(0, 7, "pace://") == 0;
+            })) {
+            response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
+            return false;
+        }
+        operation->client = client_wrapper_;
+        for (const auto& tag : operation->tags) {
+            if (!pools_by_tag_.count(tag)) {
+                response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
+                return false;
+            }
+        }
+        for (const auto& pool : pools_by_tag_) operation->pools.push_back(pool.second);
+        setCudaDevice();
+        if (!group_policy_->genBlockBuffers(operation->tags, operation->blocks, operation->buffers)) {
+            response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
+            return false;
+        }
+        // The controller's prepared task pins the globally shared block IDs.
+        // This independent local record retains the worker's actual backing,
+        // SDK registrations and borrowed IOV/URI descriptors across UNKNOWN.
+        bool unknown = false, attempted = false;
+        completion_resources_->holdOperation(operation);
+        block_tree_cache_detail::ScopeRollback retain_worker_unknown([&] {
+            completion_resources_->completeOperation(operation, unknown);
+            if (unknown) {
+                completion_stopped_.store(true);
+                if (completion_budget_) completion_budget_->stopAdmission();
+            }
+        });
+        const auto result = executeTagTransfers(request.op(), operation->tags, operation->blocks,
+            operation->uris, operation->buffers, response, &unknown, &attempted);
+        response.set_transfer_status(result == TransferResult::SUCCESS ? REMOTE_TRANSFER_STATUS_SUCCESS :
+                                     result == TransferResult::TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
+                                                                         REMOTE_TRANSFER_STATUS_FAILED);
+        return result == TransferResult::SUCCESS;
+    }
+
     void shutdown() noexcept {
         if (completion_budget_) {
             completion_budget_->stopAdmission();
@@ -782,6 +869,9 @@ public:
     }
     std::shared_ptr<void> completionResourceOwner() const {
         return completion_resources_;
+    }
+    bool hasUnresolvedExternalIo() const noexcept {
+        return completion_resources_ && completion_resources_->unresolved.load() > 0;
     }
 
     void reportQuarantineEvent(bool is_write, StorageQuarantineReason reason, size_t block_count) const noexcept {
@@ -1200,12 +1290,19 @@ private:
             reportRemoteMetrics<RtpLLMRemoteCacheSDKMetrics>(collector,
                                                              operation == REMOTE_OPERATION_READ ? "read" : "write");
         });
+        auto completion = kvcm::ClientWrapper::TransferCompletion::NOT_SUBMITTED;
+        block_tree_cache_detail::ScopeRollback reconcile_completion([&] {
+            if (source_may_be_touched) {
+                *source_may_be_touched = completion == kvcm::ClientWrapper::TransferCompletion::UNKNOWN;
+            }
+            if (transfer_attempted && completion != kvcm::ClientWrapper::TransferCompletion::NOT_SUBMITTED) {
+                *transfer_attempted = true;
+            }
+        });
         if (operation == REMOTE_OPERATION_READ) {
             if (source_may_be_touched) *source_may_be_touched = true;
-            if (transfer_attempted) *transfer_attempted = true;
-            const auto ec = client_wrapper_->loadKvCachesForTagWithStatus(client_tag, uris, buffers, trace_info);
-            if (source_may_be_touched && ec == kv_cache_manager::ClientErrorCode::ER_OK)
-                *source_may_be_touched = false;
+            const auto ec = client_wrapper_->loadKvCachesForTagWithStatus(
+                client_tag, uris, buffers, trace_info, source_may_be_touched ? &completion : nullptr);
             if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
                 return TransferResult::TIMEOUT;
             }
@@ -1214,10 +1311,8 @@ private:
             }
         } else {
             if (source_may_be_touched) *source_may_be_touched = true;
-            if (transfer_attempted) *transfer_attempted = true;
-            auto [ec, result] = client_wrapper_->saveKvCachesForTagWithStatus(client_tag, uris, buffers, trace_info);
-            if (source_may_be_touched && ec == kv_cache_manager::ClientErrorCode::ER_OK)
-                *source_may_be_touched = false;
+            auto [ec, result] = client_wrapper_->saveKvCachesForTagWithStatus(
+                client_tag, uris, buffers, trace_info, source_may_be_touched ? &completion : nullptr);
             if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
                 return TransferResult::TIMEOUT;
             }
@@ -1610,6 +1705,10 @@ std::shared_ptr<void> KVCMStorageBackend::completionResourceOwner() const {
     return impl_->completionResourceOwner();
 }
 
+bool KVCMStorageBackend::hasUnresolvedExternalIo() const noexcept {
+    return impl_->hasUnresolvedExternalIo();
+}
+
 void KVCMStorageBackend::onQuarantined(bool is_write, StorageQuarantineReason reason, size_t block_count) noexcept {
     impl_->reportQuarantineEvent(is_write, reason, block_count);
 }
@@ -1622,7 +1721,22 @@ void KVCMStorageBackend::onQuarantineChanged(uint64_t                          g
 }
 
 bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {
-    return impl_->execute(request, response);
+    if (!impl_->protectsUnknownCompletion()) {
+        return impl_->execute(request, response);
+    }
+    auto guard = trackExternalIo();
+    if (!guard) {
+        response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
+        return false;
+    }
+    try {
+        return impl_->execute(request, response);
+    } catch (...) {
+        // The local operation scope has already retained any uncertain SDK
+        // access before this guard can let shutdown observe an idle worker.
+        response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
+        return false;
+    }
 }
 
 bool KVCMStorageBackend::captureCompletedDecode(const BatchKVCacheResource& resource,
