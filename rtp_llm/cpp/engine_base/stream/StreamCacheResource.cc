@@ -123,6 +123,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               total_blocks,
                               tierName(target_tier));
             if (resource_context_.enable_decode_publication && resource_context_.role_type == RoleType::DECODE
+                && !stream_->hasNumBeams() && stream_->numReturnSequences() == 1
+                && batch_kv_cache_resource_->batchSize() == 1
                 && stream_->completeTokenIdsPtr()->seqLength() > 0) {
                 // The final sampled token has no computed target KV. Admission
                 // must pin the completed pages before the normal free below.

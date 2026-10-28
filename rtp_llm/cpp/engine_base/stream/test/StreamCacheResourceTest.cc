@@ -284,7 +284,8 @@ protected:
                                         const std::vector<int>& input_tokens,
                                         bool                    reuse_cache,
                                         RoleType                role_type,
-                                        const KVCacheConfig&    kv_cache_config = {}) {
+                                        const KVCacheConfig&    kv_cache_config = {},
+                                        int                     return_sequences = 2) {
         cache_manager_ = std::make_shared<KVCacheManager>(
             cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr, kv_cache_config);
         ASSERT_TRUE(cache_manager_->init());
@@ -300,7 +301,7 @@ protected:
 
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
-        generate_config->num_return_sequences = 2;
+        generate_config->num_return_sequences = return_sequences;
         generate_input->input_ids =
             torch::tensor(std::vector<int32_t>(input_tokens.begin(), input_tokens.end()), torch::kInt32);
         generate_input->generate_config = generate_config;
@@ -316,7 +317,8 @@ protected:
     std::shared_ptr<StreamReadStorageBackend> prepareStorageBackendResource(bool     block_matches,
                                                                             bool     seed_host     = false,
                                                                             RoleType role_type     = RoleType::PDFUSION,
-                                                                            bool     seed_resident = false) {
+                                                                            bool     seed_resident = false,
+                                                                            int      return_sequences = 2) {
         KVCacheConfig kv_cache_config;
         kv_cache_config.enable_remote_cache   = true;
         kv_cache_config.enable_memory_cache   = seed_host;
@@ -326,7 +328,7 @@ protected:
         // replaces its BlockTreeCache with the controllable fake backend.
         manager_kv_cache_config.enable_remote_cache = false;
         prepareResourceWithCacheConfig(
-            init_config(), {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, role_type, manager_kv_cache_config);
+            init_config(), {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, role_type, manager_kv_cache_config, return_sequences);
 
         auto backend = std::make_shared<StreamReadStorageBackend>();
         if (block_matches) {
@@ -450,7 +452,7 @@ TEST_F(StreamCacheResourceTest, DecodePublicationOnlyCapturesSuccessfulReusableD
                     SCOPED_TRACE("enabled=" + std::to_string(enabled) + " reuse=" + std::to_string(request_reuse)
                                  + " role=" + std::to_string(static_cast<int>(role))
                                  + " state=" + StreamStateToString(status));
-                    auto backend = prepareStorageBackendResource(/*block_matches=*/false, /*seed_host=*/false, role);
+                    auto backend = prepareStorageBackendResource(false, false, role, false, 1);
                     auto& resource = stream_->streamCacheResource();
                     // Prevent remote lookup from supplying this fixture's pages.
                     resource.resource_context_.reuse_cache = false;
@@ -478,7 +480,7 @@ TEST_F(StreamCacheResourceTest, DecodePublicationOnlyCapturesSuccessfulReusableD
 }
 
 TEST_F(StreamCacheResourceTest, DecodePublicationAdmissionFailurePreservesNormalRelease) {
-    auto backend = prepareStorageBackendResource(/*block_matches=*/false, /*seed_host=*/false, RoleType::DECODE);
+    auto backend = prepareStorageBackendResource(false, false, RoleType::DECODE, false, 1);
     auto& resource = stream_->streamCacheResource();
     resource.resource_context_.reuse_cache = false;
     ASSERT_TRUE(resource.initKVBlock().ok());
@@ -493,6 +495,26 @@ TEST_F(StreamCacheResourceTest, DecodePublicationAdmissionFailurePreservesNormal
     EXPECT_TRUE(backend->capture_saw_blocks);
     EXPECT_EQ(resource.curBlocksNum(), 0);
     backend->shutdown();
+}
+
+TEST_F(StreamCacheResourceTest, DecodePublicationSkipsBeamAndMultipleReturnRequests) {
+    for (const bool beams : {false, true}) {
+        auto backend = prepareStorageBackendResource(false, false, RoleType::DECODE, false, 1);
+        auto& resource = stream_->streamCacheResource();
+        resource.resource_context_.reuse_cache = false;
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        resource.resource_context_.reuse_cache = true;
+        resource.resource_context_.enable_decode_publication = true;
+        auto config = stream_->generateConfig();
+        config->reuse_cache = true;
+        if (beams) { config->num_beams = 2; }
+        else { config->num_return_sequences = 2; }
+        stream_->generate_status_->status = StreamState::FINISHED;
+        stream_->releaseResource();
+        EXPECT_EQ(backend->capture_calls, 0u);
+        EXPECT_EQ(resource.curBlocksNum(), 0);
+        backend->shutdown();
+    }
 }
 
 TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
