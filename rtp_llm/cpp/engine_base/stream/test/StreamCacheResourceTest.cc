@@ -1349,11 +1349,11 @@ TEST_F(StreamCacheResourceTest, RemoteTimeoutAllocationRetryKeepsLocalLookupAndS
         auto  backend  = prepareStorageBackendResource(false, true, RoleType::PREFILL, resident);
         auto& resource = stream_->streamCacheResource();
         initCacheKeys(resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), 2);
+        const auto retry_keys = resource.kvCache().cacheKeys(0);
         backend->blockReads();
         block_tree_cache_detail::ScopeRollback release_read([&] { backend->releaseReads(); });
         backend->timeoutNextRead();
         ASSERT_TRUE(resource.initKVBlock().ok());
-        const auto retry_keys = resource.kvCache().cacheKeys(0);
         ASSERT_TRUE(backend->waitForReadsFor(1));
         auto context = std::dynamic_pointer_cast<LoadAsyncContext>(resource.allocator_load_context_);
         ASSERT_NE(context, nullptr);
