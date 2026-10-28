@@ -35,6 +35,7 @@ public:
                        std::shared_ptr<kmonitor::MetricsReporter>    metrics_reporter = nullptr,
                        std::shared_ptr<kvcm::ClientWrapper>          client_wrapper = nullptr);
     ~KVCMStorageBackend() override;
+    bool captureCompletedDecode(const BatchKVCacheResource&, size_t, bool = true) override;
 
     // Returns whether the request was handled and response is valid. Transfer
     // success, failure, and timeout are carried by response.transfer_status().
