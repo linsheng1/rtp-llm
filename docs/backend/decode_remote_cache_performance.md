@@ -67,7 +67,7 @@ safety changes must pass the final source's native and runtime gates.
 
 ## Two-turn, four-session measurement protocol
 
-The current acceptance uses one A/B comparison per storage medium, not 21
+The current wait5-20261029 acceptance uses one A/B comparison per storage medium, not 21
 alternating pairs. Each arm has four concurrent independent sessions and two
 turns, for 16 requests across A and B. Both arms use the same committed source,
 complete wheel, matching SDK, model, physical layout, pool budgets and reader
@@ -86,15 +86,26 @@ has 7680 input tokens, a 128-token follow-up suffix and at most 32 second-turn
 output tokens; reserve at least their full combined context (65536 is the
 proposed limit, subject to actual model and cache capacity checks).
 
-After all four first-turn streams reach normal EOF, issue the four second-turn
-requests immediately. Continue each session with its complete original input
+After all four first-turn streams reach normal EOF, wait five seconds from the
+latest EOF using the same client monotonic clock in both arms, then issue the
+four second-turn requests together. Record every request's actual dispatch gap;
+request preparation can add a scheduling tail beyond the five-second deadline.
+The timer does not inspect publication readiness. Continue each session with its complete original input
 and actual output token IDs plus its fixed follow-up suffix. Do not retokenize
-the generated history. Do not add an unreported commit wait only to B: record
+the generated history. Five seconds is not evidence that publication completed.
+Do not add an unreported commit wait only to B: record
 EOF-to-commit and EOF-to-next-request separately, including publications still
 pending when the follow-up arrives. Preserve the ordinary Prefill prefix cache
 and report local reuse, remote reuse and proven coverage of D-computed ranges
 separately. A and B must use independent cache groups so A cannot restore B's
-published Decode history.
+published Decode history. Earlier immediate-follow-up cohorts remain results of
+the old protocol; do not relabel them as wait5 or pool the two protocols.
+
+The frozen wait5 driver SHA256 is
+`31f5f0664d42ce0d940bd8a3699fd0f7e881967f797749b7b3e00e78c8408a6e`.
+Request/token/transport logic matches the previous driver except for two
+monotonic timestamp fields. It records protocol identity and per-session actual
+gaps and accepts only gap_seconds=5. No commit-readiness gate is added.
 
 Client TTFT starts when each streaming request is sent and ends at its first
 valid generated token, excluding empty control frames. Keep the real request

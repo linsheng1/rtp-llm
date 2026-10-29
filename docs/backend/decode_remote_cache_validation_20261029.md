@@ -1,10 +1,17 @@
 # Decode remote-cache validation, 2026-10-29
 
-Status: the finite SSD writer comparison is complete, but the final candidate's
-strict cold-versus-bypass output gate failed. This is an evidence record, not
-an unconditional runtime acceptance certificate. A minimal original-source
-counterfactual for the same new input is still pending; upstream delivery has
-not been performed.
+Status: the updated wait5-20261029 A/B cohorts completed all32 business requests.
+Both media restored Decode-added ranges in R2. DRAM's observed R2 median fell
+2.43%; SSD's increased135.47%, so this workload shows no SSD session-latency
+benefit. Native shutdown and background acknowledgements are recorded separately.
+Earlier immediate-follow-up performance cohorts remain old-protocol results. The
+separate correctness failures below remain unresolved and are not superseded
+by the timing revision. The finite SSD writer comparison is complete, while the candidate's strict
+cold-versus-bypass output gate remains FAILED. The same-input original-source
+counterfactual also has cached/bypass divergence, but does not reproduce the
+candidate's complete output sequences. This report is not unconditional
+numerical or production acceptance, and does not claim an identical D-path
+root cause. The feature remains opt-in with the original default SDK unchanged.
 
 The target is `alibaba/rtp-llm:feature/dsv41-dev-main-202161013` (verified head
 `c68265783f75b2a638fadd2c422d4c9be11a47bc`). Delivery preserves existing history
@@ -55,10 +62,13 @@ SDK794 GPU test or a full wheel. A first attempt exited36 before build actions
 because the private process lacked USER; setting the actual account's
 USER/LOGNAME fixed only that launch environment, and the failure is retained.
 
-Scope matters: DRAM model, copy and formal performance evidence remains bound
-to its complete 5daf wheel. The later SSD write implementation and feature-off
-metadata delta have their own exact-source gates; the 5daf DRAM wheel is not
-relabeled as a full ff13 DRAM model run.
+Scope matters: the earlier DRAM model, copy and immediate-follow-up performance
+evidence remains bound to its complete 5daf wheel. The new wait5 comparison uses
+a separately built and verified ff13 DRAM wheel, identified below. Historical
+5daf copy and strict-output results are not relabeled as ff13 results. Before
+wait5 timing, the ff13 DRAM native run completed eight targets and493 cases with
+zero failures, errors, skips or disabled cases; this is targeted native coverage,
+not evidence that every model rank exits normally.
 
 A standalone unchanged-SDK1025 probe issued one Save for 64 independent 32KiB
 GPU objects, committed, re-queried URIs and loaded in bounded read windows.
@@ -73,7 +83,8 @@ the compute library and SDK DSO are unchanged. Both P and D installed all 2066
 product members. Fresh CPU processes using the official
 `ensure_engine_ops_loaded()` entry point exited zero without initializing CUDA;
 all three mapped product/SDK libraries came from the new wheel directory and
-their hashes matched. Integrated model results are still pending. An initial
+their hashes matched. Integrated results are recorded below; strict output
+acceptance failed. An initial
 probe incorrectly expected engine mappings after a lazy import and exited1;
 that failure remains intact, with independent successful CPU gate records.
 A post-build whole-tree assertion failed
@@ -107,7 +118,7 @@ GPU-byte comparison, or a blanket correctness exemption for D-produced KV.
 The original SDK794 and matching SDK1025 have incompatible metadata ABI layouts;
 no mixed-SDK model experiment was performed.
 
-## Single four-session, two-turn comparison
+## Earlier immediate-follow-up four-session, two-turn comparison
 
 Each medium ran one A/B comparison: four concurrent sessions per arm, each with
 two turns. Every R1 generated exactly 32768 actual tokens. A disables only D
@@ -266,10 +277,169 @@ blocker and checked the two source hashes and executed XMLs. Code review does
 not substitute for runtime correctness. Fresh-P range restoration and cleanup
 are complete, while the strict output gate is failed as described above.
 
-Remaining: classify the new strict output failure using one minimal same-input,
-same-hardware original-source P-only local-cache counterfactual, if the existing
-warm build supports it. It will use unmodified official9115 source with the
-official no-remote-cache build configuration, no SDK/Consumer/D, then seed2048
-real saved IDs and compare cached/bypass2177 inputs. It is not a new D source or
-performance run. Do not repeat the writer pair or long32K cohort to seek a
-favorable result, and do not relabel the current strict failure as passed.
+## Same-input original-source counterfactual
+
+The one additional counterfactual used unmodified official
+`9115e23c4de26a8411835c2463f94361982a80d8`, tree
+`af2bb12ca70e48e66f600e29bd4485ae143c3857`, built locally on the same cluster
+with the official cuda13_arm configuration and remote cache compiled disabled.
+There was no SDK override, SDK member, D or Consumer. Git diff was empty both
+before and after the build. The existing cache supplied most actions; the
+actual full build exited0 in512.671s. All2050 complete-wheel members were
+verified; the1,851,552,629-byte wheel SHA256 was
+`bb307ae64779f7fbc54b0ef0d896b44c768e0c071b70a45ea79148a01980944c`.
+Its main library SHA256 was
+`5dc4ec720c4a61d70452bb62ccee44b6889728d2c15534aadd9b9840974712c5`;
+its compute library SHA256 was
+`780f9978715a028dbb8334e1f02473d0d0b887990c738f761aa2a39d706822ee`.
+These original libraries were not replaced with candidate libraries.
+
+Exactly three P-only requests ran on the same four GPUs: seed2048 saved real
+IDs/max1 with zero reuse; the same2177 follow-up with local2048/remote0 and32
+outputs; and true bypass2177 with all reuse0 and32 outputs. Both follow-ups had
+the same `27a7481f...c3880` input SHA256 recorded above. Original local-cache
+output SHA256 was
+`88791ecbd4e4427dcdf6a3a07ca52e6152220a849301534eb4b9a40ab882a8be`;
+original bypass SHA256 was
+`ca3d8b0ec646ba01c859d8c3638c7ca6807ab0d89c10ba74a75041da6490c6d7`.
+They differed first at index6. All four original P native ranks and the root
+exited0; its private CPU-weight cycle then ended normally.
+
+The original local sequence does not equal the candidate's D-derived cold
+sequence, and the original bypass does not equal the candidate's PD bypass.
+The former is P-only; the latter uses P/D execution. The compute-library
+identities also differ as recorded above. Thus cache/recompute divergence
+exists with none of this feature or remote transport, including on this exact
+input, but this is not an exact reproduction or cause attribution of the new
+D-path counterexample. No source-GPU-to-restored-GPU model-payload byte equality
+was established by these output comparisons.
+
+Per the requested scope, this source delivery retains the numerical issue and
+the observed D shutdown failures as explicit known
+limitations instead of expanding the diagnostic matrix. The raw strict gate
+remains FAILED; code approval, restored-range coverage and measured SSD write
+gains do not turn it into PASSED. Neither end-to-end model numerical correctness
+nor the precise D-specific cause is declared resolved. No further writer pair,
+long32K run or post-hoc tolerance was used to change that correctness verdict.
+The separate wait5 performance comparison below does not replace that gate.
+
+## Fixed-five-second comparison
+
+The new formal comparison is one A/B per medium, with all four R1 streams
+normally finished before a five-second monotonic deadline, identical in A/B.
+It never waits for a publication/commit condition. Actual per-session dispatch
+gaps, local/remote reuse, D-added-range coverage and all four TTFTs are recorded.
+The old immediate-follow-up samples above are retained without relabeling or
+pooling them. SIGABRT receives no further diagnostic or counterfactual runs;
+existing observed failures remain documented and normal safe drain continues.
+
+Product source stays ff13 with existing SDK1025 and Manager implementations.
+The new DRAM complete wheel was built locally from ff13 in73.617s/31 actions,
+size1,945,299,136B, SHA256
+`4353096babe61b91323dd5beaa6e318c84e8e7a7c04b7999e7360e9a8c5033a4`.
+Its main library SHA256 is
+`8468c3b63dd55d5e2b5b6d74ba4ae6211ce738349fb87494bae3bc4ee2ae101e`;
+its SDK stays eccbafb... . SSD reuses its already verified a16c2c... wheel;
+neither SDK nor unchanged complete artifacts are rebuilt or replaced.
+
+The common driver SHA256 is
+`31f5f0664d42ce0d940bd8a3699fd0f7e881967f797749b7b3e00e78c8408a6e`.
+Its request/token/transport AST is unchanged except for two monotonic timestamp
+fields. Five fake-clock boundary checks and independent inspection confirmed
+no early R2, negative sleep or hidden commit wait.
+
+Both media completed all16 requests across A/B, including four real32768-token
+R1 outputs per arm and four32-token R2 outputs. Corresponding R1 input hashes,
+complete R1 output hashes and R2 input hashes were identical across arms.
+Every R2 had40576 input tokens. A reused local7680/remote0; B reused
+local7680/remote32256, total39936, with640 input tokens left to compute. The
+remote interval extends beyond the original P boundary and covers D-added KV.
+This is the natural original-P performance case, not a fresh-P assertion.
+The four R2 output hashes all differed between A and B on each medium. The
+observed range restoration therefore does not pass strict output equality or
+override the separately documented numerical failures.
+
+| Medium / arm | R2 TTFT ms, session0..3 | Median ms | Range ms | Actual monotonic gap seconds, min-max |
+|---|---|---|---|---|
+| DRAM A | 591.675, 289.325, 742.617, 441.704 | 516.689 | 289.325-742.617 | 5.009423-5.010549 |
+| DRAM B | 434.951, 298.730, 716.015, 573.357 | 504.154 | 298.730-716.015 | 5.009246-5.010345 |
+| SSD A | 200.539, 348.553, 495.679, 646.761 | 422.116 | 200.539-646.761 | 5.008183-5.009345 |
+| SSD B | 821.400, 1507.887, 1166.518, 461.965 | 993.959 | 461.965-1507.887 | 5.009298-5.010419 |
+
+DRAM's median decreased2.4260% in this one comparison. SSD's increased135.4709%
+(2.35471 times A), despite restored D ranges and the separately measured write
+improvement. The SSD read path remains a performance limitation. No P95,
+statistical significance, repeatability of the session effect or cross-cluster
+media attribution is claimed. Client wall time from first R1 dispatch to last
+R2 EOF, including the fixed five-second wait, was DRAM A276.530900s/B276.612963s
+and SSD A288.502551s/B290.659155s. Thus neither medium showed a lower complete
+business wall time in this sample. Background publication acknowledgements and
+native drain are outside that client EOF measurement and must not be treated as
+zero cost.
+
+The DRAM B ledger binds exactly four R1 publications to computed40447,
+published39936, tail511,63 new locations and33,466,368 payload bytes each.
+Their D-local EOS-queued-to-commit durations were
+2568.094/2529.406/2587.175/2492.950ms. Time before the first SDK call was
+2131.648/2120.940/2221.990/2099.026ms; the four-call SDK envelope was
+49.650/52.126/29.101/44.638ms; last SDK completion to commit was
+386.796/356.340/336.084/349.286ms. This again identifies waiting outside the
+payload calls as the dominant measured DRAM publication cost. All four commits
+preceded R2; there was no extra readiness wait. R2 adds only31 computed KV
+positions, so it need not allocate a new checkpoint. Requiring eight new D
+commits would be an invalid acceptance condition.
+
+SSD B logged four background transaction write durations of
+1013.007/1035.419/1132.556/1182.121ms. This timer begins inside
+`writeTransaction` before the transaction work and ends after FinishWrite;
+it is not the entire EOS-to-commit interval or a queue-wait measurement. Its
+16 outer SDK calls each carried8,366,592B, total133,865,472B, all error0.
+The Manager ledger contained32 completed transactions with successful
+FinishWrite responses, including prewarm writes: A P10/D8, B P10/D4. URI
+allocation sizes in that ledger are not a substitute for actual SDK payload
+bytes. In particular, feature-off legacy D writes are not assumed to be zero.
+
+The SSD backing FD was checked on the same Provider PID/start identity:
+FD9, flags0600002, inode103829132; the target system's O_DIRECT constant is65536.
+The process-I/O sampler began3.319647s after B's last R2 EOF. It cannot establish
+R2 physical SSD read bytes, throughput or a cold-media comparison. The Provider
+uses its configured remote host pools/cache; this run did not flush shared
+caches or prove all restores reached the SSD device. File/FD identity and remote
+range restoration are kept distinct from physical-media throughput evidence.
+
+The raw per-session values and hashes are retained in the companion
+[wait5 result summary](decode_remote_cache_wait5_20261029.json).
+
+The final native wait records remain separate from successful request EOFs:
+
+| Medium / arm | P native exits | D native exits |
+|---|---|---|
+| DRAM A | Four exit0 | Three exit0; one SIGABRT |
+| DRAM B | Four exit0 | Four exit0 |
+| SSD A | Four exit0 | One exit0; one SIGABRT/status134 |
+| SSD B | Four exit0 | One exit0; one SIGABRT/status134 |
+
+Model roots and Consumers returned0. SSD's D supervisor correctly records
+`FAILED_NATIVE_LIFECYCLE_AFTER_PROTOCOL`; root0 does not override a failed rank.
+The tested model GPU process lists were empty after model cleanup. Per the
+requested scope, no further SIGABRT diagnosis or reproduction was added. These
+records do not establish unconditional shutdown acceptance.
+
+Resource closeout is complete. The DRAM run's own Provider/Meta and CPU-weight
+keepers exited, while the existing shared Manager stayed healthy and was not
+stopped. On SSD, the idle gate found32 started sessions,32 successful finishes,
+no unfinished session and no established Manager client. Its private Manager
+and Meta exited0; Provider returned143 during the requested normal stop. That
+exit is recorded as143, not silently rewritten as0. The sampler ended, both
+CPU-weight cycles exited, and all four SSD nodes had no owned test process,
+test listener or GPU compute application in the final samples. Existing SSD
+data and raw logs were preserved; the in-memory URI index was not claimed to
+survive Manager shutdown. Other users' processes and services were not stopped.
+
+This delivery contains reviewed opt-in source and its evidence. Matching-SDK
+native tests, the selected feature-off checks, real D-range restoration and the
+bounded SSD writer benefit passed their stated scopes. Strict model output
+equality, all-rank normal shutdown, SSD session-latency improvement and
+production D-origin metrics are not declared passed. The source merge into the
+development feature branch is not production enablement or removal of those
+known limitations.
