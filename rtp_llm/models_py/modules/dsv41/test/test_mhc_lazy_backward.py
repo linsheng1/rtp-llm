@@ -342,8 +342,12 @@ class MHCLazyBackwardTest(unittest.TestCase):
                     _mhc_pre_norm_fn_fwd_mul=Mock(return_value=multiply),
                     _mhc_pre_norm_fn_fwd_norm=Mock(return_value=normalize),
                 )
-                with patch.object(op, "_tilelang_num_splits", return_value=splits):
-                    actual = op.MHCPreNormFn.forward(None, x, fn, 1e-6, False, 128)
+                with patch.object(
+                    op,
+                    "_tilelang_num_splits",
+                    side_effect=AssertionError("T-dependent split"),
+                ):
+                    actual = op.MHCPreNormFn.forward(None, x, fn, 1e-6, False, splits)
                 flat = x.flatten(-2).float()
                 expected = (flat @ fn.T) * torch.rsqrt(
                     flat.square().mean(-1, keepdim=True) + 1e-6
@@ -355,6 +359,14 @@ class MHCLazyBackwardTest(unittest.TestCase):
                 op._mhc_pre_norm_fn_fwd_norm.assert_called_once_with(
                     24, 1, hidden, 1e-6, splits
                 )
+
+    def test_caller_split_rejects_partial_tile_geometry(self):
+        op = self.load_norm()
+        self.assertEqual(op._validated_n_splits(16, 20480), 16)
+        # 128 divides 20480, but K/128=160 violates the kernel's 256-wide tiles.
+        for hint in (0, -1, 3, 128):
+            with self.subTest(hint=hint):
+                self.assertEqual(op._validated_n_splits(hint, 20480), 1)
 
     def test_fused_tilelang_backend_stays_single_split(self):
         mul = Mock()

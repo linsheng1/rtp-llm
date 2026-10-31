@@ -18,6 +18,18 @@ _TILELANG_TOKEN_BLOCK = 32
 _TILELANG_SPLIT_CAP = 20
 
 
+def _validated_n_splits(n_splits: int, mhc_hidden_size: int) -> int:
+    """Keep the caller's fixed split when each K slice fits the 256-wide kernel."""
+    splits = int(n_splits)
+    if (
+        splits < 1
+        or mhc_hidden_size <= 0
+        or mhc_hidden_size % (splits * _TILELANG_HIDDEN_BLOCK)
+    ):
+        return 1
+    return splits
+
+
 def _tilelang_split_plan(num_tokens: int, mhc_hidden_size: int, num_sms: int) -> int:
     """Bound split-K to one SM wave and whole 256-column/32-token tiles."""
     if (
@@ -138,9 +150,9 @@ class MHCPreNormFn(torch.autograd.Function):
         assert x.shape[-1] * x.shape[-2] == mhc_hidden_size
         outer_shape = x.shape[:-2]
 
-        # The reducer consumes split-major partials; allocate only the chosen
-        # launch's scratch, independent of the legacy caller hint.
-        n_splits = _tilelang_num_splits(x, mhc_hidden_size)
+        # Preserve the caller's fixed reduction tree. Recomputing a split from
+        # the current token count changes the same row's FP32/BF16 result.
+        n_splits = _validated_n_splits(n_splits, mhc_hidden_size)
         out_mul_splitted = torch.empty(
             n_splits,
             *outer_shape,

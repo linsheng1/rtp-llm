@@ -96,10 +96,9 @@ class MegaCSARuntime:
 
     @staticmethod
     def num_hc_splits(m: int, device: torch.device, dim: int = DIM) -> int:
-        num_sms = torch.cuda.get_device_properties(device).multi_processor_count
-        grid_size = max((m + 63) // 64, 1)
-        num_block_k = (HC * dim + 63) // 64
-        return max(min(max(num_sms, 1) // grid_size, num_block_k // 4), 1)
+        from rtp_llm.models_py.kernels.cuda.mhc_split import mhc_prenorm_num_splits
+
+        return mhc_prenorm_num_splits(HC * dim, tokens=m, device=device)
 
     def layer_workspace(
         self,

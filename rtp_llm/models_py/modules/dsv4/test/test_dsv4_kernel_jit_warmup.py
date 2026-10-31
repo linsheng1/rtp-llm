@@ -771,7 +771,25 @@ class Dsv4KernelJitWarmupTest(unittest.TestCase):
         }
         self.assertIn(96, block_ms)
 
-    def test_mhc_prenorm_warmup_specs_cover_reachable_num_splits(self):
+    def test_mhc_prenorm_warmup_specs_pin_fixed_split(self):
+        with mock.patch.dict(
+            os.environ, {"DSV4_MHC_SPLIT_MODE": "fixed", "DSV4_MHC_NUM_SPLITS": ""}
+        ):
+            for sms, k, expected in ((148, 16384, 49), (152, 20480, 50)):
+                self.assertEqual(
+                    _generate_mhc_prenorm_warmup_specs(
+                        max_m=200000, k_value=k, num_sms=sms
+                    ),
+                    ((expected, 1),),
+                )
+
+    def test_mhc_prenorm_warmup_specs_cover_reachable_legacy_splits(self):
+        with mock.patch.dict(
+            os.environ, {"DSV4_MHC_SPLIT_MODE": "token", "DSV4_MHC_NUM_SPLITS": ""}
+        ):
+            self._check_reachable_legacy_mhc_splits()
+
+    def _check_reachable_legacy_mhc_splits(self):
         specs = _generate_mhc_prenorm_warmup_specs(
             max_m=200000,
             k_value=16384,

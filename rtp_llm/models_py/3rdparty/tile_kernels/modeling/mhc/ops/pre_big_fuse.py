@@ -1,4 +1,3 @@
-import functools
 import os
 
 import torch
@@ -11,14 +10,14 @@ def _ceil_div(x: int, y: int) -> int:
     return (x + y - 1) // y
 
 
-@functools.cache
-def _compute_num_split(block_k: int, k: int, grid_size: int) -> int:
-    device_props = torch.cuda.get_device_properties(0)
-    n_sms = device_props.multi_processor_count
-    split_k = n_sms // max(grid_size, 1)
-    num_block_k = _ceil_div(k, block_k)
-    split_k = min(split_k, num_block_k // 4)
-    return max(split_k, 1)
+def _compute_num_split(
+    block_k: int, k: int, grid_size: int, device: torch.device | None = None
+) -> int:
+    from rtp_llm.models_py.kernels.cuda.mhc_split import mhc_prenorm_num_splits
+
+    return mhc_prenorm_num_splits(
+        k, block_k=block_k, grid_size=grid_size, device=device
+    )
 
 
 def _requested_backend() -> str:
@@ -113,7 +112,9 @@ def mhc_pre_big_fuse(
     block_k = 64
     block_m = 64
     n_splits = (
-        _compute_num_split(block_k, mhc_hidden_size, _ceil_div(num_tokens, block_m))
+        _compute_num_split(
+            block_k, mhc_hidden_size, _ceil_div(num_tokens, block_m), residual.device
+        )
         if backend in ("deepgemm", "tilelang_splitk")
         else 1
     )

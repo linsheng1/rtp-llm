@@ -1692,16 +1692,11 @@ def _compute_mhc_prenorm_num_split(
     k_value: int,
     num_sms: int,
 ) -> int:
-    block_m = 64
-    block_k = 64
-    grid_size = _ceil_div(max(int(m_value), 1), block_m)
-    split_k = max(int(num_sms), 1) // max(grid_size, 1)
-    num_block_k = _ceil_div(int(k_value), block_k)
-    split_k = min(split_k, num_block_k // 4)
-    return max(split_k, 1)
+    from rtp_llm.models_py.kernels.cuda.mhc_split import mhc_prenorm_num_splits
+
+    return mhc_prenorm_num_splits(k_value, tokens=m_value, num_sms=num_sms)
 
 
-@lru_cache(maxsize=1024)
 def _generate_mhc_prenorm_warmup_specs(
     *,
     max_m: int,
@@ -1710,10 +1705,9 @@ def _generate_mhc_prenorm_warmup_specs(
 ) -> tuple[tuple[int, int], ...]:
     """Return ``(num_splits, representative_m)`` pairs for mHC prenorm GEMM.
 
-    DeepGEMM compiles ``num_splits`` for this kernel, not M itself.  RTP's
-    TileKernels wrapper derives ``num_splits`` from ``ceil(num_tokens / 64)``;
-    choose the first M that reaches each split value up to the rank-local
-    prefill token bound.
+    DeepGEMM specializes on ``num_splits``, not M. The default fixed policy
+    yields one representative; the explicit legacy token policy retains the
+    complete reachable set. Do not cache across policy environment changes.
     """
 
     max_m = max(int(max_m), 0)
