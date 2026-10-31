@@ -434,6 +434,9 @@ public:
         }
         RtpLLMRemoteCacheMatchMetricsCollector collector;
         const char*                            lookup_outcome = "failed";
+        size_t                                 matched_keys = request.local_matched_blocks_num;
+        size_t                                 returned_keys = 0;
+        const auto                             trace_id = nextTraceId("match", match_trace_sequence_);
         const auto                            start = Clock::now();
         block_tree_cache_detail::ScopeRollback report([&] {
             collector.remote_match_time_us = elapsedTimeUs(start);
@@ -443,9 +446,12 @@ public:
                 result.stage   = "lookup";
                 result.outcome = lookup_outcome;
                 reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(result);
+                RTP_LLM_LOG_INFO("DTOP_GPU lookup trace=%s outcome=%s requested_keys=%zu local_keys=%zu "
+                                 "returned_keys=%zu matched_keys=%zu backend_type=%d",
+                                 trace_id.c_str(), lookup_outcome, keys.size(), request.local_matched_blocks_num,
+                                 returned_keys, matched_keys, kv_cache_config_.kvcm_read_backend_type);
             }
         });
-        const auto trace_id       = nextTraceId("match", match_trace_sequence_);
         auto query_type = static_cast<kv_cache_manager::QueryType>(default_query_type_);
         if (has_swa_) {
             // Fetch the FULL prefix as well as SWA locations, then apply each
@@ -473,6 +479,7 @@ public:
         if (!success) {
             return {request.local_matched_blocks_num, nullptr};
         }
+        returned_keys = locations.size();
         if (decode_publication_enabled_) {
             const bool found_any =
                 std::any_of(locations.begin(), locations.end(), [](const auto& row) { return !row.empty(); });
@@ -490,7 +497,8 @@ public:
                 collector.remote_valid_hit_ratio =
                     static_cast<double>(request.local_matched_blocks_num + meta->locations.size()) / keys.size();
             }
-            return {request.local_matched_blocks_num + meta->locations.size(), std::move(meta)};
+            matched_keys = request.local_matched_blocks_num + meta->locations.size();
+            return {matched_keys, std::move(meta)};
         }
         kvcm::LocationsView locations_view;
         if (!group_policy_->filterNeedLoadLocations(locations, locations_view, /*block_mask=*/0)) {
@@ -509,7 +517,8 @@ public:
             collector.remote_valid_hit_ratio =
                 static_cast<double>(request.local_matched_blocks_num + locations_view.size()) / keys.size();
         }
-        return {request.local_matched_blocks_num + locations_view.size(), std::move(meta)};
+        matched_keys = request.local_matched_blocks_num + locations_view.size();
+        return {matched_keys, std::move(meta)};
     }
 
     void read(const StorageRequest& request, const std::shared_ptr<StorageBackendMatchMeta>& match_meta) {
@@ -1093,6 +1102,9 @@ public:
             completion_resources_->completeOperation(operation, unknown);
             if (unknown) {
                 completion_stopped_.store(true);
+                RTP_LLM_LOG_ERROR("DTOP_GPU completion_stopped=1 reason=payload_completion_unknown tp_rank=%ld "
+                                  "payload_regions=%zu",
+                                  parallelism_config_.tp_rank, operation->tags.size());
                 if (completion_accounting_) completion_accounting_->stopAdmission();
             }
         });
@@ -1165,6 +1177,10 @@ public:
         if (decode_publication_enabled_) {
             if (task_count > 0) {
                 completion_stopped_.store(true);
+                RTP_LLM_LOG_ERROR("DTOP_GPU completion_stopped=1 reason=quarantine tp_rank=%ld generation=%lu "
+                                  "task_count=%zu block_count=%zu",
+                                  parallelism_config_.tp_rank, static_cast<unsigned long>(generation),
+                                  task_count, block_count);
                 if (completion_accounting_) completion_accounting_->stopAdmission();
             }
             return;
@@ -1376,9 +1392,10 @@ private:
 
         const std::string model_name = runtime_config_.model_name;
         const std::string dtype      = getDataTypeStr(cache_config_.dtype);
+        const std::string biz_name = autil::EnvUtil::getEnv("BIZ_NAME", std::string(""));
+        const std::string checkpoint_path = autil::EnvUtil::getEnv("CHECKPOINT_PATH", std::string(""));
         std::string       extra      = kv_cache_config_.kvcm_model_extra_info;
-        extra += '/' + autil::EnvUtil::getEnv("BIZ_NAME", std::string("")) + '/'
-                 + std::to_string(hashString(autil::EnvUtil::getEnv("CHECKPOINT_PATH", std::string(""))));
+        extra += '/' + biz_name + '/' + std::to_string(hashString(checkpoint_path));
         if (decode_publication_enabled_) {
             extra += "/decode-publish-v2/cp=" + std::to_string(target_prefill_cp_)
                      + "/shards=" + std::to_string(target_physical_shards_)
@@ -1405,7 +1422,8 @@ private:
         if (!instance_id.empty()) {
             instance_id += '_';
         }
-        instance_id += std::to_string(hashString(identity.str()));
+        const std::string canonical_identity = identity.str();
+        instance_id += std::to_string(hashString(canonical_identity));
 
         if (decode_publication_enabled_) {
             RTP_LLM_LOG_INFO("DTOP_GPU identity instance=%s tp=%ld dp=%ld base_tokens=%zu",
@@ -1413,6 +1431,10 @@ private:
                              static_cast<long>(wire_tp),
                              static_cast<long>(wire_dp),
                              wire_block);
+            RTP_LLM_LOG_INFO("DTOP_GPU canonical_identity instance=%s cache_key_hash_seed=%ld BIZ_NAME=[%s] "
+                             "CHECKPOINT_PATH=[%s] identity=[%s]",
+                             instance_id.c_str(), static_cast<long>(cache_config_.cache_key_hash_seed),
+                             biz_name.c_str(), checkpoint_path.c_str(), canonical_identity.c_str());
             for (const auto& group : cache_config_.topology().groups()) {
                 std::ostringstream layers;
                 for (const int layer : cache_config_.layerIdsForGroup(group.tag)) {
