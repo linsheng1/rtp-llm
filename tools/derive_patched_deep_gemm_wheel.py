@@ -217,6 +217,22 @@ def derive(original, vendor_provenance, vendor_sha, patch_dir, output, source_co
     require(vendor_modified == {"site-packages/" + EPILOGUE, "site-packages/" + SIDE},
             "unexpected vendor modification outside numerical headers")
     before = dict(files)
+    # The tested Bazel vendor retains exactly one patch-0002 backup. Recreate
+    # it from the original archive bytes, rather than ignoring extra members
+    # or trusting unverified bytes from an installed directory.
+    vendor_package = {n[len("site-packages/"):] for n in vendor["destination_members"]
+                      if n.startswith("site-packages/deep_gemm/")}
+    missing = vendor_package - {n for n in files if n.startswith("deep_gemm/")}
+    added = {}
+    if missing:
+        backup = NORMAL + ".orig"
+        require(missing == {backup}, "tested vendor member set differs: unknown addition")
+        fingerprint = pin(before[NORMAL])
+        require(vendor["source_members"]["site-packages/" + backup]
+                == vendor["destination_members"]["site-packages/" + backup]
+                == fingerprint, "patch backup fingerprint differs from original header")
+        files[backup] = before[NORMAL]
+        added[backup] = dict(source_original_member=NORMAL, **fingerprint)
     patch_receipts = []
     for index, (name, digest, targets) in enumerate(patches):
         patch_data = (patch_dir / name).read_bytes()
@@ -242,7 +258,7 @@ def derive(original, vendor_provenance, vendor_sha, patch_dir, output, source_co
             require(pin(data) == vendor["destination_members"]["site-packages/" + name],
                     "tested vendor code/data differs: " + name)
     allowed = set().union(*(p[2] for p in patches))
-    modified = sorted(n for n in files if files[n] != before[n])
+    modified = sorted(n for n in before if files[n] != before[n])
     require(set(modified) <= allowed, "unexpected original member modification")
     binaries = {n: pin(data) for n, data in files.items()
                 if re.search(r"\.(?:so(?:\.[^/]+)?|a|cubin)$", n)}
@@ -252,7 +268,8 @@ def derive(original, vendor_provenance, vendor_sha, patch_dir, output, source_co
                       source_commit_binding="explicit caller-supplied product identity",
                       original_wheel=pin(original_data), original_version=ORIGINAL_VERSION,
                       derived_version=VERSION, native_rebuilt=False, binaries=binaries, headers=headers,
-                      original_headers={n: pin(before[n]) for n in headers},
+                      original_headers={n: pin(before[n]) for n in headers if n in before},
+                      added_members_from_original=added,
                       patches=patch_receipts, modified_original_members=modified,
                       vendor_provenance_SHA256=vendor_sha, vendor_source_commit=BASE_COMMIT,
                       tool_SHA256=pin(Path(__file__).read_bytes())["SHA256"],

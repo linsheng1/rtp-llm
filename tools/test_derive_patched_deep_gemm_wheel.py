@@ -116,6 +116,30 @@ class DeriveTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "preimage"):
             dg.patched(data[dg.NORMAL] + b"unknown tail\n", hunks, dg.pin(data[dg.NORMAL])["SHA256"])
 
+    def test_recreates_only_exact_known_vendor_backup_from_original_header(self):
+        backup = dg.NORMAL + ".orig"
+        key = "site-packages/" + backup
+        fingerprint = dg.pin(self.data[dg.NORMAL])
+        self.vendor["source_members"][key] = fingerprint
+        self.vendor["destination_members"][key] = fingerprint
+        result = self.run_derive()
+        contents = dg.read_wheel(self.root / "out" / result["wheel"]["filename"])
+        self.assertEqual(contents[backup], self.data[dg.NORMAL])
+        self.assertEqual(result["added_members_from_original"][backup],
+                         dict(source_original_member=dg.NORMAL, **fingerprint))
+        self.assertEqual(contents[dg.NATIVE], self.data[dg.NATIVE])
+        self.vendor["source_members"][key] = dg.pin(b"unknown backup")
+        self.vendor["destination_members"][key] = dg.pin(b"unknown backup")
+        with self.assertRaisesRegex(ValueError, "backup fingerprint"):
+            self.run_derive("bad-backup")
+        del self.vendor["source_members"][key]
+        del self.vendor["destination_members"][key]
+        key = "site-packages/deep_gemm/unknown.orig"
+        self.vendor["source_members"][key] = fingerprint
+        self.vendor["destination_members"][key] = fingerprint
+        with self.assertRaisesRegex(ValueError, "member set"):
+            self.run_derive("unknown-backup")
+
     def test_rejects_broken_or_ambiguous_patch_preimage_even_with_valid_record(self):
         for replacement in [b"unexpected\n", self.data[dg.EPILOGUE] * 2]:
             with self.subTest(replacement=replacement):
