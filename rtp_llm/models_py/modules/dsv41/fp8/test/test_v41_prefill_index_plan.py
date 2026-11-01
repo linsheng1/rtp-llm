@@ -1,4 +1,4 @@
-"""Independent stable-sort oracle and opt-in CUDA coverage for index plans."""
+"""Independent fixed decode-slot oracle and opt-in CUDA index-plan coverage."""
 
 import importlib.util
 import sys
@@ -8,7 +8,6 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
-import torch.nn.functional as F
 
 # This leaf module can be tested without initializing the model/native engine.
 _spec = importlib.util.spec_from_file_location(
@@ -19,27 +18,40 @@ fused = importlib.util.module_from_spec(_spec)
 sys.modules[_spec.name] = fused
 _spec.loader.exec_module(fused)
 
+def int32(value):
+    return (value + 2**31) % 2**32 - 2**31
+
+
+def decode_slot_reference_row(selected, position, offset, count, start, window):
+    """Independent D logical slots plus the existing P canonical GLOBAL policy."""
+    result = [-1] * window
+    first = max(position - window + 1, 0)
+    for slot in range(window):
+        absolute = first + slot
+        if start <= absolute <= position:
+            result[slot] = int32(offset + count + absolute - start)
+    global_values = [int32(offset + value) if value >= 0 else -1
+                     for value in sorted(selected)]
+    result += [value for value in global_values if value >= 0]
+    result += [value for value in global_values if value < 0]
+    extent = window + len(selected)
+    result += [-1] * (-extent % 64)
+    return result, extent
+
 
 def reference_plan(
     selected, positions, offset, global_count, swa_start, window_size=128
 ):
-    """Canonical selected IDs followed by the original stable validity partition."""
-    selected = selected.sort(dim=-1).values
-    swpos = (
-        positions[:, None]
-        - window_size
-        + 1
-        + torch.arange(window_size, device=selected.device)[None]
-    )
-    swidx = torch.where(
-        swpos >= swa_start, offset + global_count + swpos - swa_start, -1
-    )
-    global_idx = torch.where(selected >= 0, offset + selected, -1)
-    indices = torch.cat((global_idx, swidx), -1).int()
-    indices = indices.gather(1, torch.argsort(indices < 0, dim=-1, stable=True))
-    lengths = (indices >= 0).sum(-1).int()
-    if indices.shape[1] % 64:
-        indices = F.pad(indices, (0, 64 - indices.shape[1] % 64), value=-1)
+    """Test-only host oracle; never used by production eager or JIT code."""
+    rows, k = selected.shape
+    padded = ((window_size + k + 63) // 64) * 64
+    metadata = [value.reshape(-1).tolist() if isinstance(value, torch.Tensor)
+                else [value] * rows for value in (offset, global_count, swa_start)]
+    expected = [decode_slot_reference_row(values, position,
+                *(value[row] for value in metadata), window_size)[0]
+                for row, (values, position) in enumerate(zip(selected.tolist(), positions.tolist()))]
+    indices = torch.tensor(expected, device=selected.device, dtype=torch.int32).reshape(rows, padded)
+    lengths = torch.full((rows,), window_size + k, device=selected.device, dtype=torch.int32)
     return indices, lengths
 
 
@@ -82,9 +94,9 @@ class IndexPlanCPU(unittest.TestCase):
         selected = torch.tensor([[7, -3, 2, 7, -1], [-1, -1, -1, -1, -1]])
         actual, lengths = reference_plan(selected, torch.tensor([4, -1]), 10, 20, 3, 4)
         self.assertEqual(actual.shape, (2, 64))
-        self.assertEqual(actual[0, :5].tolist(), [12, 17, 17, 30, 31])
-        self.assertEqual(lengths.tolist(), [5, 0])
-        self.assertTrue((actual[0, 5:] == -1).all())
+        self.assertEqual(actual[0, :9].tolist(), [-1, -1, 30, 31, 12, 17, 17, -1, -1])
+        self.assertEqual(lengths.tolist(), [9, 9])
+        self.assertTrue((actual[0, 9:] == -1).all())
         self.assertTrue((actual[1] == -1).all())
 
     def test_oracle_matches_scalar_filter_with_strides_and_empty_rows(self):
@@ -92,21 +104,32 @@ class IndexPlanCPU(unittest.TestCase):
             selected, positions = make_inputs(rows, 17, strided=True)
             got, lengths = reference_plan(selected, positions, 7, 4096, 29, 7)
             for row, values in enumerate(selected.tolist()):
-                expected = [7 + x for x in sorted(values) if x >= 0]
-                expected += [
-                    7 + 4096 + p - 29
-                    for p in range(int(positions[row]) - 6, int(positions[row]) + 1)
-                    if p >= 29
-                ]
-                self.assertEqual(lengths[row], len(expected))
+                first = max(int(positions[row]) - 6, 0)
+                expected = [7 + 4096 + p - 29 if 29 <= p <= int(positions[row]) else -1
+                            for p in range(first, first + 7)]
+                expected += [7 + x for x in sorted(values) if x >= 0]
+                expected += [-1] * sum(x < 0 for x in values)
+                self.assertEqual(lengths[row], 24)
                 self.assertEqual(got[row, : len(expected)].tolist(), expected)
                 self.assertTrue((got[row, len(expected) :] == -1).all())
 
     def test_oracle_cast_precedes_partition_even_at_integer_wrap(self):
         selected = torch.tensor([[2**31 - 1, -9, 3]], dtype=torch.int64)
         got, lengths = reference_plan(selected, torch.tensor([2**31]), 1, 7, 0, 1)
-        self.assertEqual(lengths.tolist(), [1])
-        self.assertEqual(got[0, :4].tolist(), [4, -1, -(2**31), -(2**31) + 8])
+        self.assertEqual(lengths.tolist(), [4])
+        self.assertEqual(got[0, :4].tolist(), [-(2**31) + 8, 4, -1, -(2**31)])
+
+    def test_eager_matches_decode_slot_oracle_for_boundaries_and_ragged_metadata(self):
+        positions = torch.tensor([0, 63, 64, 126, 127, 128], dtype=torch.int32)
+        for valid in (0, 1, 511, 512):
+            row = list(reversed(range(valid))) + [-3] * (512 - valid)
+            selected = torch.tensor([row] * 6, dtype=torch.int64)
+            for metadata in ((11, 4096, 0),
+                             tuple(torch.tensor(v)[:, None] for v in
+                                   ([7, 100, 200, 300, 400, 500], [4096] * 6, [1, 0, 63, 125, 126, 127]))):
+                actual = fused.build_index_plan_eager(selected, positions, *metadata)
+                for got, expected in zip(actual, reference_plan(selected, positions, *metadata)):
+                    torch.testing.assert_close(got, expected, rtol=0, atol=0)
 
     def test_cpu_and_tensor_metadata_fall_back_without_cuda_queries(self):
         selected, positions = make_inputs(32)
@@ -259,7 +282,7 @@ class IndexPlanCUDA(unittest.TestCase):
                     scalar = torch.tensor([[3]], device="cuda", dtype=dtype)
                     self.check(x, p, scalar.expand(rows, 1), size, start, 7)
 
-    def test_int32_positions_wrap_before_arange_promotion(self):
+    def test_int32_positions_promote_before_decode_slot_arithmetic(self):
         x, _ = make_inputs(5, 17, device="cuda")
         p = torch.tensor(
             [-(2**31), -(2**31) + 3, -3, 0, 2**31 - 1],

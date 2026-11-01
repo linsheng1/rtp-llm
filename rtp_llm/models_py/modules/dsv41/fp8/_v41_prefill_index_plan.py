@@ -1,4 +1,4 @@
-"""FlashMLA index plans with canonical global-KV order and no host reads.
+"""FlashMLA index plans with fixed SWA slots before canonical global KV.
 
 The caller still owns per-forward plan caching and CED/layout invalidation.
 Unsupported metadata returns None before allocation/launch; execution errors
@@ -64,9 +64,7 @@ if triton is not None:
         )
         # Atomic top-k emission order must not change FlashMLA's reduction order.
         picked = tl.sort(picked, descending=False)
-        picked = tl.gather(picked, tl.minimum(column, SELECTED_BLOCK - 1), axis=0).to(
-            tl.int64
-        )
+        picked = picked.to(tl.int64)
         position = tl.load(positions + row * POSITION_STRIDE)
         if TENSOR_META:
             offset = tl.load(OFFSET + row * OFFSET_STRIDE).to(tl.int64)
@@ -76,32 +74,60 @@ if triton is not None:
             offset = OFFSET.to(tl.int64)
             size = GLOBAL_COUNT.to(tl.int64)
             start = SWA_START.to(tl.int64)
-        # Eager subtract/add happens before promotion by the int64 arange.
-        swbase = (position - WINDOW + 1).to(position.dtype).to(tl.int64)
-        swpos = swbase + (column - K).to(tl.int64)
-        global_index = tl.where(picked >= 0, offset + picked, -1)
-        swa_index = tl.where(swpos >= start, offset + size + swpos - start, -1)
-        # The eager path casts to int32 BEFORE sorting validity and summing.
-        value = tl.where(column < K, global_index, swa_index).to(tl.int32)
-        active = column < K + WINDOW
+        # Match decode's fixed logical slot j even when the workspace omits
+        # earlier history. Invalid SWA slots must not shift later columns.
+        swpos = tl.maximum(position.to(tl.int64) - WINDOW + 1, 0) + column.to(tl.int64)
+        swa_index = tl.where(
+            (swpos >= start) & (swpos <= position), offset + size + swpos - start, -1
+        ).to(tl.int32)
+        tl.store(indices + row * PADDED + column, swa_index, column < WINDOW)
+        # Preserve the existing global sort, duplicate and int32-cast semantics,
+        # but partition invalids only inside its own fixed K-column region.
+        value = tl.where(picked >= 0, offset + picked, -1).to(tl.int32)
+        active = selected_column < K
         valid = active & (value >= 0)
         prefix = tl.cumsum(valid.to(tl.int32), axis=0)
         count = tl.sum(valid.to(tl.int32), axis=0)
-        # Sorted global IDs precede chronological SWA IDs. Invalid
-        # columns fill [count,K+WINDOW), normally with -1. Preserve wrapped
-        # negative int32 payloads as well, matching eager .int()+stable sort.
-        destination = tl.where(valid, prefix - 1, count + column - prefix)
-        tl.store(indices + row * PADDED + destination, value, active)
-        # Logical invalids and alignment padding occupy disjoint addresses.
+        destination = tl.where(valid, prefix - 1, count + selected_column - prefix)
+        tl.store(indices + row * PADDED + WINDOW + destination, value, active)
+        # FlashMLA scans an extent, including holes, rather than a valid count.
         tl.store(
             indices + row * PADDED + column,
             -1,
             (column >= K + WINDOW) & (column < PADDED),
         )
-        tl.store(lengths + row, count)
+        tl.store(lengths + row, WINDOW + K)
 
 else:
     _prefill_index_plan_kernel = None
+
+
+def build_index_plan_eager(
+    selected, positions, offset, global_count, swa_start, window_size=128
+):
+    """Build the same fixed-slot layout for unsupported fused metadata/devices."""
+    position = positions[:, None].long()
+    swpos = (position - window_size + 1).clamp_min(0) + torch.arange(
+        window_size, device=selected.device
+    )[None]
+    swidx = torch.where(
+        (swpos >= swa_start) & (swpos <= position),
+        offset + global_count + swpos - swa_start,
+        -1,
+    ).int()
+    ordered = selected.sort(dim=-1).values
+    global_idx = torch.where(ordered >= 0, offset + ordered, -1).int()
+    global_idx = global_idx.gather(
+        1, torch.argsort(global_idx < 0, dim=-1, stable=True)
+    )
+    indices = torch.cat((swidx, global_idx), -1)
+    extent = window_size + selected.shape[1]
+    lengths = torch.full(
+        (selected.shape[0],), extent, dtype=torch.int32, device=selected.device
+    )
+    if extent % 64:
+        indices = torch.nn.functional.pad(indices, (0, 64 - extent % 64), value=-1)
+    return indices, lengths
 
 
 def is_supported(selected, positions, offset, global_count, swa_start, window_size):
@@ -159,8 +185,10 @@ def try_build_index_plan(
 
     Metadata follows _prefill_chunk_meta's scalar or per-row [M,1] contract.
     Global selected IDs are sorted; duplicates are retained. Negative selected
-    entries are normalized to -1 before offsetting. SWA
-    validity uses exactly the eager lower bound, with no extra upper clamp.
+    entries are normalized to -1 before offsetting. SWA occupies [0,window)
+    with decode's max(position-window+1,0)+j slots, masking missing/future rows
+    in place. Global entries occupy the following K columns; lengths is the
+    scan extent window+K, excluding pad64 alignment, even when slots are holes.
     Optional outputs avoid allocation during graph capture/replay. No tensor
     is cached, synchronized, or retained by the module.
     """
