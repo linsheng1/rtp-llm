@@ -122,17 +122,22 @@ def _dup2b(v, *, loc=None, ip=None) -> Float64:
 
 @dsl_user_op
 def _fold8_p(p0, p1, p2, p3, *, loc=None, ip=None) -> Float32:
+    # Float64 carries packed FP32 bits; f32x2 operands must be b64 registers.
     ins = [Float64(v).ir_value(loc=loc, ip=ip) for v in (p0, p1, p2, p3)]
     res = llvm.inline_asm(
         T.f32(),
         ins,
         """{
-            .reg .b64 e<4>;
+            .reg .b64 p<4>, e<4>;
             .reg .f32 s<8>, a<7>;
-            mul.rn.f32x2 e0, $1, $1;
-            mul.rn.f32x2 e1, $2, $2;
-            mul.rn.f32x2 e2, $3, $3;
-            mul.rn.f32x2 e3, $4, $4;
+            mov.b64 p0, $1;
+            mov.b64 p1, $2;
+            mov.b64 p2, $3;
+            mov.b64 p3, $4;
+            mul.rn.f32x2 e0, p0, p0;
+            mul.rn.f32x2 e1, p1, p1;
+            mul.rn.f32x2 e2, p2, p2;
+            mul.rn.f32x2 e3, p3, p3;
             mov.b64 {s0, s1}, e0;
             mov.b64 {s2, s3}, e1;
             mov.b64 {s4, s5}, e2;
@@ -185,11 +190,14 @@ def _norm_pair2(xp, gp, inv2, *, loc=None, ip=None):
         struct,
         ins,
         """{
-            .reg .b64 tp, up;
+            .reg .b64 xp_bits, gp_bits, inv_bits, tp, up;
             .reg .f32 u<2>, v<2>;
             .reg .b16 b<2>;
-            mul.rn.f32x2 tp, $3, $5;
-            mul.rn.f32x2 up, tp, $4;
+            mov.b64 xp_bits, $3;
+            mov.b64 gp_bits, $4;
+            mov.b64 inv_bits, $5;
+            mul.rn.f32x2 tp, xp_bits, inv_bits;
+            mul.rn.f32x2 up, tp, gp_bits;
             mov.b64 {u0, u1}, up;
             abs.f32 v0, u0;
             abs.f32 v1, u1;
@@ -317,11 +325,14 @@ def _quant4_f(y01, y23, rec2, *, loc=None, ip=None) -> Uint32:
         T.i32(),
         ins,
         """{
-            .reg .b64 qa, qb;
+            .reg .b64 a_bits, b_bits, inv_bits, qa, qb;
             .reg .b16 p0, p1;
             .reg .f32 q<4>;
-            mul.rn.f32x2 qa, $1, $3;
-            mul.rn.f32x2 qb, $2, $3;
+            mov.b64 a_bits, $1;
+            mov.b64 b_bits, $2;
+            mov.b64 inv_bits, $3;
+            mul.rn.f32x2 qa, a_bits, inv_bits;
+            mul.rn.f32x2 qb, b_bits, inv_bits;
             mov.b64 {q0, q1}, qa;
             mov.b64 {q2, q3}, qb;
             max.f32 q0, q0, 0fC3E00000;
