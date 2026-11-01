@@ -7,7 +7,7 @@ exports_files([
 
 load("@rules_python//python:packaging.bzl", "py_package", "py_wheel")
 # make different torch for different device when in compiling
-load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel", "rename_wheel_aarch64")
+load("//bazel:defs.bzl", "upload_pkg", "copy_target_to", "upload_wheel", "rename_wheel")
 load("@arch_config//:arch_select.bzl", "requirement", "whl_deps", "internal_deps", "jit_deps", "platform_deps", "triton_deps")
 load("//bazel:bundle.bzl", "bundle_files", "bundle_tar")
 
@@ -863,6 +863,33 @@ py_wheel(
     requires = whl_reqs,
 )
 
+# CPython 3.10 ARM package with matching filename and WHEEL tags.
+py_wheel(
+    name = "rtp_llm_cp310_aarch64_whl",
+    distribution = "rtp_llm",
+    python_tag = "cp310",
+    abi = "cp310",
+    platform = "linux_aarch64",
+    tags = ["manual", "local", "no-remote"],
+    version = RELEASE_VERSION,
+    entry_points = {
+        "console_scripts": [
+            "rtp-llm = rtp_llm.cli.main:main",
+        ]
+    },
+    deps = [
+        ":rtp_llm_package",
+        "@rtp_deps//:extension_package",
+    ],
+    requires = whl_reqs,
+    target_compatible_with = select({
+        "@//:using_arm": [],
+        "@//:using_cuda12_arm": [],
+        "@//:using_cuda13_arm": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
 py_wheel(
     name = "rtp_llm_kserve_whl",
     distribution = "rtp_llm",
@@ -903,10 +930,10 @@ py_wheel(
     requires = [],
 )
 
-rename_wheel_aarch64(
+alias(
     name = "rtp_llm_aarch64",
-    package_name = "rtp_llm-%s" % RELEASE_VERSION,
-    src = ":rtp_llm_whl",
+    actual = ":rtp_llm_cp310_aarch64_whl",
+    tags = ["manual", "local"],
 )
 
 rename_wheel(
