@@ -5,6 +5,7 @@ CUDA, GPU, or network is needed. Real deployment input pins remain CLI constants
 """
 
 import importlib.util
+import copy
 import json
 from pathlib import Path
 import stat
@@ -115,6 +116,49 @@ class DeriveTest(unittest.TestCase):
         hunks = dg.patch_hunks((self.patch_dir / self.patches[0][0]).read_bytes())[dg.NORMAL]
         with self.assertRaisesRegex(ValueError, "preimage"):
             dg.patched(data[dg.NORMAL] + b"unknown tail\n", hunks, dg.pin(data[dg.NORMAL])["SHA256"])
+
+    def local_reference(self):
+        self.vendor.update(schema=dg.LOCAL_REFERENCE_SCHEMA, state="SOURCE_REFERENCE_VERIFIED_NOT_GPU_TESTED",
+                           source_commit="1" * 40, cluster="cluster3", GPU_validation="GPU_NOT_RUN",
+                           original_wheel=dg.pin(self.original.read_bytes()))
+        # The portable reference is package data, independent of Bazel hub layout.
+        for key in ("source_members", "destination_members"):
+            self.vendor[key] = {n: v for n, v in self.vendor[key].items() if n.startswith("site-packages/deep_gemm/")}
+            self.vendor[key]["site-packages/" + dg.NORMAL + ".orig"] = dg.pin(self.data[dg.NORMAL])
+
+    def test_cluster_local_reference_preserves_actual_identity_and_unaccepted_gpu_status(self):
+        self.local_reference()
+        for cluster in ("cluster2", "cluster3"):
+            self.vendor["cluster"] = cluster
+            result = self.run_derive(cluster)
+            self.assertEqual(result["vendor_source_commit"], "1" * 40)
+            self.assertEqual(result["vendor_reference"], dict(schema=dg.LOCAL_REFERENCE_SCHEMA,
+                state="SOURCE_REFERENCE_VERIFIED_NOT_GPU_TESTED", cluster=cluster, GPU_validation="GPU_NOT_RUN"))
+            wheel = self.root / cluster / result["wheel"]["filename"]
+            files = dg.read_wheel(wheel)
+            self.assertEqual(files[dg.NATIVE], self.data[dg.NATIVE])
+            self.assertEqual(files[dg.NORMAL + ".orig"], self.data[dg.NORMAL])
+
+    def test_cluster_local_reference_rejects_wrong_origin_claimed_gpu_or_cluster(self):
+        self.local_reference()
+        valid = copy.deepcopy(self.vendor)
+        cases = [("cluster", "cluster1"), ("GPU_validation", "PASS"), ("native_rebuilt", True),
+                 ("original_source_unchanged", False), ("source_commit", dg.BASE_COMMIT),
+                 ("original_wheel", dict(bytes=1, SHA256="0" * 64)),
+                 ("state", "CLUSTER1_PRIVATE_DEEP_GEMM_OVERLAY_DERIVED")]
+        for key, value in cases:
+            with self.subTest(field=key):
+                self.vendor = copy.deepcopy(valid); self.vendor[key] = value
+                with self.assertRaisesRegex(ValueError, "reference|provenance"):
+                    self.run_derive("bad-" + key)
+                self.assertFalse((self.root / ("bad-" + key)).exists())
+
+    def test_cluster_local_reference_rejects_forged_stage0002_even_if_final_members_match(self):
+        self.local_reference()
+        self.vendor["source_members"]["site-packages/" + dg.EPILOGUE] = dg.pin(b"invented preimage")
+        with self.assertRaisesRegex(ValueError, "stage-0002 member identity"):
+            self.run_derive()
+        self.assertFalse((self.root / "out").exists())
 
     def test_recreates_only_exact_known_vendor_backup_from_original_header(self):
         backup = dg.NORMAL + ".orig"

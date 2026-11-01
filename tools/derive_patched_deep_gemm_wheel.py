@@ -29,6 +29,7 @@ EPILOGUE = "deep_gemm/include/deep_gemm/epilogue/sm100_dsv41_qkv.cuh"
 SIDE = "deep_gemm/include/deep_gemm/impls/dsv41_qb/side_workers.cuh"
 NORMAL = "deep_gemm/include/deep_gemm/impls/sm100_fp8_fp4_gemm_1d1d.cuh"
 NATIVE = "deep_gemm/_C.cpython-310-aarch64-linux-gnu.so"
+LOCAL_REFERENCE_SCHEMA = "cluster-local-deep-gemm-source-reference-v1"
 PATCHES = [
     ("0002-normal-gemm-pdl-trigger.patch", "45678efe0b6440a8f5506d0f5ca9259c6a1d21b230d82972e6d970298135e4a1", {NORMAL}),
     ("0003-dsv41-swa-kv-numerical-boundaries.patch", "bdb0bc6257d848d34eba99cca55f202df26deadb2bf3cec77e44f86a25a7153d", {EPILOGUE, SIDE}),
@@ -207,10 +208,22 @@ def derive(original, vendor_provenance, vendor_sha, patch_dir, output, source_co
     vendor_data = vendor_provenance.read_bytes()
     require(pin(vendor_data)["SHA256"] == vendor_sha, "vendor provenance SHA differs")
     vendor = json.loads(vendor_data)
-    require(vendor["state"] == "CLUSTER1_PRIVATE_DEEP_GEMM_OVERLAY_DERIVED"
-            and vendor["source_commit"] == BASE_COMMIT and vendor["native_rebuilt"] is False
-            and vendor["original_source_unchanged"] is True and vendor["version"] == ORIGINAL_VERSION,
+    local_reference = vendor.get("schema") == LOCAL_REFERENCE_SCHEMA
+    require(vendor["native_rebuilt"] is False and vendor["original_source_unchanged"] is True
+            and vendor["version"] == ORIGINAL_VERSION,
             "unexpected vendor derivation provenance")
+    if local_reference:
+        require(vendor["state"] == "SOURCE_REFERENCE_VERIFIED_NOT_GPU_TESTED"
+                and vendor["cluster"] in ("cluster2", "cluster3") and vendor["GPU_validation"] == "GPU_NOT_RUN"
+                and vendor["original_wheel"] == pin(original_data)
+                and vendor["source_commit"] == source_commit,
+                "unexpected cluster-local source reference identity/status")
+        require(all(n.startswith("site-packages/deep_gemm/") for n in vendor["source_members"])
+                and "site-packages/" + NORMAL + ".orig" in vendor["source_members"],
+                "cluster-local reference requires package members and exact NORMAL.orig")
+    else:
+        require(vendor["state"] == "CLUSTER1_PRIVATE_DEEP_GEMM_OVERLAY_DERIVED"
+                and vendor["source_commit"] == BASE_COMMIT, "unexpected vendor derivation provenance")
     require(set(vendor["source_members"]) == set(vendor["destination_members"]), "vendor source/destination member set differs")
     vendor_modified = {name for name in vendor["source_members"]
                        if vendor["source_members"][name] != vendor["destination_members"][name]}
@@ -246,10 +259,13 @@ def derive(original, vendor_provenance, vendor_sha, patch_dir, output, source_co
             if target in contract["postimages"]:
                 require(expected == contract["postimages"][target], "known tested header posthash differs")
             files[target], states[target] = patched(files[target], hunks, expected)
+        if local_reference and index == 0:
+            require({"site-packages/" + n: pin(data) for n, data in files.items() if n.startswith("deep_gemm/")}
+                    == vendor["source_members"], "cluster-local reference stage-0002 member identity differs")
         patch_receipts.append(dict(name=name, SHA256=digest, targets=states))
     require(vendor["patch_SHA256"] == patches[1][1], "vendor numerical patch identity differs")
-    # Compare every code/data member with the already tested private dependency,
-    # not just the two patched headers. Bazel-generated dist-info is not reused.
+    # Compare every code/data member with the pinned reference. Source identity
+    # verification does not establish GPU acceptance. Generated dist-info is not reused.
     require({n for n in files if n.startswith("deep_gemm/")}
             == {n[len("site-packages/"):] for n in vendor["destination_members"]
                 if n.startswith("site-packages/deep_gemm/")}, "tested vendor member set differs")
@@ -271,9 +287,13 @@ def derive(original, vendor_provenance, vendor_sha, patch_dir, output, source_co
                       original_headers={n: pin(before[n]) for n in headers if n in before},
                       added_members_from_original=added,
                       patches=patch_receipts, modified_original_members=modified,
-                      vendor_provenance_SHA256=vendor_sha, vendor_source_commit=BASE_COMMIT,
+                      vendor_provenance_SHA256=vendor_sha, vendor_source_commit=vendor["source_commit"],
                       tool_SHA256=pin(Path(__file__).read_bytes())["SHA256"],
                       RECORD_signatures="absent_required", runtime_module_version="upstream unchanged")
+    if local_reference:
+        provenance.update(source_commit_binding="derivation source identity matched to cluster-local reference",
+                          vendor_reference=dict(schema=vendor["schema"], state=vendor["state"],
+                                                cluster=vendor["cluster"], GPU_validation=vendor["GPU_validation"]))
     new_dist = "deep_gemm-" + VERSION + ".dist-info/"
     files = {(new_dist + n[len(old_dist):] if n.startswith(old_dist) else n): data for n, data in files.items()}
     key = new_dist + "METADATA"
