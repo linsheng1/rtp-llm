@@ -139,6 +139,27 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
         scale = torch.mean(expected.double().square()).sqrt()
         self.assertLessEqual(rms.item(), 1e-6 + 1e-4 * scale.item())
 
+    @torch.inference_mode()
+    def test_prefix_reuse_keeps_first_hc_coefficients_across_backend_boundary(self):
+        # Prefix reuse turns a full prefill into a tiny suffix. The first HC
+        # has no predecessor, so this exercises both real prenorm routes,
+        # rather than bypassing the fallback with a mocked kernel.
+        row, fn, base, scale = self._inputs(1)
+        for eps in (1e-6, 1e-20):
+            unit = _make_unit(fn, base, scale)
+            unit.norm_eps = eps
+            _, post, comb = unit.pre(row.repeat(2, 1, 1))
+            reference = tuple(t[0].clone() for t in (unit.pre_mix_out, post, comb))
+            for tokens in (513, 1794):
+                with self.subTest(eps=eps, tokens=tokens):
+                    _, post, comb = unit.pre(row.repeat(tokens, 1, 1))
+                    for actual, row_reference in zip(
+                        (unit.pre_mix_out, post, comb), reference
+                    ):
+                        torch.testing.assert_close(
+                            actual, row_reference.expand_as(actual), rtol=0, atol=0
+                        )
+
     @torch.no_grad()
     def _check_mixes_and_coefficients(self, residual, fn, base, scale):
         expected = _old_mixes(residual, fn)

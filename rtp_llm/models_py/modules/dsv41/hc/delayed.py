@@ -85,6 +85,7 @@ class DelayedHCUnit(HCUnitBase):
         shape = x.shape
         if x.is_cuda and x.dtype == torch.bfloat16:
             from rtp_llm.models_py.modules.dsv41.hc.v41_prenorm import (
+                PRENORM_SPLITS,
                 is_supported,
                 prenorm,
                 prepare_tf32_weight,
@@ -123,10 +124,12 @@ class DelayedHCUnit(HCUnitBase):
                     post.reshape(*shape[:-1], 1),
                     comb.reshape(*shape[:-2], self.hc_mult, self.hc_mult),
                 )
-            mixes = prenorm(residual, self.fn, self.norm_eps)
+            # The first HC has no fused predecessor path. Keep both its
+            # backend and reduction tree independent of prefill/suffix M.
+            mixes = None if previous is None else prenorm(residual, self.fn, self.norm_eps)
             if mixes is None:
                 mixes = ops.mhc_pre_norm_fn(
-                    residual, self.fn, None, self.norm_eps, n_splits=1
+                    residual, self.fn, None, self.norm_eps, n_splits=PRENORM_SPLITS
                 )
             pre, post, comb = ops.mhc_pre_split_mixes(
                 mixes, self.scale, self.base, self.hc_mult, 2.0, self.hc_eps

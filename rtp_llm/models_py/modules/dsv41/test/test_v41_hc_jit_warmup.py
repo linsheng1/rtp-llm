@@ -293,7 +293,14 @@ class V41HCJitWarmupCPU(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             self._mock_device(stack)
             stack.enter_context(
-                patch.dict(os.environ, {"DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm"})
+                patch.dict(
+                    os.environ,
+                    {
+                        "DSV4_MHC_PRE_GEMM_BACKEND": "deepgemm",
+                        "DSV4_MHC_SPLIT_MODE": "token",
+                        "DSV4_MHC_NUM_SPLITS": "",
+                    },
+                )
             )
             standalone = stack.enter_context(
                 patch.object(warmup, "_launch_small_prenorm")
@@ -415,7 +422,7 @@ class V41HCJitWarmupCPU(unittest.TestCase):
 
         def norm(residual, fn, weight, eps, n_splits):
             calls.append("norm")
-            self.assertEqual(n_splits, 1)
+            self.assertEqual(n_splits, 16)
             return torch.zeros(1, 65, 24)
 
         def split(mixes, scale, base, hc, post_scale, eps):

@@ -192,14 +192,18 @@ def _launch_small_prenorm(unit, tokens, device):
 
 def _launch_tilelang_norm(unit, tokens, device):
     residual = torch.ones((1, tokens, 4, unit.dim), dtype=torch.bfloat16, device=device)
-    _tile_ops().mhc_pre_norm_fn(residual, unit.fn, None, unit.norm_eps, n_splits=1)
+    _tile_ops().mhc_pre_norm_fn(
+        residual, unit.fn, None, unit.norm_eps, n_splits=v41_prenorm.PRENORM_SPLITS
+    )
 
 
 def _launch_tilelang_chain(unit, tokens, device, *, include_norm):
     ops = _tile_ops()  # Initializes TileLang/libz3/TVM environment before imports.
     residual = torch.ones((1, tokens, 4, unit.dim), dtype=torch.bfloat16, device=device)
     mixes = (
-        ops.mhc_pre_norm_fn(residual, unit.fn, None, unit.norm_eps, n_splits=1)
+        ops.mhc_pre_norm_fn(
+            residual, unit.fn, None, unit.norm_eps, n_splits=v41_prenorm.PRENORM_SPLITS
+        )
         if include_norm
         else torch.zeros((1, tokens, 24), dtype=torch.float32, device=device)
     )

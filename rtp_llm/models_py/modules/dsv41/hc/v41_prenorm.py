@@ -13,6 +13,10 @@ import torch
 import triton
 import triton.language as tl
 
+# The same token must keep its reduction tree when prefix reuse changes M.
+# Share this with the TileLang fallback and startup compilation.
+PRENORM_SPLITS = 16
+
 
 @lru_cache(maxsize=1)
 def _has_prenorm_gemm() -> bool:
@@ -124,7 +128,7 @@ def prenorm(
     from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import tf32_hc_prenorm_gemm
 
     # vLLM bounds its small-token prenorm specialization to 16 K partitions.
-    splits = 16
+    splits = PRENORM_SPLITS
     weight = prepare_tf32_weight(fn)
     partial = torch.empty(
         (splits, tokens, 24), dtype=torch.float32, device=residual.device
