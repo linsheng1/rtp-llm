@@ -1,0 +1,17 @@
+{
+  "candidate_commit": "031fc2af33111e7bbe13bbca6e72ebd6fc094d7c",
+  "wheel_SHA256": null,
+  "plan_SHA256": "c2bc78e244cc95f2f9176e734c0d2a297fa266603bb8c84e43b78691c8f77008",
+  "comparison_SHA256": "fedbc7b41eaa1183874ed8642d036dfa3be84799fb571c2eeced1cd9620a0aac",
+  "model_requests": 2,
+  "both_EOF": true,
+  "four_rank_proofs_per_request": 4,
+  "normal_tokens": 176,
+  "D_remote_tokens": 167,
+  "normal_equals_Premote": true,
+  "first_different_output_token_one_based": 33,
+  "sampled_query_boundaries_all_equal": true,
+  "selected_L2_KV_rows_equal": 640,
+  "remaining_gap": "D same-token-history continuation computation; entire historical KV equality and source/remote/destination byte join not proven",
+  "formal_acceptance": false
+}
