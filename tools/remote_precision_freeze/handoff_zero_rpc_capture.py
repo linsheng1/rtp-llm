@@ -1,0 +1,8 @@
+"""A never-armed own capture, join original natural lease drain; no stop signal."""
+import argparse,hashlib,json,os
+from pathlib import Path
+p=argparse.ArgumentParser(allow_abbrev=False);p.add_argument('--plan',type=Path,required=True);p.add_argument('--sha256',required=True);a=p.parse_args();sha=lambda p:hashlib.sha256(p.read_bytes()).hexdigest();assert sha(a.plan)==a.sha256;v=json.loads(a.plan.read_text());assert os.getuid()==500 and sha(Path(__file__))==v['handoff']['SHA256'];old=Path(v['previous_root']);assert sha(old/'plan.json')==v['previous_plan_SHA256'];proof=Path(v['unused_local_proof']['path']);assert sha(proof)==v['unused_local_proof']['SHA256'];d=json.loads(proof.read_text());s=json.loads((old/'model-service-status.json').read_text());assert d['model_requests_completed']==0 and d['actual_RPC']==0 and d['own_arm_markers_absent'];assert all(d['epochs']['P'][k]==s['model_root'][k] for k in ['PID','UID','start_ticks']);assert s['state'] in ['MODEL_READY_KV_EMPTY_PENDING','DRAINING_OWN_MODEL','MODEL_SERVICE_EXITED'];cfg=json.loads((old/'observer-runtime-config.json').read_text())
+for case in cfg['cases']:assert not Path(case['arm_path']).exists() and not list(Path(case['evidence_dir']).glob('*-live-rid-bound.json'))
+wrapper=Path(v['wrapper']['path']);assert sha(wrapper)==v['wrapper']['SHA256'];claim=Path(v['handoff_claim']);assert not claim.exists()
+with claim.open('x') as out:json.dump(dict(plan_SHA256=a.sha256,action='join_original_natural_drain_only',old_process=s['model_root']),out);out.flush();os.fsync(out.fileno())
+argv=['/opt/conda310/bin/python3.10','-B','-S',str(wrapper),'--previous-root',str(old),'--state-root',v['drain_root'],'--']+v['model_argv'];os.execv(argv[0],argv)
