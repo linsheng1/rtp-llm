@@ -1,0 +1,1510 @@
+{
+  "SHA256": "a225a1cfbb42c6100f0b6e180291f974e6b0ce7937595aa74750b10e1e694a57",
+  "value": {
+    "actual_L1_HC_parameter_checks": [
+      {
+        "all_actual_sample_owners_equal": true,
+        "fingerprints": [
+          {
+            "SHA256": "c95a2d2c56e8ea19b49af37e84e51488d2bbfd5221a3c0bb9626833bf6c1a090",
+            "bytes": 1966080,
+            "dtype": "torch.float32",
+            "shape": [
+              24,
+              20480
+            ]
+          },
+          {
+            "SHA256": "c95a2d2c56e8ea19b49af37e84e51488d2bbfd5221a3c0bb9626833bf6c1a090",
+            "bytes": 1966080,
+            "dtype": "torch.float32",
+            "shape": [
+              24,
+              20480
+            ]
+          }
+        ],
+        "parameter": "L1.attnHC.fn"
+      },
+      {
+        "all_actual_sample_owners_equal": true,
+        "fingerprints": [
+          {
+            "SHA256": "f9abb9d6f02f5833f0379e35d2241746e0f488b6665c112dcb264ead9c328071",
+            "bytes": 96,
+            "dtype": "torch.float32",
+            "shape": [
+              24
+            ]
+          },
+          {
+            "SHA256": "f9abb9d6f02f5833f0379e35d2241746e0f488b6665c112dcb264ead9c328071",
+            "bytes": 96,
+            "dtype": "torch.float32",
+            "shape": [
+              24
+            ]
+          }
+        ],
+        "parameter": "L1.attnHC.base"
+      },
+      {
+        "all_actual_sample_owners_equal": true,
+        "fingerprints": [
+          {
+            "SHA256": "c64ba77478e3624fe91a69b078839ff2accb8e6b4abb2e843b82a8857a8f8ae9",
+            "bytes": 12,
+            "dtype": "torch.float32",
+            "shape": [
+              3
+            ]
+          },
+          {
+            "SHA256": "c64ba77478e3624fe91a69b078839ff2accb8e6b4abb2e843b82a8857a8f8ae9",
+            "bytes": 12,
+            "dtype": "torch.float32",
+            "shape": [
+              3
+            ]
+          }
+        ],
+        "parameter": "L1.attnHC.scale"
+      },
+      {
+        "all_actual_sample_owners_equal": true,
+        "fingerprints": [
+          {
+            "SHA256": "09f10bf8ba6d0f16db0280bf9acb341f92ebd85d4c2a28e19e8e6adce9783114",
+            "bytes": 1966080,
+            "dtype": "torch.float32",
+            "shape": [
+              24,
+              20480
+            ]
+          },
+          {
+            "SHA256": "09f10bf8ba6d0f16db0280bf9acb341f92ebd85d4c2a28e19e8e6adce9783114",
+            "bytes": 1966080,
+            "dtype": "torch.float32",
+            "shape": [
+              24,
+              20480
+            ]
+          }
+        ],
+        "parameter": "L1.FFNHC.fn"
+      },
+      {
+        "all_actual_sample_owners_equal": true,
+        "fingerprints": [
+          {
+            "SHA256": "c50f949a71dbd484422625c67d369070c57e26cc16b82202e38b66bfc3d3bd0a",
+            "bytes": 96,
+            "dtype": "torch.float32",
+            "shape": [
+              24
+            ]
+          },
+          {
+            "SHA256": "c50f949a71dbd484422625c67d369070c57e26cc16b82202e38b66bfc3d3bd0a",
+            "bytes": 96,
+            "dtype": "torch.float32",
+            "shape": [
+              24
+            ]
+          }
+        ],
+        "parameter": "L1.FFNHC.base"
+      },
+      {
+        "all_actual_sample_owners_equal": true,
+        "fingerprints": [
+          {
+            "SHA256": "25c676c7a2a50b71998be76906bb1046cd321b459d5ac531c4e25b9f7e6b5bf5",
+            "bytes": 12,
+            "dtype": "torch.float32",
+            "shape": [
+              3
+            ]
+          },
+          {
+            "SHA256": "25c676c7a2a50b71998be76906bb1046cd321b459d5ac531c4e25b9f7e6b5bf5",
+            "bytes": 12,
+            "dtype": "torch.float32",
+            "shape": [
+              3
+            ]
+          }
+        ],
+        "parameter": "L1.FFNHC.scale"
+      },
+      {
+        "all_actual_sample_owners_equal": true,
+        "fingerprints": [
+          {
+            "SHA256": "a8723c1a7ae2f42482d22b33859efdafe2bc78df3faa0b435461709bcc6de8c3",
+            "bytes": 10240,
+            "dtype": "torch.bfloat16",
+            "shape": [
+              5120
+            ]
+          },
+          {
+            "SHA256": "a8723c1a7ae2f42482d22b33859efdafe2bc78df3faa0b435461709bcc6de8c3",
+            "bytes": 10240,
+            "dtype": "torch.bfloat16",
+            "shape": [
+              5120
+            ]
+          }
+        ],
+        "parameter": "L1.FFN_norm.weight"
+      }
+    ],
+    "actual_request_ids": {
+      "normal": 6442273048506,
+      "source": 172592320328206
+    },
+    "at": 1793650629.9585137,
+    "candidate_commit": "91b4635faf8c65cc67e66ab52a46f5c932cd08ea",
+    "checks": [
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 0,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "attn_input5120",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 0,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "attn_input5120",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 0,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "attn_output5120",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 0,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "attn_output5120",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 0,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "FFN_input5120",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 0,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "FFN_input5120",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 0,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "FFN_output5120",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 0,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "FFN_output5120",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "block_entry4HC",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "block_entry4HC",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "after_Engram4HC",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "after_Engram4HC",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "natural_attnHC_residual4HC",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "natural_attnHC_residual4HC",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.float32",
+        "elements": 4,
+        "first_difference_column": 0,
+        "layer": 1,
+        "max_abs_error": 5.960464477539063e-08,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "natural_attnHC_pre4",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 4
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.float32",
+        "elements": 4,
+        "first_difference_column": 0,
+        "layer": 1,
+        "max_abs_error": 1.1920928955078125e-07,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "natural_attnHC_pre4",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 3
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.float32",
+        "elements": 4,
+        "first_difference_column": 1,
+        "layer": 1,
+        "max_abs_error": 5.587935447692871e-09,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "natural_attnHC_post4",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 1
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.float32",
+        "elements": 4,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "natural_attnHC_post4",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.float32",
+        "elements": 16,
+        "first_difference_column": 0,
+        "layer": 1,
+        "max_abs_error": 3.5762786865234375e-07,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "natural_attnHC_comb16",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 13
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.float32",
+        "elements": 16,
+        "first_difference_column": 0,
+        "layer": 1,
+        "max_abs_error": 5.960464477539063e-08,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "natural_attnHC_comb16",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 13
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "attn_input5120",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "attn_input5120",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "attn_output5120",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "attn_output5120",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "control_variable": true,
+        "dtype": "torch.int32",
+        "elements": 1,
+        "layer": 1,
+        "normal_value": 1794,
+        "point": "seam_actual_rows",
+        "position": 7042,
+        "source_value": 1,
+        "state": "COMPARED",
+        "unequal_elements": 1
+      },
+      {
+        "byte_equal": false,
+        "control_variable": true,
+        "dtype": "torch.int32",
+        "elements": 1,
+        "layer": 1,
+        "normal_value": 1794,
+        "point": "seam_actual_rows",
+        "position": 7043,
+        "source_value": 1,
+        "state": "COMPARED",
+        "unequal_elements": 1
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "seam_residual4HC",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "seam_residual4HC",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "seam_attn_out5120",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "seam_attn_out5120",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.float32",
+        "elements": 4,
+        "first_difference_column": 0,
+        "layer": 1,
+        "max_abs_error": 5.960464477539063e-08,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "attnHC_pre4",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 4
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.float32",
+        "elements": 4,
+        "first_difference_column": 0,
+        "layer": 1,
+        "max_abs_error": 1.1920928955078125e-07,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "attnHC_pre4",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 3
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.float32",
+        "elements": 4,
+        "first_difference_column": 1,
+        "layer": 1,
+        "max_abs_error": 5.587935447692871e-09,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "attnHC_post4",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 1
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.float32",
+        "elements": 4,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "attnHC_post4",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.float32",
+        "elements": 16,
+        "first_difference_column": 0,
+        "layer": 1,
+        "max_abs_error": 3.5762786865234375e-07,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "attnHC_comb16",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 13
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.float32",
+        "elements": 16,
+        "first_difference_column": 0,
+        "layer": 1,
+        "max_abs_error": 5.960464477539063e-08,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "attnHC_comb16",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 13
+      },
+      {
+        "byte_equal": true,
+        "control_variable": true,
+        "dtype": "torch.int8",
+        "elements": 1,
+        "layer": 1,
+        "normal_value": 1,
+        "point": "seam_fused_route",
+        "position": 7042,
+        "source_value": 1,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "control_variable": true,
+        "dtype": "torch.int8",
+        "elements": 1,
+        "layer": 1,
+        "normal_value": 1,
+        "point": "seam_fused_route",
+        "position": 7043,
+        "source_value": 1,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": 6791,
+        "layer": 1,
+        "max_abs_error": 3.0517578125e-05,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "ordering_scope": "same MegaMHC call outputs; internal order/causality not established",
+        "point": "seam_post4HC",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 2
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "ordering_scope": "same MegaMHC call outputs; internal order/causality not established",
+        "point": "seam_post4HC",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.float32",
+        "elements": 4,
+        "first_difference_column": 1,
+        "layer": 1,
+        "max_abs_error": 8.940696716308594e-08,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "ordering_scope": "same MegaMHC call outputs; internal order/causality not established",
+        "point": "FFNHC_pre4",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 1
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.float32",
+        "elements": 4,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "ordering_scope": "same MegaMHC call outputs; internal order/causality not established",
+        "point": "FFNHC_pre4",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.float32",
+        "elements": 4,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "ordering_scope": "same MegaMHC call outputs; internal order/causality not established",
+        "point": "FFNHC_post4",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.float32",
+        "elements": 4,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "ordering_scope": "same MegaMHC call outputs; internal order/causality not established",
+        "point": "FFNHC_post4",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.float32",
+        "elements": 16,
+        "first_difference_column": 0,
+        "layer": 1,
+        "max_abs_error": 1.1920928955078125e-07,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "ordering_scope": "same MegaMHC call outputs; internal order/causality not established",
+        "point": "FFNHC_comb16",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 13
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.float32",
+        "elements": 16,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "ordering_scope": "same MegaMHC call outputs; internal order/causality not established",
+        "point": "FFNHC_comb16",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "ordering_scope": "same MegaMHC call outputs; internal order/causality not established",
+        "point": "seam_FFN_norm5120",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": 1958,
+        "layer": 1,
+        "max_abs_error": 0.00048828125,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "ordering_scope": "same MegaMHC call outputs; internal order/causality not established",
+        "point": "seam_FFN_norm5120",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 1
+      },
+      {
+        "layer": 1,
+        "point": "natural_FFNHC_residual4HC",
+        "position": 7042,
+        "state": "NOT_CAPTURED_BOTH_PATHS"
+      },
+      {
+        "layer": 1,
+        "point": "natural_FFNHC_residual4HC",
+        "position": 7043,
+        "state": "NOT_CAPTURED_BOTH_PATHS"
+      },
+      {
+        "layer": 1,
+        "point": "natural_FFNHC_pre4",
+        "position": 7042,
+        "state": "NOT_CAPTURED_BOTH_PATHS"
+      },
+      {
+        "layer": 1,
+        "point": "natural_FFNHC_pre4",
+        "position": 7043,
+        "state": "NOT_CAPTURED_BOTH_PATHS"
+      },
+      {
+        "layer": 1,
+        "point": "natural_FFNHC_post4",
+        "position": 7042,
+        "state": "NOT_CAPTURED_BOTH_PATHS"
+      },
+      {
+        "layer": 1,
+        "point": "natural_FFNHC_post4",
+        "position": 7043,
+        "state": "NOT_CAPTURED_BOTH_PATHS"
+      },
+      {
+        "layer": 1,
+        "point": "natural_FFNHC_comb16",
+        "position": 7042,
+        "state": "NOT_CAPTURED_BOTH_PATHS"
+      },
+      {
+        "layer": 1,
+        "point": "natural_FFNHC_comb16",
+        "position": 7043,
+        "state": "NOT_CAPTURED_BOTH_PATHS"
+      },
+      {
+        "layer": 1,
+        "point": "natural_FFNHC_output5120",
+        "position": 7042,
+        "state": "NOT_CAPTURED_BOTH_PATHS"
+      },
+      {
+        "layer": 1,
+        "point": "natural_FFNHC_output5120",
+        "position": 7043,
+        "state": "NOT_CAPTURED_BOTH_PATHS"
+      },
+      {
+        "layer": 1,
+        "point": "natural_FFN_norm_input5120",
+        "position": 7042,
+        "state": "NOT_CAPTURED_BOTH_PATHS"
+      },
+      {
+        "layer": 1,
+        "point": "natural_FFN_norm_input5120",
+        "position": 7043,
+        "state": "NOT_CAPTURED_BOTH_PATHS"
+      },
+      {
+        "layer": 1,
+        "point": "natural_FFN_norm_output5120",
+        "position": 7042,
+        "state": "NOT_CAPTURED_BOTH_PATHS"
+      },
+      {
+        "layer": 1,
+        "point": "natural_FFN_norm_output5120",
+        "position": 7043,
+        "state": "NOT_CAPTURED_BOTH_PATHS"
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "FFN_input5120",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": 1958,
+        "layer": 1,
+        "max_abs_error": 0.00048828125,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "FFN_input5120",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 1
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "FFN_output5120",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": 0,
+        "layer": 1,
+        "max_abs_error": 0.0009765625,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "FFN_output5120",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 1080
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": null,
+        "layer": 2,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "block_entry4HC",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": 0,
+        "layer": 2,
+        "max_abs_error": 0.00048828125,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "block_entry4HC",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 961
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": null,
+        "layer": 2,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "attn_input5120",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.bfloat16",
+        "elements": 5120,
+        "first_difference_column": 8,
+        "layer": 2,
+        "max_abs_error": 0.00048828125,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "attn_input5120",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 511
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.float32",
+        "elements": 512,
+        "first_difference_column": null,
+        "layer": 2,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "compressor_values512",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.float32",
+        "elements": 512,
+        "first_difference_column": 0,
+        "layer": 2,
+        "max_abs_error": 0.0002894103527069092,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "compressor_values512",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 512
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.float32",
+        "elements": 512,
+        "first_difference_column": null,
+        "layer": 2,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "compressor_scores512",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.float32",
+        "elements": 512,
+        "first_difference_column": 0,
+        "layer": 2,
+        "max_abs_error": 0.00024241209030151367,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "point": "compressor_scores512",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 512
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 512,
+        "first_difference_column": null,
+        "layer": 2,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "original_D_format": "512E4M3+16UE8M0 group32, decoded on CPU",
+        "point": "SWA_decoded512",
+        "position": 7042,
+        "state": "COMPARED",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.bfloat16",
+        "elements": 512,
+        "first_difference_column": 2,
+        "layer": 2,
+        "max_abs_error": 0.0625,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "original_D_format": "512E4M3+16UE8M0 group32, decoded on CPU",
+        "point": "SWA_decoded512",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 69
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.uint8",
+        "elements": 288,
+        "layer": 2,
+        "point": "GLOBAL_raw288",
+        "position": 7043,
+        "state": "COMPARED",
+        "unequal_elements": 2
+      }
+    ],
+    "coverage": {
+      "normal": [
+        {
+          "PID": 881354,
+          "empty": false,
+          "points": 6,
+          "world_rank": 2
+        },
+        {
+          "PID": 881353,
+          "empty": false,
+          "points": 6,
+          "world_rank": 1
+        },
+        {
+          "PID": 881352,
+          "empty": false,
+          "points": 74,
+          "world_rank": 0
+        },
+        {
+          "PID": 881355,
+          "empty": false,
+          "points": 7,
+          "world_rank": 3
+        }
+      ],
+      "source": [
+        {
+          "PID": 823984,
+          "empty": false,
+          "points": 79,
+          "world_rank": 0
+        },
+        {
+          "PID": 823985,
+          "empty": true,
+          "points": 0,
+          "world_rank": 1
+        },
+        {
+          "PID": 823986,
+          "empty": true,
+          "points": 0,
+          "world_rank": 2
+        },
+        {
+          "PID": 823987,
+          "empty": true,
+          "points": 0,
+          "world_rank": 3
+        }
+      ]
+    },
+    "epochs": {
+      "normal": {
+        "D": {
+          "PID": 823739,
+          "UID": 500,
+          "start_ticks": "46292451"
+        },
+        "P": {
+          "PID": 881261,
+          "UID": 500,
+          "start_ticks": "46291568"
+        }
+      },
+      "source": {
+        "D": {
+          "PID": 823739,
+          "UID": 500,
+          "start_ticks": "46292451"
+        },
+        "P": {
+          "PID": 881261,
+          "UID": 500,
+          "start_ticks": "46291568"
+        }
+      }
+    },
+    "first_sampled_difference": {
+      "byte_equal": false,
+      "dtype": "torch.float32",
+      "elements": 4,
+      "first_difference_column": 0,
+      "layer": 1,
+      "max_abs_error": 5.960464477539063e-08,
+      "nonfinite_left": 0,
+      "nonfinite_right": 0,
+      "point": "natural_attnHC_pre4",
+      "position": 7042,
+      "state": "COMPARED",
+      "unequal_elements": 4
+    },
+    "formal_acceptance": false,
+    "input_R_SHA256": "07cf16434cfb7964bb1090f9c4c4d4b30823be0ef3bb3ace8c58fd4de913522c",
+    "kernel_policies": {
+      "normal": {
+        "DSV4_MHC_SPLIT_MODE": "fixed",
+        "DSV4_STARTUP_REAL_WARMUP": 0,
+        "DeepGEMM_batch_invariant": true,
+        "kernel_flags": {
+          "DSV41_ENGRAM_RETAINED_FUSION": "0",
+          "DSV41_FUSED_CROSS_LAYER_MHC": "1",
+          "DSV4_MHC_HEAD_FUSED": "1",
+          "DSV4_USE_TK_MHC": "1",
+          "RTP_LLM_STREAM_ASYNC": "0"
+        },
+        "model_warm_up": 1,
+        "numeric_flags": {
+          "DSV41_CUSTOM_QB": "0",
+          "DSV41_FUSED_QB_KV": "0",
+          "DSV41_FUSED_QKV_ROPE_CACHE": "1",
+          "DSV41_FUSED_QUERY_QUANT": "1",
+          "DSV41_FUSED_READY_QKV": "0",
+          "DSV4_FP8_QUANT_KERNEL": "auto"
+        },
+        "warm_up": 1
+      },
+      "source": {
+        "DSV4_MHC_SPLIT_MODE": "fixed",
+        "DSV4_STARTUP_REAL_WARMUP": 0,
+        "DeepGEMM_batch_invariant": true,
+        "kernel_flags": {
+          "DSV41_ENGRAM_RETAINED_FUSION": "0",
+          "DSV41_FUSED_CROSS_LAYER_MHC": "1",
+          "DSV4_MHC_HEAD_FUSED": "1",
+          "DSV4_USE_TK_MHC": "1",
+          "RTP_LLM_STREAM_ASYNC": "0"
+        },
+        "model_warm_up": 1,
+        "numeric_flags": {
+          "DSV41_CUSTOM_QB": "0",
+          "DSV41_FUSED_QB_KV": "0",
+          "DSV41_FUSED_QKV_ROPE_CACHE": "1",
+          "DSV41_FUSED_QUERY_QUANT": "1",
+          "DSV41_FUSED_READY_QKV": "0",
+          "DSV4_FP8_QUANT_KERNEL": "auto"
+        },
+        "warm_up": 1
+      }
+    },
+    "limit": "Natural L1 Engram/HC/RMSNorm seams added. Actual rows sampled as a GPU selected value; registration_shape metadata is not actual runtime M. MegaMHC coefficient/normalized outputs do not imply mutual causality. Per-token layer-order sampled boundaries only. Source decode and normal prefill execute tokens in different orders; block-entry Engram fusion boundaries are intentionally not ordered against each other. Equal sampled FFN input does not prove routing/expert/scales/full-batch equality. D-source and P-normal process epochs differ and are explicitly retained. No whole-source/remote/destination byte provenance claim.",
+    "model_requests": 0,
+    "normal_full_IDs_calibrated_143": true,
+    "operator_root_cause_proven": false,
+    "residual_checks": [
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": null,
+        "layer": 0,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "ordering_scope": "UNORDERED: cross-layer/Engram prepared branch may place entry before or after fusion",
+        "point": "block_entry4HC",
+        "position": 7042,
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": null,
+        "layer": 0,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "ordering_scope": "UNORDERED: cross-layer/Engram prepared branch may place entry before or after fusion",
+        "point": "block_entry4HC",
+        "position": 7043,
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "ordering_scope": "UNORDERED: cross-layer/Engram prepared branch may place entry before or after fusion",
+        "point": "block_entry4HC",
+        "position": 7042,
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": null,
+        "layer": 1,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "ordering_scope": "UNORDERED: cross-layer/Engram prepared branch may place entry before or after fusion",
+        "point": "block_entry4HC",
+        "position": 7043,
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": null,
+        "layer": 2,
+        "max_abs_error": 0.0,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "ordering_scope": "UNORDERED: cross-layer/Engram prepared branch may place entry before or after fusion",
+        "point": "block_entry4HC",
+        "position": 7042,
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "dtype": "torch.bfloat16",
+        "elements": 20480,
+        "first_difference_column": 0,
+        "layer": 2,
+        "max_abs_error": 0.00048828125,
+        "nonfinite_left": 0,
+        "nonfinite_right": 0,
+        "ordering_scope": "UNORDERED: cross-layer/Engram prepared branch may place entry before or after fusion",
+        "point": "block_entry4HC",
+        "position": 7043,
+        "unequal_elements": 961
+      }
+    ],
+    "selected_parameter_checks": [
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L0.kv_norm"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L0.q_norm"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L0.wkv.weight"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L0.wkv.weight_scales"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L0.wq_a_wkv.weight"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L0.wq_a_wkv.weight_scales"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L1.FFNHC.base"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L1.FFNHC.fn"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L1.FFNHC.scale"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L1.FFN_norm.weight"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L1.attnHC.base"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L1.attnHC.fn"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L1.attnHC.scale"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L1.kv_norm"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L1.q_norm"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L1.wkv.weight"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L1.wkv.weight_scales"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L1.wq_a_wkv.weight"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L1.wq_a_wkv.weight_scales"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L2.global_norm"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L2.global_wgate"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L2.global_wkv"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L2.kv_norm"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L2.q_norm"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L2.wkv.weight"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L2.wkv.weight_scales"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L2.wq_a_wkv.weight"
+      },
+      {
+        "all_eight_logical_parameter_fingerprints_equal": true,
+        "parameter": "L2.wq_a_wkv.weight_scales"
+      }
+    ],
+    "source_full_IDs_calibrated_241": true,
+    "state": "HISTORY36_EXISTING_PRODUCER_CAPTURE_COMPARED",
+    "token_checks": {
+      "normal:7042": {
+        "actual_GPU_token_matches_native_history": true,
+        "observed_layers": 3
+      },
+      "normal:7043": {
+        "actual_GPU_token_matches_native_history": true,
+        "observed_layers": 3
+      },
+      "source:7042": {
+        "actual_GPU_token_matches_native_history": true,
+        "observed_layers": 3
+      },
+      "source:7043": {
+        "actual_GPU_token_matches_native_history": true,
+        "observed_layers": 3
+      }
+    },
+    "whole_model_fixed": false
+  }
+}

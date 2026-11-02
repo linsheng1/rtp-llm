@@ -228,3 +228,58 @@ Persistent executed entries (do not replay an immutable completed batch):
 `history35_compare_entry_v2.py freeze/check/render/submit`. The shared state
 contains the actual plan/receipt paths. Offline checks do not replace device
 prepare, current leases, process identities or native request-once admission.
+
+
+## Missing L1 seam capture36 (91b, inner diagnostic)
+
+Both requested new model calls completed native EOF below1024 with all four
+rank exports. Source7041→241 and normal7169→143 exactly match their complete
+prior ID references. Candidate91b completed14, task total22. Source and normal
+use the same P881261/start46291568 and D823739/start46292451 (UID500) model
+epochs. Normal uses explicit bypass with actual local0/remote0; this is not a
+fresh-P proof for a remote restore. P-origin acceptance remains unexecuted;
+normal143 vs prior Dremote113 still diverges at output index18/token19.
+
+Source plan `26d9acca69458558a90d67d3ccb615b061a0199188d287251b4bd6b1de863515`,
+native SHA `041ab911d8061900d937877742fee0d5577cdb60878cd21c951e25b164cc33d9`;
+normal plan `c58e212b60df5c6e904cdfe7fb23fc6875de531280cd237bf7da530204296072`,
+native SHA `69c07d12329575f89673904d28686145c7013f2120b82375e17522419fb1e744`.
+CPU comparison plan
+`0ddf9924001e054c8fe63f491a6a948cee50c0b32d0c6048d437d716f3fa716e`
+finished rc0 with zero model calls; report
+`a225a1cfbb42c6100f0b6e180291f974e6b0ce7937595aa74750b10e1e694a57`
+is stored in `history36-comparison-safe.json`. Raw tensors/IDs stayed on C3.
+
+L1 post-Engram residual and actual attention-HC residual match20480/20480 BF16
+values. All seven actual owner parameter fingerprints match (attention/FFN HC
+fn/base/scale and FFN norm weight). Actual row count is sampled as a selected
+GPU integer: source1, normal1794. Registration metadata is not used as actual M.
+Earliest ordered sampled difference is attention HC pre at7042:4/4 FP32,
+maxabs5.960464477539063e-08. At7043 pre differs3/4 and comb13/16; post4 matches.
+Attention5120 input/output still match. Both intra-layer seams actually return
+the fused path. Stored post4HC and all new FFN-HC pre/post/comb match at7043,
+while fused FFN normalization differs1/5120 BF16, column1958. Current attention
+pre-mix is the delayed input to this FFN collapse; new FFN coefficients belong
+to later delayed computations. Mutual causality of concurrent outputs is not
+assumed. Operator attribution and whole-model correctness remain unproved.
+
+No healthy model was restarted for control failures. Earlier failed unit proofs
+are retained: existing fixture directory; subsequently overlong socket path;
+then strict empty-GPU admission saw2621440 bytes with no compute PID. The next
+independent check showed0 bytes and both old unit epochs absent. The original
+zero-FB and1GiB guards were retained. Final unit plan
+`57df4dabe9948c8c300f41445e5800414b68fdee75f58c0563f00e4ec06feb87`
+passed all4 contracts,0skip/fail/error. P's SSH255 was checked on-device: no
+static-v3 plan/spec/launch existed before the original immutable plan was
+submitted once. Both static-v3 full-content checks passed; Consumers v2 stayed
+healthy. No DSH/new scheduler, binary rebuild or wheel was used.
+
+Persistent successful workflow: `prepare_history36_models.py`;
+`freeze_history36_source_v1.py` → `launch_history36_source_v1.py`; actual source
+receipt → `prepare_history36_baseline.py` → `freeze_history36_baseline_v1.py` →
+`launch_history36_baseline_v1.py`; `history36_compare_entry.py`
+freeze/check/render/submit. `read_history_stage.py` performs one safe bounded
+read; device controllers retain all periodic monitoring. Shared state contains
+actual recipes, plans and exact commands. Do not replay completed immutable
+batches. Model services keep their original drain and Consumer/static lease
+guards; component replay waits for actual owned model drain/empty-GPU admission.
