@@ -1,5 +1,9 @@
 # Frozen entry for C3 precision experiments
 
+Current candidate031 runtime/commands and actual request evidence are documented
+in [HC031-RUNTIME.md](HC031-RUNTIME.md). The618 capture example below is historical;
+its instance dispatches must not be used as current device configuration.
+
 `freeze_stage.py` promotes the existing side-session freezer, with a small adapter
 for the current two-request four-rank capture. It never imports model code or
 issues a request. Historical side-session examples remain offline examples.

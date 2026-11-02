@@ -1,0 +1,221 @@
+{
+  "candidate_commit": "031fc2af33111e7bbe13bbca6e72ebd6fc094d7c",
+  "artifact_kind": "native_incremental_Python_overlay",
+  "wheel_SHA256": null,
+  "whole_model_fixed": false,
+  "model_requests_completed": 5,
+  "task_completed_model_requests": 27,
+  "unit_tests": {
+    "run": 3,
+    "failures": 0,
+    "errors": 0,
+    "skipped": 0,
+    "scope": "one real CUDA delayed HC boundary regression and two existing CPU contracts"
+  },
+  "normal": {
+    "input_tokens": 7169,
+    "output_tokens": 176,
+    "EOF": true,
+    "result_SHA256": "673144b2f28f89ffb1b9885045a61883552e2e34c64159354624f5c7f4e9a4b0"
+  },
+  "D_restore": {
+    "output_tokens": 167,
+    "EOF": true,
+    "local_reuse": 0,
+    "remote_reuse": 7168,
+    "result_SHA256": "506592ada04045010d963c0dda622a8da13266dc65ae245703c8175a8a30fc17"
+  },
+  "P_seed": {
+    "output_tokens": 1,
+    "EOF": true,
+    "classification": "intentional P-only max1 seed, not full natural business output",
+    "result_SHA256": "223210f3cc153908b04a1dbc3038cb9b9ddcb27da1c1c764b66fb6fc878abcae",
+    "manager_canonical_keys": 14,
+    "manager_new_locations": 14,
+    "manager_report_SHA256": "9c422cfe82747d28ff32cf465fe29547ebf148d3e6f9d7aa010cd1af9ad57ded"
+  },
+  "P_restore": "PENDING",
+  "comparison": {
+    "actual_source_suffix": {
+      "comparisons": {
+        "baseline": {
+          "complete_IDs_equal": false,
+          "first_difference": {
+            "index_zero_based": 32,
+            "token_one_based": 33
+          }
+        },
+        "d-result": {
+          "complete_IDs_equal": true,
+          "first_difference": null
+        }
+      },
+      "consumed_source_output_tokens": 128,
+      "remaining_actual_source_tokens": 167,
+      "scope": "actual source token sequence only; no inferred computed/published KV boundary",
+      "source_output_tokens": 295
+    },
+    "business_acceptance": false,
+    "candidate_commit": "031fc2af33111e7bbe13bbca6e72ebd6fc094d7c",
+    "cross_epoch_normal_complete_IDs_equal": true,
+    "cross_epoch_normal_first_difference": null,
+    "exact_request_provenance": "PENDING",
+    "first_difference_positions": {
+      "d_result": {
+        "index_zero_based": 32,
+        "token_one_based": 33
+      }
+    },
+    "formal_acceptance": false,
+    "input_ids_sha256": "3982930c351652d4c939acb4e883924ee85bc381454b3eeff16622e8f5edf63c",
+    "input_tokens": 7169,
+    "model_requests": 0,
+    "output_metadata": {
+      "baseline": {
+        "SHA256": "b750f4dcd07dc960a4b5ad8c1d4bb01a9cc98a5d170e1cba1a03e271b35a2694",
+        "tokens": 176
+      },
+      "d_result": {
+        "SHA256": "3c6695e0270ccd97a42e4db52cf4f20f5d1afcb7e514aa195e3ec3dc2f05188c",
+        "tokens": 167
+      }
+    },
+    "outputs_equal": {
+      "d_result": false
+    },
+    "plan_SHA256": "9f790413148a6bae1edbfcddec06d13d26c55d9936dbcfb22a2392026bccc32c",
+    "role_epochs": {
+      "baseline": {
+        "D": {
+          "GPU_ranks": [
+            {
+              "PID": 850446,
+              "UID": 500,
+              "start_ticks": "46915792"
+            },
+            {
+              "PID": 850447,
+              "UID": 500,
+              "start_ticks": "46915792"
+            },
+            {
+              "PID": 850448,
+              "UID": 500,
+              "start_ticks": "46915798"
+            },
+            {
+              "PID": 850449,
+              "UID": 500,
+              "start_ticks": "46915798"
+            }
+          ],
+          "model_root": {
+            "PID": 850209,
+            "UID": 500,
+            "start_ticks": "46914900"
+          },
+          "namespace": "pubprec_hc031_Dorigin_v1"
+        },
+        "P": {
+          "GPU_ranks": [
+            {
+              "PID": 909240,
+              "UID": 500,
+              "start_ticks": "46905397"
+            },
+            {
+              "PID": 909241,
+              "UID": 500,
+              "start_ticks": "46905397"
+            },
+            {
+              "PID": 909243,
+              "UID": 500,
+              "start_ticks": "46905404"
+            },
+            {
+              "PID": 909244,
+              "UID": 500,
+              "start_ticks": "46905404"
+            }
+          ],
+          "model_root": {
+            "PID": 909138,
+            "UID": 500,
+            "start_ticks": "46904477"
+          },
+          "namespace": "pubprec_hc031_Dorigin_v1"
+        }
+      },
+      "d-result": {
+        "D": {
+          "GPU_ranks": [
+            {
+              "PID": 850446,
+              "UID": 500,
+              "start_ticks": "46915792"
+            },
+            {
+              "PID": 850447,
+              "UID": 500,
+              "start_ticks": "46915792"
+            },
+            {
+              "PID": 850448,
+              "UID": 500,
+              "start_ticks": "46915798"
+            },
+            {
+              "PID": 850449,
+              "UID": 500,
+              "start_ticks": "46915798"
+            }
+          ],
+          "model_root": {
+            "PID": 850209,
+            "UID": 500,
+            "start_ticks": "46914900"
+          },
+          "namespace": "pubprec_hc031_Dorigin_v1"
+        },
+        "P": {
+          "GPU_ranks": [
+            {
+              "PID": 909240,
+              "UID": 500,
+              "start_ticks": "46905397"
+            },
+            {
+              "PID": 909241,
+              "UID": 500,
+              "start_ticks": "46905397"
+            },
+            {
+              "PID": 909243,
+              "UID": 500,
+              "start_ticks": "46905404"
+            },
+            {
+              "PID": 909244,
+              "UID": 500,
+              "start_ticks": "46905404"
+            }
+          ],
+          "model_root": {
+            "PID": 909138,
+            "UID": 500,
+            "start_ticks": "46904477"
+          },
+          "namespace": "pubprec_hc031_Dorigin_v1"
+        }
+      }
+    },
+    "scope": "actual-D-history continuation diagnostic; NOT original business R; NOT formal acceptance",
+    "source_remote_destination_byte_equality": "PENDING",
+    "state": "TOKEN_ONLY_ACTUAL_D_HISTORY_DIAGNOSTIC_COMPARISON"
+  },
+  "comparison_result_SHA256": "e1695e8d292e005bd39215882b12e9f4f6e6e326a2751d8ec9c4e6c39b22de0b",
+  "scope": "actual D-history continuation diagnostic, not original business R or wheel acceptance",
+  "next_gap": "fresh P restore and same new D epoch normal calibration; then earliest remaining actual computation if IDs remain unequal",
+  "pending_operator_cause": true
+}
