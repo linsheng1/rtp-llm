@@ -105,3 +105,70 @@ length mapping, sink/RoPE/static parameter identity, core output and projection
 before/after all-reduce inside L2 attention. No evidence yet attributes the
 remaining difference to transfer, selection, a kernel or output projection.
 No further arithmetic change or wheel build is justified yet.
+
+capture34 reused the candidate91b environment and completed two real requests,
+both EOF below1024, plus both four-rank typed attention barriers. Frozen plan
+SHA256 `cc7c065360644b17fba49353f36519229bb8fe858ff545609313e92f31dd0107`.
+Actual report SHA256
+`8746d887507ac2f156942aa4fbb7e70e01295bbcdf1c08b36d3f3c575994c8c1`.
+The complete113/143 IDs again exactly reproduce their prior references and
+first differ at output index18/token19. Candidate91b completed requests10;
+including618, task total18. P-origin91b remains unexecuted.
+
+The read-only comparison of these existing raw captures completed with report
+SHA256 `2628a46cd9ba1d72e8e407a1d4640eae882570b9d789dc779d9036c79c67d0eb`.
+Both cases use mega attention. Qr1280, projected Q, all actual static parameter
+fingerprints and the ordered640 logical KV addresses are equal. However, six
+global rows and eleven SWA rows differ in347 BF16 elements. Their logical token
+positions are within7041..7167, the expected D-new interval. This is logical
+attribution only; equality of historical model inputs and a source/remote/P byte
+join have not been established. The first differing selected row in logical
+order is global3521, covering the pair ending7043 (two unequal elements).
+
+The original core FP8 bits differ in526 elements, packed int32 scales in one
+element, and projected output in4458/5120 elements (maxabs0.0205078125).
+TP size is1 at this boundary. The core therefore receives different KV values;
+this evidence alone does not identify a defective core kernel, producer,
+codec, or transfer. Snapshots are at sparse-attention entry, not an assertion
+about all historical inputs, unused workspace rows or later aliasing.
+
+P837851/start45254691 and D781166/start45254956 (UID500) are the paired request
+epochs. P34's outer controller subsequently ended TIMED_OUT/rc-9: its1500s
+wrapper was shorter than the service's1800s total lifetime. All requests and
+capture barriers had already completed; the model and four ranks are now gone.
+The missing service cleanup result must not be described as natural drain or
+successful shutdown. Preserve this failed terminal evidence and correct the
+wrapper lifetime accounting before any next model epoch. Do not restart models
+to repair this metadata. D reader6 and Consumer v2 are separate finite services.
+
+The next bounded probe uses `capture34_kv_replay_entry.py`: freeze a recipe,
+check/render, then the original submit/controller. Its CPU stage verifies the
+existing four-rank proof, Q/KV/raw references, actual sink checkpoint bytes and
+the full reconstructed RoPE table against captured parameter SHA256. Its GPU
+stage retains the existing strict empty-device admission and1GiB guard. At
+most three core calls calibrate both original query outputs and then replace
+only the17 unequal selected KV rows. Failed calibration blocks attribution.
+No model request, new environment, wheel, old STATE/mHC experiment or producer
+provenance claim is part of this probe.
+
+The finite probe has now completed: CPU plan SHA256
+`930f8c232755f73836537c697883d45d3edc11d81152f5b1ee2bd56c388e8312`,
+GPU plan SHA256
+`19d63b9d728c199b26c7d55081620dc5689eae3dd61b11b17f362e83c12f346f`.
+All three actual core calls finished with controller rc0. The first two exactly
+reproduce both original FP8 outputs and packed scales. The third changes only
+the17 unequal selected rows in the short workspace and exactly produces the
+full-reference output and scales. Physical FB use849,674,240 bytes stays within
+the original1GiB guard. No model RPC was issued; total model requests remain18.
+This proves those KV differences are sufficient for the observed core delta.
+It does not prove why their historical producer values differ. Original query
+rows are reused; other queries and unselected workspace rows are synthetic.
+
+Persisted command (already executed; do not replay this immutable batch):
+
+```bash
+python3 -B deployment/branches/publication-precision-20261101/tools/remote_precision_freeze/capture34_kv_replay_entry.py submit \
+  --plan deployment/coordination/runtime-freeze-batches-20261102/capture34/capture34-kv-replay-GPU-plan.json \
+  --sha256 19d63b9d728c199b26c7d55081620dc5689eae3dd61b11b17f362e83c12f346f \
+  --receipt deployment/reports/publication-precision-20261101/capture34-kv-replay-GPU-submit.json
+```
