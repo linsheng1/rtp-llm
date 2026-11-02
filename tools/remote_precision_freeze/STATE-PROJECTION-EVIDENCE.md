@@ -172,3 +172,59 @@ python3 -B deployment/branches/publication-precision-20261101/tools/remote_preci
   --sha256 19d63b9d728c199b26c7d55081620dc5689eae3dd61b11b17f362e83c12f346f \
   --receipt deployment/reports/publication-precision-20261101/capture34-kv-replay-GPU-submit.json
 ```
+
+
+## Historical producer capture35 (91b, inner diagnostic)
+
+Two additional real requests completed below1024 with native EOF: source7041
+returned241 IDs, normal7169 returned143. Both complete outputs exactly match
+their earlier references. Candidate91b completed12, task total20. No new
+Dremote/P-origin acceptance was run. Normal143 vs prior Dremote113 still first
+differ at zero-based18; whole-model repair is incomplete.
+
+Source plan `4045921263fd8c08087498c8ecbac8dce6d98b0cecd502d27bf2943adc017624`;
+normal plan `cec5f9079a27dfa3e4c4d5678759d82ce235f936212f84365226360080903700`.
+Native result hashes are respectively
+`2141067423f6fa268786f7585717f0f5b4338c5a8206b7735d1d424368cc9a92` and
+`03180d2d6712b3c9ee39397686a5627ad9874686a71003436f0e982cd9417d38`.
+All four ranks exported and joined actual sampled GPU token positions7042/43
+with the sole native request history. Empty DP/CP ranks remain explicit. Raw
+tensors/IDs went device-direct to the seed; this repository stores safe counts,
+hashes and coordinates only. Source and normal model epochs differ and are
+recorded in `history35-comparison-safe.json`; both whole-output calibrations
+are required before comparing their samples.
+
+CPU analysis v2 plan
+`150f0df5c62938a731cf9c1a97a392254a2109f57fab6c8a2445ad9704325770`
+finished under the original device controller with rc0 and zero new model calls.
+Report SHA256
+`e10cf0d54719da1830591fc9b7c20846943bdb162002b5acb5343be410eeb663`.
+L0 attention and FFN input/output, and L1 attention input/output are byte-equal
+at both positions. Earliest ordered sampled difference is L1 FFN input7043:
+1/5120 BF16 values, column1958, maxabs0.00048828125. FFN output then differs
+1080/5120. L2 input differs511/5120; compressed values/scores each differ512/512;
+SWA decode differs69/512 and GLOBAL raw288 differs2 bytes. Position7042 is equal.
+This is upstream of L2 compression/transfer; neither is established as root.
+
+The existing L1 block-entry4HC also matches20480/20480 values. However layer1
+has Engram and retained fusion is0: entry is before injection. Its equality and
+normalized attention-input equality do not prove the actual post-injection
+residual, HC coefficients, routing/expert inputs, quantization scales or whole
+batch equality. Next capture is limited to that missing natural Engram→HC→norm
+seam; do not repeat prior L0 split/STATE experiments.
+
+Control failures before requests are preserved: eager P latches are created on
+first natural CP forward; strict lazy identity still binds all4 live ranks.
+Inference tensors cannot be reset outside inference mode, so source uses strict
+read-only all-zero counter proof. Baseline preparation consumes actual successful
+CLI stdout rather than a nonexistent summary filename. New source/core versions
+retain all immutable historical fingerprints. Healthy models were not rebuilt
+for these metadata failures. Later model batches use the original after-drain
+wrapper with complete wait+service+cleanup lifetime budget.
+
+Persistent executed entries (do not replay an immutable completed batch):
+`freeze_history35_source_v3.py` + `launch_history35_source_v3.py`;
+`freeze_history35_baseline_v2.py` + `launch_history35_baseline_v2.py`;
+`history35_compare_entry_v2.py freeze/check/render/submit`. The shared state
+contains the actual plan/receipt paths. Offline checks do not replace device
+prepare, current leases, process identities or native request-once admission.
