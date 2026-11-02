@@ -1,0 +1,51 @@
+{
+  "candidate_commit": "031fc2af33111e7bbe13bbca6e72ebd6fc094d7c",
+  "plan_SHA256": "711310876e2edaaeea816b74a1fa5391fae422a88a70a6c4713d23527f993962",
+  "controller": "SUCCEEDED",
+  "result": {
+    "GPU_after": {
+      "UUID": "GPU-b10eb9e2-87c1-5912-cd9d-bba3d9293c9a",
+      "capability": [
+        10,
+        3
+      ],
+      "compute_apps": [
+        948170
+      ],
+      "index": 0,
+      "reserved_v2": 992739328,
+      "total_v2": 298013687808,
+      "used_bytes": 1903230976,
+      "used_v2": 910491648
+    },
+    "GPU_before": {
+      "UUID": "GPU-b10eb9e2-87c1-5912-cd9d-bba3d9293c9a",
+      "capability": [
+        10,
+        3
+      ],
+      "compute_apps": [],
+      "index": 0,
+      "reserved_v2": 992739328,
+      "total_v2": 298013687808,
+      "used_bytes": 992739328,
+      "used_v2": 0
+    },
+    "candidate_commit": "031fc2af33111e7bbe13bbca6e72ebd6fc094d7c",
+    "errors": 0,
+    "failures": 0,
+    "formal_acceptance": false,
+    "model_requests": 0,
+    "module_SHA256": "4f15fbf17b81e80d41c39ddb8f2705336c46a681a168c53cc5305b3d7ef3b570",
+    "module_path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/hc-tf32-031-inner-v1/site/rtp_llm/models_py/modules/dsv41/hc/delayed.py",
+    "passed": true,
+    "skipped": 0,
+    "state": "CAPTURE38_GRAPH_LATCH_CONTRACT_COMPLETE",
+    "tests_run": 2,
+    "torch_peak": 3531264,
+    "whole_model_fixed": false
+  },
+  "model_requests": 0,
+  "whole_model_fixed": false,
+  "wheel_SHA256": null
+}
