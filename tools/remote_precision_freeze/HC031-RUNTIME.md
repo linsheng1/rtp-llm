@@ -24,7 +24,7 @@ result SHA256 `6c70f86ba92b085933ef371e17a9a380e622c90667e6c4eccae4283e88db9333`
 
 This input differs from candidate91b's derived input. These are actual-D-history
 diagnostics, not the original business-R acceptance. Across this task, completed
-requests at this checkpoint are618:8,91b:14,031:5, total27. The031 count includes
+requests at this checkpoint are618:8,91b:14,031:7, total29. The031 count includes
 one deliberate P-only max1 publication seed. Three-route complete ID equality
 is not achieved. Whole-model repair, business behavior, exact remote-byte
 provenance and immutable-wheel acceptance remain unproven.
@@ -47,11 +47,20 @@ publication namespace; native result SHA256
 The original pre-seed Manager cursor and metadata collector verified14 new
 canonical keys and14 readable locations, report SHA256
 `9c422cfe82747d28ff32cf465fe29547ebf148d3e6f9d7aa010cd1af9ad57ded`.
-P-restore is pending. The completed-seed/metadata proofs gate an owned P drain
+P-restore completed176 tokens/EOF with local0/remote7168. A third normal
+request on those same P/D epochs completed176 tokens/EOF. Complete-ID comparison
+proves P-restore equals normal exactly, and D-restore differs first at token33.
+All actual generation/route profiles match. Empty-tree observations were
+54.686s (D restore) and19.974s (P restore) old at native request start, within75s.
+The three-route safe report is `hc031-three-routes-safe.json`, result SHA256
+`1a14fe93c362ff7ba7a7b8eae464714b583817d94c86c6bb736a426ce0e77635`.
+Normal complete IDs agree across all three normal epochs. The overall model is
+still not fixed; the remaining arithmetic point needs current-candidate evidence. The completed-seed/metadata proofs gate an owned P drain
 through the original `handoff_state_epoch.py`; no Consumer or D is stopped.
 The D2 lease cannot cover both measured P transitions plus the unchanged180s
-RPC admission. D3 has only been CPU composed/checked; GPU start is deferred to
-the original successful D2 drain, with a new plan, preserving its current lease.
+RPC admission. D3 started only after the original successful D2 drain. The retained Consumer,
+SDK, Manager and Provider were reused. Both P-restore and normal3 used that
+same D3 model epoch; all epoch identities are in the safe comparison report.
 
 The first D restore plan, SHA256
 `64454fdefa489b4b19ad208b7c44a0dc51f0590e21cfac20ff375ff82c38a1e5`,
@@ -113,9 +122,11 @@ The new normal plan is `HC031-normal-plan-v3.json`, SHA256
 it completed after the D-restore stage ended. P-seed used
 `HC031-Pseed2-plan.json`, SHA256
 `dba86e2550c3da47713a0ee322e325d79e07eded08f509bdaa054437f2d73485`.
-The pending P-restore plan is `HC031-Prestore1-plan.json`, SHA256
+The completed P-restore plan is `HC031-Prestore1-plan.json`, SHA256
 `5af9509dc69fbdcc71a5dd0053c1fa5f30d1c3bbcb7c78650d42562b6ff75e7f`;
-its D3 model has not yet been launched at this report checkpoint.
+its D3 model started after the original D2 drain and completed both the
+P-restore and same-epoch normal3 requests. Normal3 plan SHA256 is
+`5dc33fc06edc1a00dd12f328cec9b07f9105408c3050cd59db620a07f19be2d2`.
 
 Read a phase once with a **new** output path; never replay a launch to query it:
 
@@ -133,7 +144,7 @@ zero remaining model processes and actual runtime admission before launching.
 Completed exact CPU configuration may be reused only after plan/exit/probe
 identity checks. Peer roles can be omitted from a recipe to preserve them.
 
-Complete-ID comparison uses `compare_hc031_results_entry_v2.py freeze/check/render/submit`
+Complete-ID comparison uses `compare_hc031_results_entry_v3.py freeze/check/render/submit`
 with actual safe EOF receipts (`--normal`, `--d-result`, optional `--p-result`),
 new `--plan`, `--root`, and existing `--bench`. It invokes the existing CPU-only
 diagnostic comparator on the seed device, exports counts/hashes/first differing
@@ -144,3 +155,8 @@ Latest dynamic stage, exact commands and follow-up gaps remain in
 `/Users/linshuo/项目/decode-remote/deployment/state/publication-precision-20261101.json`,
 key `HC_candidate031_20261103`. PID/lease/READY and cache proofs must always be
 checked live; this document never makes a past snapshot reusable as admission.
+
+Actual three-route comparison plan: `HC031-three-routes-compare-plan-v3.json`,
+SHA256 `09972885857043b25a01a4b4d0a8f7e0237947a3137fb72b566668b17e263ec0`.
+This CPU-only job completed with exit0 and checked complete IDs, exact profiles,
+actual reuse lengths, historical empty-proof age and matching P epochs.

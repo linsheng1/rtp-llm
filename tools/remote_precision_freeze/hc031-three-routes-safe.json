@@ -1,0 +1,290 @@
+{
+  "result_SHA256": "1a14fe93c362ff7ba7a7b8eae464714b583817d94c86c6bb736a426ce0e77635",
+  "actual_generation_profile_SHA256": "8b08c68b5accf3d411deab7495aff702d484c00631a4668393367ae92dcb4cee",
+  "actual_generation_profiles_equal": true,
+  "actual_source_suffix": {
+    "comparisons": {
+      "baseline": {
+        "complete_IDs_equal": false,
+        "first_difference": {
+          "index_zero_based": 32,
+          "token_one_based": 33
+        }
+      },
+      "d-result": {
+        "complete_IDs_equal": true,
+        "first_difference": null
+      },
+      "p-result": {
+        "complete_IDs_equal": false,
+        "first_difference": {
+          "index_zero_based": 32,
+          "token_one_based": 33
+        }
+      }
+    },
+    "consumed_source_output_tokens": 128,
+    "remaining_actual_source_tokens": 167,
+    "scope": "actual source token sequence only; no inferred computed/published KV boundary",
+    "source_output_tokens": 295
+  },
+  "business_acceptance": false,
+  "cache_evidence": {
+    "baseline": {
+      "local_reuse_len": 0,
+      "namespace": "pubprec_hc031_Porigin_v1",
+      "remote_reuse_len": 0
+    },
+    "d-result": {
+      "empty_observer_requests": 0,
+      "empty_tree_node_count": 0,
+      "fresh_proof": {
+        "SHA256": "50ce95bc2f9ed5d483a9cb02f32661c3acf7ad8a2ec317c103003cf792a5adad",
+        "bytes": 5563,
+        "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/dgdet-stage-d-restore-hc031D2/fresh-proof.json"
+      },
+      "local_reuse_len": 0,
+      "namespace": "pubprec_hc031_Dorigin_v1",
+      "native_request_empty_metric_age_seconds": 54.68555808067322,
+      "remote_reuse_len": 7168
+    },
+    "p-result": {
+      "empty_observer_requests": 0,
+      "empty_tree_node_count": 0,
+      "fresh_proof": {
+        "SHA256": "00ed28386aefdbbd3ee784f66b22fb9b356a97c7b666cf948262d222f317d7e2",
+        "bytes": 5584,
+        "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/dgdet-stage-p-restore-hc031PR1/fresh-proof.json"
+      },
+      "local_reuse_len": 0,
+      "namespace": "pubprec_hc031_Porigin_v1",
+      "native_request_empty_metric_age_seconds": 19.974480152130127,
+      "remote_reuse_len": 7168
+    }
+  },
+  "candidate_commit": "031fc2af33111e7bbe13bbca6e72ebd6fc094d7c",
+  "cross_epoch_normal_complete_IDs_equal": true,
+  "cross_epoch_normal_first_difference": null,
+  "exact_request_provenance": "PENDING",
+  "first_difference_positions": {
+    "d_result": {
+      "index_zero_based": 32,
+      "token_one_based": 33
+    },
+    "p_result": null
+  },
+  "formal_acceptance": false,
+  "input_ids_sha256": "3982930c351652d4c939acb4e883924ee85bc381454b3eeff16622e8f5edf63c",
+  "input_tokens": 7169,
+  "model_requests": 0,
+  "output_metadata": {
+    "baseline": {
+      "SHA256": "b750f4dcd07dc960a4b5ad8c1d4bb01a9cc98a5d170e1cba1a03e271b35a2694",
+      "tokens": 176
+    },
+    "d_result": {
+      "SHA256": "3c6695e0270ccd97a42e4db52cf4f20f5d1afcb7e514aa195e3ec3dc2f05188c",
+      "tokens": 167
+    },
+    "p_result": {
+      "SHA256": "b750f4dcd07dc960a4b5ad8c1d4bb01a9cc98a5d170e1cba1a03e271b35a2694",
+      "tokens": 176
+    }
+  },
+  "outputs_equal": {
+    "d_result": false,
+    "p_result": true
+  },
+  "plan_SHA256": "09972885857043b25a01a4b4d0a8f7e0237947a3137fb72b566668b17e263ec0",
+  "role_epochs": {
+    "baseline": {
+      "D": {
+        "GPU_ranks": [
+          {
+            "PID": 861149,
+            "UID": 500,
+            "start_ticks": "47078700"
+          },
+          {
+            "PID": 861150,
+            "UID": 500,
+            "start_ticks": "47078700"
+          },
+          {
+            "PID": 861151,
+            "UID": 500,
+            "start_ticks": "47078705"
+          },
+          {
+            "PID": 861152,
+            "UID": 500,
+            "start_ticks": "47078705"
+          }
+        ],
+        "model_root": {
+          "PID": 860911,
+          "UID": 500,
+          "start_ticks": "47077792"
+        },
+        "namespace": "pubprec_hc031_Dorigin_v1"
+      },
+      "P": {
+        "GPU_ranks": [
+          {
+            "PID": 924774,
+            "UID": 500,
+            "start_ticks": "47047966"
+          },
+          {
+            "PID": 924775,
+            "UID": 500,
+            "start_ticks": "47047966"
+          },
+          {
+            "PID": 924776,
+            "UID": 500,
+            "start_ticks": "47047971"
+          },
+          {
+            "PID": 924777,
+            "UID": 500,
+            "start_ticks": "47047971"
+          }
+        ],
+        "model_root": {
+          "PID": 924679,
+          "UID": 500,
+          "start_ticks": "47047129"
+        },
+        "namespace": "pubprec_hc031_Porigin_v1"
+      }
+    },
+    "d-result": {
+      "D": {
+        "GPU_ranks": [
+          {
+            "PID": 850446,
+            "UID": 500,
+            "start_ticks": "46915792"
+          },
+          {
+            "PID": 850447,
+            "UID": 500,
+            "start_ticks": "46915792"
+          },
+          {
+            "PID": 850448,
+            "UID": 500,
+            "start_ticks": "46915798"
+          },
+          {
+            "PID": 850449,
+            "UID": 500,
+            "start_ticks": "46915798"
+          }
+        ],
+        "model_root": {
+          "PID": 850209,
+          "UID": 500,
+          "start_ticks": "46914900"
+        },
+        "namespace": "pubprec_hc031_Dorigin_v1"
+      },
+      "P": {
+        "GPU_ranks": [
+          {
+            "PID": 909240,
+            "UID": 500,
+            "start_ticks": "46905397"
+          },
+          {
+            "PID": 909241,
+            "UID": 500,
+            "start_ticks": "46905397"
+          },
+          {
+            "PID": 909243,
+            "UID": 500,
+            "start_ticks": "46905404"
+          },
+          {
+            "PID": 909244,
+            "UID": 500,
+            "start_ticks": "46905404"
+          }
+        ],
+        "model_root": {
+          "PID": 909138,
+          "UID": 500,
+          "start_ticks": "46904477"
+        },
+        "namespace": "pubprec_hc031_Dorigin_v1"
+      }
+    },
+    "p-result": {
+      "D": {
+        "GPU_ranks": [
+          {
+            "PID": 861149,
+            "UID": 500,
+            "start_ticks": "47078700"
+          },
+          {
+            "PID": 861150,
+            "UID": 500,
+            "start_ticks": "47078700"
+          },
+          {
+            "PID": 861151,
+            "UID": 500,
+            "start_ticks": "47078705"
+          },
+          {
+            "PID": 861152,
+            "UID": 500,
+            "start_ticks": "47078705"
+          }
+        ],
+        "model_root": {
+          "PID": 860911,
+          "UID": 500,
+          "start_ticks": "47077792"
+        },
+        "namespace": "pubprec_hc031_Dorigin_v1"
+      },
+      "P": {
+        "GPU_ranks": [
+          {
+            "PID": 924774,
+            "UID": 500,
+            "start_ticks": "47047966"
+          },
+          {
+            "PID": 924775,
+            "UID": 500,
+            "start_ticks": "47047966"
+          },
+          {
+            "PID": 924776,
+            "UID": 500,
+            "start_ticks": "47047971"
+          },
+          {
+            "PID": 924777,
+            "UID": 500,
+            "start_ticks": "47047971"
+          }
+        ],
+        "model_root": {
+          "PID": 924679,
+          "UID": 500,
+          "start_ticks": "47047129"
+        },
+        "namespace": "pubprec_hc031_Porigin_v1"
+      }
+    }
+  },
+  "scope": "actual-D-history continuation diagnostic; NOT original business R; NOT formal acceptance",
+  "source_remote_destination_byte_equality": "PENDING",
+  "state": "TOKEN_ONLY_ACTUAL_D_HISTORY_DIAGNOSTIC_COMPARISON"
+}
