@@ -612,7 +612,14 @@ class DeepSeekV4Model(GptModelBase):
             # Set the launch policy before model construction, JIT warmup and capture.
             pdl = os.environ.get("DSV41_PDL", "1") == "1"
             deep_gemm.set_pdl(pdl)
-            logging.info("[DeepSeekV4Model] DeepGEMM PDL enabled=%s (DSV41_PDL)", pdl)
+            # Prefix reuse changes M. Keep MegaMHC and MegaGate reductions
+            # batch invariant before any JIT warmup or CUDA graph capture.
+            deep_gemm.use_deterministic_algorithms(True)
+            logging.info(
+                "[DeepSeekV4Model] DeepGEMM PDL enabled=%s (DSV41_PDL), "
+                "batch-invariant algorithms enabled",
+                pdl,
+            )
         self._max_prefill_batch_tokens = int(
             getattr(init_resource, "max_batch_tokens_size", 0)
         )

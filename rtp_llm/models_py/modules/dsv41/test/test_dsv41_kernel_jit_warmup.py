@@ -1271,9 +1271,12 @@ class V41KernelJitWarmupTest(unittest.TestCase):
                     instance = self.model_initialize_fixture()
                     instance._is_decode_role = decode
                     expected = setting != "0"
-                    state = {"pdl": not expected}
+                    state = {"pdl": not expected, "deterministic": False}
                     setter = mock.Mock(
                         side_effect=lambda value: state.update(pdl=value)
+                    )
+                    deterministic = mock.Mock(
+                        side_effect=lambda value: state.update(deterministic=value)
                     )
                     stack.enter_context(mock.patch.dict(os.environ, {}, clear=True))
                     if setting is not None:
@@ -1281,7 +1284,13 @@ class V41KernelJitWarmupTest(unittest.TestCase):
                     stack.enter_context(
                         mock.patch.dict(
                             sys.modules,
-                            {"deep_gemm": fake_module("deep_gemm", set_pdl=setter)},
+                            {
+                                "deep_gemm": fake_module(
+                                    "deep_gemm",
+                                    set_pdl=setter,
+                                    use_deterministic_algorithms=deterministic,
+                                )
+                            },
                         )
                     )
                     stack.enter_context(mock.patch.object(torch.version, "hip", None))
@@ -1301,8 +1310,9 @@ class V41KernelJitWarmupTest(unittest.TestCase):
                                 if decode
                                 else "warmup_v41_prefill_jit"
                             ),
-                            side_effect=lambda *a, **kw: self.assertIs(
-                                state["pdl"], expected
+                            side_effect=lambda *a, **kw: (
+                                self.assertIs(state["pdl"], expected),
+                                self.assertIs(state["deterministic"], True),
                             ),
                         )
                     )
@@ -1310,6 +1320,7 @@ class V41KernelJitWarmupTest(unittest.TestCase):
                         instance._initialize_impl(types.SimpleNamespace(kv_cache=None))
                     )
                     setter.assert_called_once_with(expected)
+                    deterministic.assert_called_once_with(True)
                     warm.assert_called_once()
 
     def test_initialize_pdl_hardware_and_model_guards(self):
@@ -1324,9 +1335,16 @@ class V41KernelJitWarmupTest(unittest.TestCase):
                 instance = self.model_initialize_fixture()
                 instance._v4_args.v41_config = config
                 setter = mock.Mock()
+                deterministic = mock.Mock()
                 with mock.patch.dict(
                     sys.modules,
-                    {"deep_gemm": fake_module("deep_gemm", set_pdl=setter)},
+                    {
+                        "deep_gemm": fake_module(
+                            "deep_gemm",
+                            set_pdl=setter,
+                            use_deterministic_algorithms=deterministic,
+                        )
+                    },
                 ), mock.patch.object(torch.version, "hip", hip), mock.patch.object(
                     torch.cuda, "is_available", return_value=cuda
                 ), mock.patch.object(
@@ -1339,8 +1357,10 @@ class V41KernelJitWarmupTest(unittest.TestCase):
                     )
                 if enabled:
                     setter.assert_called_once_with(True)
+                    deterministic.assert_called_once_with(True)
                 else:
                     setter.assert_not_called()
+                    deterministic.assert_not_called()
 
     def test_initial_model_warmup_dispatches_by_role(self):
         source = _REPO / "rtp_llm/models_py/model_desc/deepseek_v41_base_model.py"
