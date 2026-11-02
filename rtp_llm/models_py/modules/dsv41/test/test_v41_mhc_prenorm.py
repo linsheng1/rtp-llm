@@ -160,6 +160,31 @@ class V41MHCPreNormCudaTest(unittest.TestCase):
                             actual, row_reference.expand_as(actual), rtol=0, atol=0
                         )
 
+    @torch.inference_mode()
+    @patch.dict(
+        os.environ,
+        {"DSV4_MHC_PRE_GEMM_BACKEND": "auto", "DSV4_MHC_SPLIT_MODE": "fixed"},
+    )
+    def test_delayed_hc_keeps_coefficients_across_large_auto_backend_boundary(self):
+        row, fn, base, scale = self._inputs(1)
+        previous = _make_unit(fn.clone(), base.clone(), scale.clone())
+        unit = _make_unit(fn, base, scale)
+        unit.set_previous(previous)
+        reference = None
+        for tokens in (1, 513):
+            previous.pre_mix_out = torch.full(
+                (tokens, 4), 0.25, dtype=torch.float32, device=row.device
+            )
+            y, post, comb = unit.pre(row.repeat(tokens, 1, 1))
+            outputs = (unit.pre_mix_out, post, comb, y)
+            if reference is None:
+                reference = tuple(value[0].clone() for value in outputs)
+            else:
+                for actual, expected in zip(outputs, reference):
+                    torch.testing.assert_close(
+                        actual, expected.expand_as(actual), rtol=0, atol=0
+                    )
+
     @torch.no_grad()
     def _check_mixes_and_coefficients(self, residual, fn, base, scale):
         expected = _old_mixes(residual, fn)

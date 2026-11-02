@@ -1,0 +1,443 @@
+{
+  "result_SHA256": "9b627134d369d067c856cfe32d49d221dcc084258cbbfb673c0d2a2bdd92a61a",
+  "result": {
+    "GPU_budget_bytes": 1073741824,
+    "GPU_memory": [
+      {
+        "stage": "prepared_M1",
+        "torch_peak": 5898240,
+        "used_v2": 849674240
+      },
+      {
+        "stage": "raw_M1794",
+        "torch_peak": 105462784,
+        "used_v2": 944046080
+      },
+      {
+        "stage": "prepared_M1794",
+        "torch_peak": 105462784,
+        "used_v2": 944046080
+      },
+      {
+        "stage": "Mega_source",
+        "torch_peak": 105462784,
+        "used_v2": 849674240
+      },
+      {
+        "stage": "Mega_normal",
+        "torch_peak": 197130240,
+        "used_v2": 1038417920
+      },
+      {
+        "stage": "Mega_only_previous_mix_from_normal",
+        "torch_peak": 197130240,
+        "used_v2": 849674240
+      }
+    ],
+    "actual_M": {
+      "normal": 1794,
+      "source": 1
+    },
+    "actual_fixed_split_selection": {
+      "1": 50,
+      "1794": 50
+    },
+    "actual_flags": {
+      "DSV4_MHC_NUM_SPLITS": null,
+      "DSV4_MHC_PRE_GEMM_BACKEND": null,
+      "DSV4_MHC_SPLIT_MODE": "fixed"
+    },
+    "actual_input_and_output_SHA256": {
+      "normal": {
+        "FFNHC_comb16": "d887bc857ce30a1f2496601be0e72a769ac7ba7046a65769641d6aedc1f9a113",
+        "FFNHC_post4": "d046021bd789e7b643023b901f53e41a437a711bcd3e002b0f9828521ba6f75a",
+        "FFNHC_pre4": "b52357c02ce91fa17e0a386f52aaaadb3b86fc8b1bfeb2f74273f2f4b3035cb4",
+        "FFN_input5120": "40442f01fee6f934221441c3558adc97c703658d7378f9c31ac7a0a4db4466a6",
+        "after_Engram4HC": "25a4d4b9fdb9d106f277b17b12b95ea55877b1644c9b925626a8b0319c235028",
+        "attnHC_comb16": "038ae1c649f4858854b34a0a1dcbb87b66a10ea52b593146709147ae8b1f0f74",
+        "attnHC_post4": "5f3c9370ee1a108277b80843def3dc1179ef8aafc3acd60c685b4b5e94f52dd6",
+        "attnHC_pre4": "a4bf4aaea4c65d9ca38c5a3bccd8dcc6b02d9b7cd8493d620e8bdceb15ca8e98",
+        "natural_attnHC_comb16": "038ae1c649f4858854b34a0a1dcbb87b66a10ea52b593146709147ae8b1f0f74",
+        "natural_attnHC_post4": "5f3c9370ee1a108277b80843def3dc1179ef8aafc3acd60c685b4b5e94f52dd6",
+        "natural_attnHC_pre4": "a4bf4aaea4c65d9ca38c5a3bccd8dcc6b02d9b7cd8493d620e8bdceb15ca8e98",
+        "natural_attnHC_residual4HC": "25a4d4b9fdb9d106f277b17b12b95ea55877b1644c9b925626a8b0319c235028",
+        "seam_FFN_norm5120": "40442f01fee6f934221441c3558adc97c703658d7378f9c31ac7a0a4db4466a6",
+        "seam_actual_rows": "7ba2f02ece6ef4bc035e666b0a3528b748bc0fc54a750c25c186e25d8e751430",
+        "seam_attn_out5120": "95af747f24c7ae4d00f32b48f943b1dc3a3a70c7dae4eb30e3c964616318f6fe",
+        "seam_fused_route": "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a",
+        "seam_post4HC": "23f1d2bd13f0652490a1975abb6f1dbc02450a2a6e1b99e8c6db66ed35c831bb",
+        "seam_residual4HC": "25a4d4b9fdb9d106f277b17b12b95ea55877b1644c9b925626a8b0319c235028"
+      },
+      "source": {
+        "FFNHC_comb16": "d887bc857ce30a1f2496601be0e72a769ac7ba7046a65769641d6aedc1f9a113",
+        "FFNHC_post4": "d046021bd789e7b643023b901f53e41a437a711bcd3e002b0f9828521ba6f75a",
+        "FFNHC_pre4": "b52357c02ce91fa17e0a386f52aaaadb3b86fc8b1bfeb2f74273f2f4b3035cb4",
+        "FFN_input5120": "7662abcc5f7ea69ca10fcb4e60cf18d6a456840be354acbd36d035006e2ba8de",
+        "after_Engram4HC": "25a4d4b9fdb9d106f277b17b12b95ea55877b1644c9b925626a8b0319c235028",
+        "attnHC_comb16": "8ad012e65bc342b6901b11c80399d030bbdcd1c299887062854b77747e028688",
+        "attnHC_post4": "5f3c9370ee1a108277b80843def3dc1179ef8aafc3acd60c685b4b5e94f52dd6",
+        "attnHC_pre4": "a7952065dd2a9b1ff9ce6ddecb225efb8c3a0374868f2d27a04dcb3806310d41",
+        "natural_attnHC_comb16": "8ad012e65bc342b6901b11c80399d030bbdcd1c299887062854b77747e028688",
+        "natural_attnHC_post4": "5f3c9370ee1a108277b80843def3dc1179ef8aafc3acd60c685b4b5e94f52dd6",
+        "natural_attnHC_pre4": "a7952065dd2a9b1ff9ce6ddecb225efb8c3a0374868f2d27a04dcb3806310d41",
+        "natural_attnHC_residual4HC": "25a4d4b9fdb9d106f277b17b12b95ea55877b1644c9b925626a8b0319c235028",
+        "seam_FFN_norm5120": "7662abcc5f7ea69ca10fcb4e60cf18d6a456840be354acbd36d035006e2ba8de",
+        "seam_actual_rows": "67abdd721024f0ff4e0b3f4c2fc13bc5bad42d0b7851d456d88d203d15aaa450",
+        "seam_attn_out5120": "95af747f24c7ae4d00f32b48f943b1dc3a3a70c7dae4eb30e3c964616318f6fe",
+        "seam_fused_route": "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a",
+        "seam_post4HC": "23f1d2bd13f0652490a1975abb6f1dbc02450a2a6e1b99e8c6db66ed35c831bb",
+        "seam_residual4HC": "25a4d4b9fdb9d106f277b17b12b95ea55877b1644c9b925626a8b0319c235028"
+      }
+    },
+    "actual_request_ids": {
+      "normal": 6442273048506,
+      "source": 172592320328206
+    },
+    "analysis": {
+      "SHA256": "a225a1cfbb42c6100f0b6e180291f974e6b0ce7937595aa74750b10e1e694a57",
+      "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/history36-seam-comparison-v1/comparison-safe.json"
+    },
+    "calls": [
+      {
+        "label": "prepared_M1",
+        "outputs": {
+          "comb": {
+            "SHA256": "8ad012e65bc342b6901b11c80399d030bbdcd1c299887062854b77747e028688",
+            "byte_equal_original": true
+          },
+          "post": {
+            "SHA256": "5f3c9370ee1a108277b80843def3dc1179ef8aafc3acd60c685b4b5e94f52dd6",
+            "byte_equal_original": true
+          },
+          "pre": {
+            "SHA256": "a7952065dd2a9b1ff9ce6ddecb225efb8c3a0374868f2d27a04dcb3806310d41",
+            "byte_equal_original": true
+          }
+        }
+      },
+      {
+        "label": "raw_M1794",
+        "outputs": {
+          "comb": {
+            "SHA256": "038ae1c649f4858854b34a0a1dcbb87b66a10ea52b593146709147ae8b1f0f74",
+            "byte_equal_original": true
+          },
+          "post": {
+            "SHA256": "5f3c9370ee1a108277b80843def3dc1179ef8aafc3acd60c685b4b5e94f52dd6",
+            "byte_equal_original": true
+          },
+          "pre": {
+            "SHA256": "a4bf4aaea4c65d9ca38c5a3bccd8dcc6b02d9b7cd8493d620e8bdceb15ca8e98",
+            "byte_equal_original": true
+          }
+        }
+      },
+      {
+        "label": "prepared_M1794",
+        "outputs": {
+          "comb": {
+            "SHA256": "8ad012e65bc342b6901b11c80399d030bbdcd1c299887062854b77747e028688",
+            "byte_equal_original": null
+          },
+          "post": {
+            "SHA256": "5f3c9370ee1a108277b80843def3dc1179ef8aafc3acd60c685b4b5e94f52dd6",
+            "byte_equal_original": null
+          },
+          "pre": {
+            "SHA256": "a7952065dd2a9b1ff9ce6ddecb225efb8c3a0374868f2d27a04dcb3806310d41",
+            "byte_equal_original": null
+          }
+        }
+      },
+      {
+        "label": "Mega_source",
+        "outputs": {
+          "comb": {
+            "SHA256": "d887bc857ce30a1f2496601be0e72a769ac7ba7046a65769641d6aedc1f9a113",
+            "byte_equal_original": true
+          },
+          "norm": {
+            "SHA256": "7662abcc5f7ea69ca10fcb4e60cf18d6a456840be354acbd36d035006e2ba8de",
+            "byte_equal_original": true
+          },
+          "post": {
+            "SHA256": "d046021bd789e7b643023b901f53e41a437a711bcd3e002b0f9828521ba6f75a",
+            "byte_equal_original": true
+          },
+          "pre": {
+            "SHA256": "b52357c02ce91fa17e0a386f52aaaadb3b86fc8b1bfeb2f74273f2f4b3035cb4",
+            "byte_equal_original": true
+          },
+          "residual": {
+            "SHA256": "23f1d2bd13f0652490a1975abb6f1dbc02450a2a6e1b99e8c6db66ed35c831bb",
+            "byte_equal_original": true
+          }
+        }
+      },
+      {
+        "label": "Mega_normal",
+        "outputs": {
+          "comb": {
+            "SHA256": "d887bc857ce30a1f2496601be0e72a769ac7ba7046a65769641d6aedc1f9a113",
+            "byte_equal_original": true
+          },
+          "norm": {
+            "SHA256": "40442f01fee6f934221441c3558adc97c703658d7378f9c31ac7a0a4db4466a6",
+            "byte_equal_original": true
+          },
+          "post": {
+            "SHA256": "d046021bd789e7b643023b901f53e41a437a711bcd3e002b0f9828521ba6f75a",
+            "byte_equal_original": true
+          },
+          "pre": {
+            "SHA256": "b52357c02ce91fa17e0a386f52aaaadb3b86fc8b1bfeb2f74273f2f4b3035cb4",
+            "byte_equal_original": true
+          },
+          "residual": {
+            "SHA256": "23f1d2bd13f0652490a1975abb6f1dbc02450a2a6e1b99e8c6db66ed35c831bb",
+            "byte_equal_original": true
+          }
+        }
+      },
+      {
+        "label": "Mega_only_previous_mix_from_normal",
+        "outputs": {
+          "comb": {
+            "SHA256": "d887bc857ce30a1f2496601be0e72a769ac7ba7046a65769641d6aedc1f9a113",
+            "byte_equal_original": null
+          },
+          "norm": {
+            "SHA256": "40442f01fee6f934221441c3558adc97c703658d7378f9c31ac7a0a4db4466a6",
+            "byte_equal_original": null
+          },
+          "post": {
+            "SHA256": "d046021bd789e7b643023b901f53e41a437a711bcd3e002b0f9828521ba6f75a",
+            "byte_equal_original": null
+          },
+          "pre": {
+            "SHA256": "b52357c02ce91fa17e0a386f52aaaadb3b86fc8b1bfeb2f74273f2f4b3035cb4",
+            "byte_equal_original": null
+          },
+          "residual": {
+            "SHA256": "23f1d2bd13f0652490a1975abb6f1dbc02450a2a6e1b99e8c6db66ed35c831bb",
+            "byte_equal_original": null
+          }
+        }
+      }
+    ],
+    "candidate_commit": "91b4635faf8c65cc67e66ab52a46f5c932cd08ea",
+    "checkpoint": [
+      {
+        "actual_parameter_payload_bytes": 1966080,
+        "full_shard_content_hashed": false,
+        "header_SHA256": "a18996c1e8f291117f9a2b638ffbd24c0b60babafd44db75bedfab1bec3a3f4a",
+        "index_SHA256": "74b0686a3d2891980d5e303251b075a3bccae2c2ff650747db2620a649b98fa8",
+        "shard_bytes": 7389759032,
+        "shard_path": "/mnt/fuse/deepseek-ai/DeepSeek-V4.1-Flash/model-00004-of-00048.safetensors",
+        "tensor_reads": [
+          {
+            "SHA256": "c95a2d2c56e8ea19b49af37e84e51488d2bbfd5221a3c0bb9626833bf6c1a090",
+            "bytes": 1966080,
+            "dtype": "F32",
+            "key": "layers.1.hc_attn_fn",
+            "offset": 261568,
+            "shape": [
+              24,
+              20480
+            ]
+          }
+        ],
+        "weight_values_exported": false
+      },
+      {
+        "actual_parameter_payload_bytes": 96,
+        "full_shard_content_hashed": false,
+        "header_SHA256": "a18996c1e8f291117f9a2b638ffbd24c0b60babafd44db75bedfab1bec3a3f4a",
+        "index_SHA256": "74b0686a3d2891980d5e303251b075a3bccae2c2ff650747db2620a649b98fa8",
+        "shard_bytes": 7389759032,
+        "shard_path": "/mnt/fuse/deepseek-ai/DeepSeek-V4.1-Flash/model-00004-of-00048.safetensors",
+        "tensor_reads": [
+          {
+            "SHA256": "f9abb9d6f02f5833f0379e35d2241746e0f488b6665c112dcb264ead9c328071",
+            "bytes": 96,
+            "dtype": "F32",
+            "key": "layers.1.hc_attn_base",
+            "offset": 261472,
+            "shape": [
+              24
+            ]
+          }
+        ],
+        "weight_values_exported": false
+      },
+      {
+        "actual_parameter_payload_bytes": 12,
+        "full_shard_content_hashed": false,
+        "header_SHA256": "a18996c1e8f291117f9a2b638ffbd24c0b60babafd44db75bedfab1bec3a3f4a",
+        "index_SHA256": "74b0686a3d2891980d5e303251b075a3bccae2c2ff650747db2620a649b98fa8",
+        "shard_bytes": 7389759032,
+        "shard_path": "/mnt/fuse/deepseek-ai/DeepSeek-V4.1-Flash/model-00004-of-00048.safetensors",
+        "tensor_reads": [
+          {
+            "SHA256": "c64ba77478e3624fe91a69b078839ff2accb8e6b4abb2e843b82a8857a8f8ae9",
+            "bytes": 12,
+            "dtype": "F32",
+            "key": "layers.1.hc_attn_scale",
+            "offset": 2227648,
+            "shape": [
+              3
+            ]
+          }
+        ],
+        "weight_values_exported": false
+      },
+      {
+        "actual_parameter_payload_bytes": 1966080,
+        "full_shard_content_hashed": false,
+        "header_SHA256": "a18996c1e8f291117f9a2b638ffbd24c0b60babafd44db75bedfab1bec3a3f4a",
+        "index_SHA256": "74b0686a3d2891980d5e303251b075a3bccae2c2ff650747db2620a649b98fa8",
+        "shard_bytes": 7389759032,
+        "shard_path": "/mnt/fuse/deepseek-ai/DeepSeek-V4.1-Flash/model-00004-of-00048.safetensors",
+        "tensor_reads": [
+          {
+            "SHA256": "09f10bf8ba6d0f16db0280bf9acb341f92ebd85d4c2a28e19e8e6adce9783114",
+            "bytes": 1966080,
+            "dtype": "F32",
+            "key": "layers.1.hc_ffn_fn",
+            "offset": 2227756,
+            "shape": [
+              24,
+              20480
+            ]
+          }
+        ],
+        "weight_values_exported": false
+      },
+      {
+        "actual_parameter_payload_bytes": 96,
+        "full_shard_content_hashed": false,
+        "header_SHA256": "a18996c1e8f291117f9a2b638ffbd24c0b60babafd44db75bedfab1bec3a3f4a",
+        "index_SHA256": "74b0686a3d2891980d5e303251b075a3bccae2c2ff650747db2620a649b98fa8",
+        "shard_bytes": 7389759032,
+        "shard_path": "/mnt/fuse/deepseek-ai/DeepSeek-V4.1-Flash/model-00004-of-00048.safetensors",
+        "tensor_reads": [
+          {
+            "SHA256": "c50f949a71dbd484422625c67d369070c57e26cc16b82202e38b66bfc3d3bd0a",
+            "bytes": 96,
+            "dtype": "F32",
+            "key": "layers.1.hc_ffn_base",
+            "offset": 2227660,
+            "shape": [
+              24
+            ]
+          }
+        ],
+        "weight_values_exported": false
+      },
+      {
+        "actual_parameter_payload_bytes": 12,
+        "full_shard_content_hashed": false,
+        "header_SHA256": "a18996c1e8f291117f9a2b638ffbd24c0b60babafd44db75bedfab1bec3a3f4a",
+        "index_SHA256": "74b0686a3d2891980d5e303251b075a3bccae2c2ff650747db2620a649b98fa8",
+        "shard_bytes": 7389759032,
+        "shard_path": "/mnt/fuse/deepseek-ai/DeepSeek-V4.1-Flash/model-00004-of-00048.safetensors",
+        "tensor_reads": [
+          {
+            "SHA256": "25c676c7a2a50b71998be76906bb1046cd321b459d5ac531c4e25b9f7e6b5bf5",
+            "bytes": 12,
+            "dtype": "F32",
+            "key": "layers.1.hc_ffn_scale",
+            "offset": 4193836,
+            "shape": [
+              3
+            ]
+          }
+        ],
+        "weight_values_exported": false
+      },
+      {
+        "actual_parameter_payload_bytes": 10240,
+        "full_shard_content_hashed": false,
+        "header_SHA256": "a18996c1e8f291117f9a2b638ffbd24c0b60babafd44db75bedfab1bec3a3f4a",
+        "index_SHA256": "74b0686a3d2891980d5e303251b075a3bccae2c2ff650747db2620a649b98fa8",
+        "shard_bytes": 7389759032,
+        "shard_path": "/mnt/fuse/deepseek-ai/DeepSeek-V4.1-Flash/model-00004-of-00048.safetensors",
+        "tensor_reads": [
+          {
+            "SHA256": "a8723c1a7ae2f42482d22b33859efdafe2bc78df3faa0b435461709bcc6de8c3",
+            "bytes": 10240,
+            "dtype": "BF16",
+            "key": "layers.1.ffn_norm.weight",
+            "offset": 8139832,
+            "shape": [
+              5120
+            ]
+          }
+        ],
+        "weight_values_exported": false
+      }
+    ],
+    "coefficient_replacement_reproduces_all_normal_seam_outputs": true,
+    "config_SHA256": "8be45ce0476004a3f529fd896115a4a2e800a129ad2d3ec05b16050f52e21879",
+    "epochs": {
+      "normal": {
+        "D": {
+          "PID": 823739,
+          "UID": 500,
+          "start_ticks": "46292451"
+        },
+        "P": {
+          "PID": 881261,
+          "UID": 500,
+          "start_ticks": "46291568"
+        }
+      },
+      "source": {
+        "D": {
+          "PID": 823739,
+          "UID": 500,
+          "start_ticks": "46292451"
+        },
+        "P": {
+          "PID": 881261,
+          "UID": 500,
+          "start_ticks": "46291568"
+        }
+      }
+    },
+    "formal_acceptance": false,
+    "fullbatch_or_expert_scale_equality_claimed": false,
+    "limit": "Actual target row repeated for other execution rows; no fullbatch/expert/quantized-side-output equivalence. Calibration of all sampled visible outputs precedes attribution. Whole3route model acceptance remains required.",
+    "model_requests": 0,
+    "only_previous_mix_reproduces_normal_norm": true,
+    "only_weight_representation_changed_at_M1794_proves_HC_delta": true,
+    "operator_root_cause_proven": true,
+    "owners": {
+      "normal": [
+        881352
+      ],
+      "source": [
+        823984
+      ]
+    },
+    "planned_tensor_workspace_reserve_bytes": 201326592,
+    "primitive_calls": 6,
+    "raw_exports": {
+      "normal": [
+        {
+          "SHA256": "bfd0e278518cfcdf1653066ba6df6911176dcfbcd4baa3bd58cbf48ac38e1fe4",
+          "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/history36-seam-comparison-v1/normal-881352.pt"
+        }
+      ],
+      "source": [
+        {
+          "SHA256": "3289f4462a72ee2c3a36ca876befbdaf3ed3f30755696cca28ee747b953ebb3c",
+          "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/history36-seam-comparison-v1/source-823984.pt"
+        }
+      ]
+    },
+    "state": "HISTORY36_HC_WEIGHT_BOUNDARY_AND_SEAM_PROVEN",
+    "synthetic_other_rows": true,
+    "whole_model_fixed": false
+  }
+}

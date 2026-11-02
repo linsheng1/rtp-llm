@@ -107,7 +107,9 @@ class DelayedHCUnit(HCUnitBase):
                 use_deepgemm = is_supported(residual, self.fn)
                 pre, post, comb, y = ops.mhc_pre_big_fuse(
                     residual,
-                    prepare_tf32_weight(self.fn) if use_deepgemm else self.fn,
+                    # The large-M auto backend also selects DeepGEMM. Keep
+                    # its TF32 input boundary identical to a decode suffix.
+                    prepare_tf32_weight(self.fn),
                     self.scale,
                     self.base,
                     rms_eps=self.norm_eps,

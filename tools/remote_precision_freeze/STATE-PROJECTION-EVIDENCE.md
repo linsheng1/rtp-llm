@@ -283,3 +283,34 @@ read; device controllers retain all periodic monitoring. Shared state contains
 actual recipes, plans and exact commands. Do not replay completed immutable
 batches. Model services keep their original drain and Consumer/static lease
 guards; component replay waits for actual owned model drain/empty-GPU admission.
+
+
+## L1 coefficient and normalization causal replay
+
+CPU plan `6503233f6c18c9e8c45e61aa48879402e09e5b90f7881ad8a5c92d54f3f08204`
+and GPU plan
+`ab434dc84ab40191e1251f3e55251ae6db8aa7cce626962f2fa3b7b8053538af`
+completed under the original controller with rc0,0 model calls. Six primitive
+calls calibrated all sampled outputs before attribution. Report SHA256
+`9b627134d369d067c856cfe32d49d221dcc084258cbbfb673c0d2a2bdd92a61a`.
+The actual existing fixed split policy selects50 for bothM1/M1794 here. This
+is not a repeat of the old L0 split16/1 experiment.
+
+Prepared weight atM1 exactly produces captured decode attention-HC coefficients;
+raw weight atM1794 exactly produces captured normal coefficients. At fixedM1794,
+changing only that weight representation to the existing prepared TF32 form
+produces all decode coefficients exactly. Both original MegaMHC calls reproduce
+their complete sampled outputs. In the sourceM1 call, replacing only four
+delayed attention pre-mix values produces every normal sampled output exactly,
+including the normalized FFN row. No comb substitution was needed. Other rows
+repeat the captured query; whole-batch/expert/FP8-side-output equality is not
+claimed. The original strict empty-GPU admission and1GiB budget passed.
+
+The actual default large-M big-fuse backend is DeepGEMM, although the outer
+small-token support gate returnsFalse. That branch passed raw FP32 weights;
+the small branch passed the existing biased/truncating TF32 preparation. The
+minimal product change applies that same preparation before both big-fuse
+branches. A numeric delayed-HC regression comparesM1/M513 across this boundary,
+with a real predecessor, and requires bitwise coefficient/readout invariance.
+GPU regression and same-candidate3route complete-ID checks remain mandatory;
+no whole-model fix, full wheel or performance acceptance has been completed.
