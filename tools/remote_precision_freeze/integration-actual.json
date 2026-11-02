@@ -1,0 +1,137 @@
+{
+  "actual_report": {
+    "SHA256": "2315f5e00f834bd42cba51088407594504bccb9aec0eb90658c4be25e8952ebd",
+    "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/runtime-freeze-capture23-actual.json"
+  },
+  "actual_requests_this_batch": 2,
+  "actual_requests_total": 8,
+  "artifact_kind": "native_incremental_inner_not_wheel_acceptance",
+  "barriers": {
+    "full": {
+      "proof": {
+        "SHA256": "53b57c46135e76a37dccf8803903d97d633672de49287785bc2a4df05de002e0",
+        "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/airline4-P-state-pilot-capture23-coordinator/full-barrier.json"
+      },
+      "ranks": 4,
+      "state": "FOUR_ACTUAL_RANK_FULL_CAPTURES_DRAINED",
+      "transition_state": "ACTUAL_HC_SEAM_QUERY_AND_PARAMETERS_CAPTURED"
+    },
+    "short": {
+      "proof": {
+        "SHA256": "2b1477ee96a30be562fc32c17d0fbf7545d01652b8e4e26dacc7880090d6c9b1",
+        "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/airline4-P-state-pilot-capture23-coordinator/short-barrier.json"
+      },
+      "ranks": 4,
+      "state": "FOUR_ACTUAL_RANK_SHORT_CAPTURES_DRAINED",
+      "transition_state": "ACTUAL_HC_SEAM_QUERY_AND_PARAMETERS_CAPTURED"
+    }
+  },
+  "candidate_commit": "61887b83eb180619032a46f0f2dc0eb86248ee09",
+  "control_commit": "the commit containing this report; final binding in task shared state",
+  "controllers": {
+    "D": {
+      "command_returncode": 0,
+      "finished_at": 1793612428.499038,
+      "reason": "command and explicit artifact acceptance passed",
+      "state": "SUCCEEDED"
+    },
+    "P": {
+      "command_returncode": 0,
+      "finished_at": 1793612428.502008,
+      "reason": "command and explicit artifact acceptance passed",
+      "state": "SUCCEEDED"
+    },
+    "receiver": {
+      "command_returncode": 0,
+      "finished_at": 1793612431.514651,
+      "reason": "command and explicit artifact acceptance passed",
+      "state": "SUCCEEDED"
+    }
+  },
+  "device_prepare": {
+    "exit": {
+      "SHA256": "aed11a619e7a0ba3e70feabda003d02a301be764ce315de81f306c8fc1792a17",
+      "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/airline4-P-state-pilot-capture23-coordinator/client-prepare-exit.json"
+    },
+    "rc": 0
+  },
+  "epochs": {
+    "D": {
+      "PID": 697398,
+      "UID": 500,
+      "start_ticks": "42500859"
+    },
+    "P": {
+      "PID": 724945,
+      "UID": 500,
+      "start_ticks": "42501672"
+    }
+  },
+  "fresh_empty_age_at_native_request_seconds": 50.25055432319641,
+  "full_IDs": {
+    "Dremote_equals_new_normal": false,
+    "Premote_equals_new_normal": true,
+    "first_difference_one_based": 33,
+    "first_difference_zero_based": 32,
+    "new_Dremote_equals_reference": true,
+    "new_normal_equals_reference": true
+  },
+  "local_regressions": {
+    "errors": 0,
+    "failures": 0,
+    "model_requests": 0,
+    "skipped": 0,
+    "tests": 18
+  },
+  "next_gap": "Compare existing verified four-rank samples to locate earliest remaining D-origin numerical difference; no new sample points or wheel before evidence requires them.",
+  "plan_SHA256": "e9d7fc2c30a7c91080ae95ea00d52deed8bddf8141b85cb36c541fb1c98a6833",
+  "results": {
+    "full": {
+      "EOF": true,
+      "finished_at": 1793612427.9420269,
+      "input_SHA256": "07cf16434cfb7964bb1090f9c4c4d4b30823be0ef3bb3ace8c58fd4de913522c",
+      "input_tokens": 7169,
+      "local_reuse": 0,
+      "output_SHA256": "2f7c68078bc9fb55492cfd2a9213d391b993e57d4f36ddb47697cf5fe2e3dfeb",
+      "output_tokens": 175,
+      "reached_cap": false,
+      "remote_reuse": 0,
+      "request_id": 3334883862544,
+      "result": {
+        "SHA256": "a6f5cd605efab4b9539ecfd3fcfb4eb662753d4f3dd50afe48484013fd58745d",
+        "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/airline4-P-state-pilot-capture23-coordinator/client/full/native/result.json"
+      },
+      "runtime_EOS_verified": false,
+      "started_at": 1793612424.6204283,
+      "summary": {
+        "SHA256": "0c124ad1ec2e882ff9c246c5b646bf5face1b01c624e23ee09dcd08eb3cceabe",
+        "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/airline4-P-state-pilot-capture23-coordinator/client/full/summary.json"
+      }
+    },
+    "short": {
+      "EOF": true,
+      "finished_at": 1793612421.1985085,
+      "input_SHA256": "07cf16434cfb7964bb1090f9c4c4d4b30823be0ef3bb3ace8c58fd4de913522c",
+      "input_tokens": 7169,
+      "local_reuse": 0,
+      "output_SHA256": "499b4f773f2276c0dc403db95b5af808fa46249b87dde46a920180f582f9b21f",
+      "output_tokens": 128,
+      "reached_cap": false,
+      "remote_reuse": 7168,
+      "request_id": 148473867072934,
+      "result": {
+        "SHA256": "30844a43673d25152f937bf569518c236bf1c75d294055a30b42b5d6b396cd64",
+        "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/airline4-P-state-pilot-capture23-coordinator/client/short/native/result.json"
+      },
+      "runtime_EOS_verified": false,
+      "started_at": 1793612417.8772693,
+      "summary": {
+        "SHA256": "d1241462e4ab2434c0f068e6a4e221af8536023b2c69b74ae139e2623c6e91a4",
+        "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/airline4-P-state-pilot-capture23-coordinator/client/short/summary.json"
+      }
+    }
+  },
+  "scope": "Frozen entry integration; whole precision repair remains open",
+  "wheel_SHA256": null,
+  "whole_precision_fixed": false
+}
