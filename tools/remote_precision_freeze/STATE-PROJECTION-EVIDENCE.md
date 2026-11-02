@@ -61,3 +61,47 @@ capture24 completed both actual requests and both four-rank barriers. Its full I
 The next frozen batch, capture25 (`072f8070e194690d1cdce3f3eb4dae1042b4c79a62c138db0902d8a2c3c25c19`), adds only11 single-query boundaries covering that interval. Its unchanged2-request protocol uses at most2,834,848 additional retained bytes /2,906,592 peak bytes, below the original4MiB/16MiB limits. CPU model configuration passed; no capture25 request completion is claimed here.
 
 All control plans use task-qualified basenames in the flat device control directory. The first capture24 analysis attempt correctly rejected an existing historical `analysis-plan.json` (`673a2228…91a2da9`), before any analysis launch or RPC. The old file was preserved; `capture24-analysis-plan.json` (`ab6892c1…6e86260`) completed through the same original controller. No model was restarted for this control error.
+
+capture30 completed through the persistent frozen entry (2026-11-03 +08).
+Plan SHA256 `61fdd8316ed1008de78fcd6d2e05fa6f7cfa277854dcf2802071a01e38969494`;
+device actual report `control/runtime-freeze-capture30-actual.json`, SHA256
+`f99765af8906e407575d54872c788d84fed1545b75901a3a6c5579a725386001`.
+Actual CPU prepare/live identity gates passed on all three ends, two native
+requests completed EOF below1024, and both four-rank barriers passed. Fresh
+empty proof age was23.005856s within75. D-remote local0/remote7168 returned113;
+normal local0/remote0 returned143. Both full ID lists exactly reproduce their
+prior same-candidate references despite the documented P/D epoch change.
+They still first differ at output index18/token19. P-origin remains unexecuted.
+Candidate91b requests completed8; including618 task total16.
+
+Paired epochs: P PID812208/start44723991, D PID760658/start44750076, UID500.
+The old P and D reader models completed their original natural drain, actual
+root returncodes0. Consumers, immutable Python overlays, native/ad62 artifacts
+and static checkpoint tables were reused. No model restarted for metadata
+errors. Earlier capture27/28 each had actual RPC0; their terminal evidence is
+preserved separately. This is inner diagnostic evidence, not wheel acceptance.
+
+All11 added query points were compared from existing raw files on the device.
+Read-only report SHA256
+`765dc5d4d61e038dc2fe3c4794a359574fea41b66529c3db62beae60ab71297a`.
+The earliest newly sampled difference is **L2 attention projected+all-reduced
+output7168**,4458/5120 BF16 elements, maxabs0.0205078125. L3 normalized input
+already differs4588/5120. L2 hidden7168 and prior STATE7167 remain byte-equal;
+all17 L0/L1 query points and five sampled MoE query inputs remain equal.
+These are sampled boundaries, not whole-batch or complete-history equality.
+
+A second read-only pass reused the same four-rank capture and compared original
+L2 values512/scores512 at7168 (all16 cross-rank pairs each), plus STATE store1024
+at7168 (actual valid owners). Every comparison is byte-equal. Both cases took
+prefill=true, batched_groups=false, projected_full=false, previous-state-present.
+Accepted report SHA256
+`33e9f577de1050764e3db54e7c717114afc245ed6e221853d28caf8875728fdb`.
+The first postprocessor failed before publishing a result because a bytes loop
+variable shadowed argparse arguments; only that variable was renamed in a new
+immutable source/plan. This added zero model requests and no GPU rerun.
+
+Specific remaining gap: actual Q/selected historical KV, sparse index and
+length mapping, sink/RoPE/static parameter identity, core output and projection
+before/after all-reduce inside L2 attention. No evidence yet attributes the
+remaining difference to transfer, selection, a kernel or output projection.
+No further arithmetic change or wheel build is justified yet.
