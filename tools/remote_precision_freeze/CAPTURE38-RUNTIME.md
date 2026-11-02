@@ -65,3 +65,8 @@ python3 -B "$E/capture38_compare_entry.py" submit --plan "$D/CPU-compare-plan-v1
 ```
 
 Do not replay completed batches. Next gap is the L25 D internal computation and unsampled P7168 layer entries. Retain current model/Consumer/keeper instances until the next original safe boundary.
+
+Computation-order qualification
+-------------------------------
+
+The pinned `hc/decode_transition.py:forward_decode_layer` resolves a cross-layer MegaMHC into `(residual, normalized_input, post, comb[, quant])` before calling `Block.forward_decode`. The recorded Block x equals prepared residual. Its equality does not establish equality of prepared normalized input, HC coefficients or quantization. Therefore the L26-entry finding is a sampled boundary, not proof of an operator root entirely inside L25. The next profile reads those actual prepared inputs as well as missing P7168 entries, and changes no model math.
