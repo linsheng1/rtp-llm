@@ -52,7 +52,24 @@ def _linear_bf16_bf16_fp32(x: torch.Tensor, weight: torch.Tensor) -> torch.Tenso
     """F.linear(x, weight) with BF16 operands and FP32 accumulation/output."""
     leading_shape = x.shape[:-1]
     x_2d = x.reshape(-1, x.shape[-1])
-    out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight)
+    if (
+        x_2d.is_cuda
+        and x_2d.dtype == weight.dtype == torch.bfloat16
+        and x_2d.shape[1] % 16 == 0
+        and weight.shape[0] % 16 == 0
+        and torch.cuda.get_device_capability(x_2d.device)[0] == 10
+    ):
+        from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import bf16_gemm_nt
+
+        # STATE keeps FP32 projections across requests. cuBLAS may change their
+        # reduction with M (prefill vs decode), before any cache transport.
+        # V4.1 initialization enables DeepGEMM's deterministic algorithms.
+        out_2d = torch.empty(
+            (x_2d.shape[0], weight.shape[0]), device=x_2d.device, dtype=torch.float32
+        )
+        bf16_gemm_nt(x_2d.contiguous(), weight.contiguous(), out_2d)
+    else:
+        out_2d = _CUBLAS_GEMM_BF16_BF16_FP32(x_2d, weight)
     return out_2d.reshape(*leading_shape, weight.shape[0])
 
 
