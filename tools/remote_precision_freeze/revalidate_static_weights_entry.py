@@ -1,0 +1,18 @@
+"""Frozen one-time full-content static-weight revalidation; original controller."""
+import argparse,json,sys
+from pathlib import Path
+import freeze_stage as f
+
+def main():
+ p=argparse.ArgumentParser(allow_abbrev=False);p.add_argument('command',choices=['freeze','check','render','submit']);p.add_argument('--plan',type=Path,required=True);p.add_argument('--sha256');p.add_argument('--role',choices=['P','D']);p.add_argument('--overlay',type=Path);p.add_argument('--bench',type=Path,required=True);p.add_argument('--receipt',type=Path);a=p.parse_args();sys.path.insert(0,str(a.bench));from remote_control import remote
+ from cluster23_dispatch import submit
+ if a.command=='freeze':
+  overlay,op=f.doc(a.overlay);prepared=overlay['state-projection-91b-inner-v1/prepare-result.json']['value'];f.need(prepared['state']=='IMMUTABLE_PYTHON_CANDIDATE_OVERLAY_CREATED_NOT_IMPORTED' and prepared['host']==f.HOSTS[a.role],'actual overlay role');script=f.read(f.BASE/'revalidate_static_weights.py')[1];code='import json,types\nm=types.ModuleType("frozen_static_weight_metadata");exec(compile(%r,"<source-only-preflight>","exec"),m.__dict__)\nprint(json.dumps(m.inputs(%r,%r)))'%(Path(script['path']).read_text(),prepared['environment'],prepared['manifest']);inputs=remote('cluster3',prepared['host'],code,90);tag='state-candidate91b-static-'+a.role+'-v1';plan=dict(schema='full-content-static-keeper-plan-v1',role=a.role,host=prepared['host'],candidate_commit=prepared['candidate_commit'],environment=prepared['environment'],manifest=prepared['manifest'],inputs=inputs,seconds=10800,output_root=f.CONTROL+'/'+tag,script=dict(path=f.CONTROL+'/revalidate_static_weights.py',SHA256=script['SHA256']),local_pins=dict(script=script,entry=f.read(__file__)[1],overlay=op),model_requests=0,weight_source_and_table_bytes_to_read=2*sum(t['bytes'] for t in inputs['tables']),memory_chunk_bytes=8*1024**2)
+  plan['job']=dict(host=plan['host'],name=tag+'-controller',timeout=10860,argv=['/opt/conda310/bin/python3.10','-B','-S',plan['script']['path'],'--plan',f.CONTROL+'/'+a.plan.name,'--sha256','${PLAN_SHA256}'],verify=[dict(path=tag+'/status.json',json_fields=dict(state='EXITED',returncode=0,full_weight_content_hashed=True,model_requests=0))]);print(json.dumps(dict(SHA256=f.save_new(a.plan,plan),model_requests=0)));return
+ plan,pin=f.doc(a.plan);f.need(pin['SHA256']==a.sha256,'immutable plan drift')
+ for v in plan['local_pins'].values():f.need(f.read(v['path'])[1]==v,'source pin drift')
+ job=dict(plan['job']);job['argv']=[a.sha256 if v=='${PLAN_SHA256}' else v for v in job['argv']]
+ if a.command=='check':print(json.dumps(dict(state='OFFLINE_PINS_PASS',model_requests=0)));return
+ if a.command=='render':print(json.dumps(job));return
+ assets={plan['script']['path']:Path(plan['local_pins']['script']['path']).read_text(),f.CONTROL+'/'+a.plan.name:a.plan.read_text()};code='''import json,os,subprocess\nfrom pathlib import Path\nfor name,raw in %r.items():\n p=Path(name)\n if p.exists():assert not p.is_symlink() and p.read_text()==raw,'immutable control changed'\n else:\n  with p.open('x') as o:o.write(raw);o.flush();os.fsync(o.fileno())\nr=subprocess.run(%r,env=dict(os.environ,CUDA_VISIBLE_DEVICES=''),capture_output=True,text=True,timeout=120);assert r.returncode==0,r.stderr\nprint(json.dumps(dict(CPU_prepare=json.loads(r.stdout))))'''%(assets,job['argv']+['--check']);cpu=remote('cluster3',job['host'],code,150);launch=submit('cluster3',job['host'],job['name'],job['argv'],job['timeout'],job['verify'],env={'CUDA_VISIBLE_DEVICES':''});f.save_new(a.receipt,dict(plan_SHA256=a.sha256,CPU=cpu,launch=launch));print(json.dumps(dict(state='SUBMITTED_NOT_CONTENT_VERIFIED',model_requests=0)))
+if __name__=='__main__':main()

@@ -70,6 +70,9 @@ def remote_path(value):
 
 def build(recipe):
     """Read safe existing receipts; never import deployment modules."""
+    if recipe.get('flow') == 'state-source':
+        from state_source_flow import build as build_source
+        return build_source(recipe)
     if recipe.get('flow') == 'capture':
         from capture_flow import build_capture
         return build_capture(recipe)
@@ -227,6 +230,11 @@ def main():
         plan = build(recipe)
         plan['local_pins']['recipe'] = recipe_pin
         plan['local_pins']['freeze_stage'] = read(__file__)[1]
+        if recipe.get('launcher'):
+            need(recipe['launcher']=='launch_state_routes.py','unknown bounded route launcher')
+            plan['local_pins']['route_launcher'] = read(BASE/recipe['launcher'])[1]
+        if recipe.get('flow') == 'state-source':
+            plan['local_pins']['state_source_flow.py'] = read(BASE / 'state_source_flow.py')[1]
         if recipe.get('flow') == 'capture':
             for name in ['capture_flow.py', 'launch_stage.py', 'new_capture_recipe.py', 'prepare_capture_models.py', 'bind_capture_controls.py']:
                 plan['local_pins'][name] = read(BASE / name)[1]

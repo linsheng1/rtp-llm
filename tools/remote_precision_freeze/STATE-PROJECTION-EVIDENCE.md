@@ -39,3 +39,25 @@ This is component evidence only. The new module-level GPU regressions and real
 normal/P-origin/D-origin complete-ID comparison must run against the bound new
 candidate before whole-model repair can be accepted. Historical failed control
 attempts remain in the task state; they are not counted as passing comparisons.
+
+Actual candidate `91b4635faf8c65cc67e66ab52a46f5c932cd08ea` model follow-up (2026-11-02):
+
+- The committed module's two GPU tests passed on C3, with zero skips/errors/failures. Both private Python overlays reuse the unchanged C1 native libraries and ad62 DeepGEMM; no wheel has been built for this candidate.
+- Three model requests completed: original G7041 source returned241 tokens; D-remote returned113; the same-instance normal bypass returned143. All completed EOF below1024. Runtime EOS binding remains independently unverified.
+- Both continuations use the exact same R7169 IDs as capture23 (`07cf1643…13522c`) and the same sampling parameters. P and D process epochs agree across these two continuation requests. D-remote reports local0/remote7168; normal reports local0/remote0.
+- **Whole-model outputs still differ at output index18 (token19, one-based). This candidate is NOT a complete precision repair.** P-origin for91b has not been run. Full-wheel acceptance is blocked by this observed difference.
+- The next finite batch is capture24, reusing the unchanged capture23 sampling points, observers and budgets for two requests plus all four rank drain/coverage proofs. Its frozen plan SHA is `fc5eff77515d4026b1dfc40314d1d866f8133e33d4ccf769dd5399d7bc9dc8e9`. Its actual module helpers are versioned against91b, the241-token source receipt and the143-token normal reference. The healthy D/Consumers remain; only P changes at a verified completed-request/drain boundary to establish a fresh instrumented allocator instance.
+
+Safe device evidence references:
+
+- Source: `control/state91b-source-source1/request/native/result.json`, SHA256 `57769b6b19d18558fbc3c472838b418be032642adf40a679fe61aa4b0fc643fd`.
+- D-remote: `control/state91b-d-restore-native-fix91bD1/native/result.json`, SHA256 `d763a1cc363894deb801810dba73b9a9cddcdf75c2aae3deee502daa3213d46f`.
+- Normal: `control/state91b-baseline-native-fix91bN1/native/result.json`, SHA256 `7347e87250dd2ab0e93c1bcc3955d190ff11eb333ce39565b4870505915e60a3`.
+
+The static weight lease gap was resolved by a one-time device-local full checkpoint-vs-table hash verification of202,758,032,400 bytes per node, followed by new live read-only SH leases. No expired READY was reused, no table was unlinked, and no model/cache bytes were relayed through the Mac. The new model admission still verifies actual PID/UID/start, FD identities, READ FLOCKs, current heartbeat and full remaining lifetime. Posthoc native/Manager metadata does not prove exact source-D/remote/P byte provenance; that scope remains explicit.
+
+capture24 completed both actual requests and both four-rank barriers. Its full IDs exactly reproduce the uninstrumented113/143 references, at the same token19 divergence. Empty proof age at request admission was17.586s, within the unchanged75s guard. Read-only comparison (`55e72120…810edbad`) proves L2 hidden7168 and all four restored STATE7167 copies byte-equal to normal; all17 L0/L1 boundaries and five MoE query boundaries remain byte-equal. L8 hidden7168 still differs5020/5120 (maxabs0.04296875), and its STATE7167 differs1024/1024. Thus the remaining calculation difference lies after L2 input/STATE and before L8 input; the specific operator remains unproven.
+
+The next frozen batch, capture25 (`072f8070e194690d1cdce3f3eb4dae1042b4c79a62c138db0902d8a2c3c25c19`), adds only11 single-query boundaries covering that interval. Its unchanged2-request protocol uses at most2,834,848 additional retained bytes /2,906,592 peak bytes, below the original4MiB/16MiB limits. CPU model configuration passed; no capture25 request completion is claimed here.
+
+All control plans use task-qualified basenames in the flat device control directory. The first capture24 analysis attempt correctly rejected an existing historical `analysis-plan.json` (`673a2228…91a2da9`), before any analysis launch or RPC. The old file was preserved; `capture24-analysis-plan.json` (`ab6892c1…6e86260`) completed through the same original controller. No model was restarted for this control error.

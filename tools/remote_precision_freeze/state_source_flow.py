@@ -1,0 +1,15 @@
+"""Adapt the existing three-endpoint frozen protocol to its original D-source action."""
+from pathlib import Path
+import freeze_stage as f
+
+def build(recipe):
+ bench=Path(recipe['bench']);files={'launcher':f.read(f.BASE/'launch_state_source.py')[1],'remote_control':f.read(bench/'remote_control.py')[1],'cluster23_dispatch':f.read(bench/'cluster23_dispatch.py')[1]};core=f.literals(bench/recipe['helpers']['core']);f.need(core['B1']==recipe['candidate_commit'],'core candidate mismatch');roles={};jobs={};tag=recipe['tag'];f.need(__import__('re').fullmatch('[A-Za-z0-9_-]{1,40}',tag),'new source tag')
+ for name,helper in recipe['helpers'].items():
+  raw,files[name]=f.read(bench/helper);__import__('ast').parse(raw)
+ for role in ['P','D']:
+  row,files['dispatch:'+role]=f.doc(recipe['roles'][role]['dispatch']);argv=row['argv'];f.need(f.option(argv,'--role')==role and f.option(argv,'--host')==f.HOSTS[role],'role mapping');f.need(f.option(argv,'--manifest-sha256')==core['MANIFESTS'][f.HOSTS[role]] and f.option(argv,'--env-sha256')==core['ENV'],'actual candidate manifest/environment');f.need(files['model_helper']['SHA256']==core['MODEL_HELPER'],'reviewed model helper mismatch');roles[role]=dict(host=f.HOSTS[role],root=f.remote_path(f.option(argv,'--root')),plan_SHA256=row['plan_SHA256'],namespace=f.option(argv,'--namespace'),parent_controller_status=f.remote_path(recipe['roles'][role]['parent_controller_status']))
+  jobs[role]=dict(host=f.HOSTS[role],argv=['/opt/conda310/bin/python3.10','-B','-S',f.CONTROL+'/'+recipe['helpers']['sender'],'--role',role,'--model-root',roles[role]['root'],'--plan-sha256',row['plan_SHA256'],'--output-root',f.CONTROL+'/state91b-source-probe-'+role+'-'+tag,'--parent-controller-status',roles[role]['parent_controller_status']])
+ f.need(roles['P']['namespace']==roles['D']['namespace']=='pubprec_state91b_Dorigin_v1','source shared namespace');f.need(files['core']['SHA256'] in Path(files['receiver']['path']).read_text() and files['core']['SHA256'] in Path(files['sender']['path']).read_text(),'receiver/sender core pins differ')
+ jobs['receiver']=dict(host=f.HOSTS['receiver'],argv=['/opt/conda310/bin/python3.10','-B','-S',f.CONTROL+'/'+recipe['helpers']['receiver'],'--root',f.CONTROL+'/state91b-source-'+tag,'--action','d-source','--tag',tag,'--seconds','900','--request-timeout-seconds','180'])
+ source,files['source_input_receipt']=f.doc(recipe['source_input_receipt']);f.need(source['input_tokens']==7041 and recipe['G_input_ids_SHA256']=='22510597b00881511fec56f072a5ef0ed3593b8a32b069e4189f0d75f258e49c','original G input receipt')
+ return dict(schema='existing-c3-stage-freeze-v1',flow='state-source',scope='OFFLINE_CONTROL_BINDING_ONLY',cluster='cluster3',candidate_commit=core['B1'],action='d-source',tag=tag,roles=roles,input=dict(tokens=7041,SHA256=recipe['G_input_ids_SHA256'],source_input_receipt=files['source_input_receipt']),runtime_gates='original actual identity+full CPU protobuf prepare+exclusive request marker+EOF checks',fresh_proof_max_age_seconds=75,local_pins=files,jobs=jobs)
