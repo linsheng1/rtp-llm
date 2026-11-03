@@ -1,0 +1,678 @@
+{
+  "candidate_commit": "031fc2af33111e7bbe13bbca6e72ebd6fc094d7c",
+  "artifact_kind": "inner_python_overlay",
+  "complete_immutable_acceptance_wheel_SHA256": null,
+  "whole_model_fixed": false,
+  "native_completed_before_capture44": 41,
+  "plans": {
+    "Capture44-CPUChain-plan-v1.json": {
+      "path": "/Users/linshuo/\u9879\u76ee/decode-remote/deployment/coordination/runtime-freeze-batches-20261102/capture44/Capture44-CPUChain-plan-v1.json",
+      "SHA256": "29a1ad263d0c4615317449581c14307d34dde1f3003e2fd8ba98a4ba3a079dae"
+    },
+    "Capture44-GPUChain-plan-v1.json": {
+      "path": "/Users/linshuo/\u9879\u76ee/decode-remote/deployment/coordination/runtime-freeze-batches-20261102/capture44/Capture44-GPUChain-plan-v1.json",
+      "SHA256": "44769a1a5fd566e24ff8b8b21841a0301ee619ba22b347f1479070c9c4364382"
+    },
+    "Capture44-GPUChain-plan-v2.json": {
+      "path": "/Users/linshuo/\u9879\u76ee/decode-remote/deployment/coordination/runtime-freeze-batches-20261102/capture44/Capture44-GPUChain-plan-v2.json",
+      "SHA256": "7be8d53fef9854913f88db9aea1667fb9a99c944d764a772c9564c488a4b51f6"
+    },
+    "Capture44-Source-plan-v1.json": {
+      "path": "/Users/linshuo/\u9879\u76ee/decode-remote/deployment/coordination/runtime-freeze-batches-20261102/capture44/Capture44-Source-plan-v1.json",
+      "SHA256": "6d75a05143e74a232c55d2fad4090084ba831deb4ee251fefeff65337318714e"
+    },
+    "Capture44-Normal-plan-v1.json": {
+      "path": "/Users/linshuo/\u9879\u76ee/decode-remote/deployment/coordination/runtime-freeze-batches-20261102/capture44/Capture44-Normal-plan-v1.json",
+      "SHA256": "9d290609acb7d388bd77c03d46a231386a8f02ce153d06367edf8fed8a260ef4"
+    },
+    "models-v1/P-model-plan.json": {
+      "path": "/Users/linshuo/\u9879\u76ee/decode-remote/deployment/coordination/runtime-freeze-batches-20261102/capture44/models-v1/P-model-plan.json",
+      "SHA256": "42d7dc3c936ffc9816c775ac062050268c5f4f965c797842ada6e204fdfa21d6"
+    },
+    "models-v1/D-model-plan.json": {
+      "path": "/Users/linshuo/\u9879\u76ee/decode-remote/deployment/coordination/runtime-freeze-batches-20261102/capture44/models-v1/D-model-plan.json",
+      "SHA256": "59d1776ac196951cc0a94347e1b5780c2f4bb641a29d42412fddd1b5f2cc2af8"
+    }
+  },
+  "CPU_full_chain": {
+    "state": "ACTUAL_RECORD_EXPORT_CHAIN_PASS",
+    "mode": "cpu",
+    "roles": [
+      {
+        "role": "P",
+        "points": 30,
+        "latch_bytes": 933679,
+        "actual_export_SHA256": "8c7d3df6aaa4a0e36bdea58ca24622950a929ef76e541da98a1b7e3b9c034445",
+        "typed_comparisons": [
+          {
+            "byte_equal": true,
+            "elements": 20480,
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "elements": 32768,
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "elements": 7,
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "elements": 1,
+            "unequal_elements": 0
+          }
+        ]
+      },
+      {
+        "role": "D",
+        "points": 33,
+        "latch_bytes": 501495,
+        "actual_export_SHA256": "1ce3daaa9c331244e3704c625712005fd5b5beef0fa45e5b5d1764de5fec33bb",
+        "typed_comparisons": [
+          {
+            "byte_equal": true,
+            "elements": 20480,
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "elements": 32768,
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "elements": 7,
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "elements": 1,
+            "unequal_elements": 0
+          }
+        ]
+      }
+    ],
+    "synthetic_only": true,
+    "GPU_graph_tested": false,
+    "model_requests": 0,
+    "whole_model_fixed": false,
+    "boundary_shims": [
+      "Tensor.is_cuda",
+      "cuda.is_current_stream_capturing",
+      "cuda.synchronize",
+      "torch.full CPU device marker"
+    ]
+  },
+  "GPU_full_chain": {
+    "state": "CAPTURE44_FULL_CHAIN_GRAPH_CONTRACT_COMPLETE",
+    "passed": true,
+    "tests_run": 1,
+    "failures": 0,
+    "errors": 0,
+    "torch_peak": 13166592,
+    "model_requests": 0
+  },
+  "failed_extra_scope_P_graph": "GPU v1 tested P graph despite actual P enable_cuda_graph0; CPU->CUDA constant copy rejected. Failed result preserved; v2 matches actual eagerP/graphD.",
+  "hash_budget": {
+    "checkpoint_header_SHA256": "12384ed75114b654e9464d4c31bb77e6a66188280191b771e532465a0c3e13fe",
+    "checkpoint_selected_bytes": 84759040,
+    "conservative_runtime_hash_bound_bytes": 104857600,
+    "original_hash_budget_bytes": 134217728,
+    "derivation": "selected original producer weights/norms plus only Mega query/output/sink; source permutations preserve payload sizes; per-row scale expansion bounded under additional 15MiB; full cos table and duplicate Wqb/Woa excluded",
+    "model_requests": 0
+  },
+  "scope": "completed two original model requests/all4rank captures/typed CPU compare; next minimal calibrated GLOBAL membership intervention pending; whole-model precision not fixed",
+  "native_requests_completed_in_capture44": 2,
+  "native_requests_completed_task": 43,
+  "all_four_rank_evidence_complete": true,
+  "source_EOF": true,
+  "normal_EOF": true,
+  "source_native_SHA256": "220dcd3730ad8862a927eab5cb918d66d423fc39325737e8ea2a32d25ab2bfcf",
+  "normal_native_SHA256": "84009419c7688f0455fa530edb8f7ffcd1901425ad550eb76ecf21092ea5cd28",
+  "comparison": {
+    "GPU_tokens_joined": true,
+    "all_prior_capture42_common_points_byte_equal": true,
+    "candidate_commit": "031fc2af33111e7bbe13bbca6e72ebd6fc094d7c",
+    "checks": [
+      {
+        "byte_equal": true,
+        "comparable": true,
+        "elements": 20480,
+        "layer": 24,
+        "max_abs_difference": 0.0,
+        "point": "block_entry4HC",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "comparable": true,
+        "elements": 1,
+        "layer": 24,
+        "max_abs_difference": 0.0,
+        "point": "actual_input_token",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "comparable": true,
+        "elements": 5120,
+        "layer": 24,
+        "max_abs_difference": 0.0,
+        "point": "actual_attention_input5120",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "comparable": true,
+        "elements": 1280,
+        "layer": 24,
+        "max_abs_difference": 0.0,
+        "point": "Qr_before_Q_projection",
+        "unequal_elements": 0
+      },
+      {
+        "comparable": false,
+        "layer": 24,
+        "normal_present": true,
+        "point": "Qr_actual_quant_0",
+        "source_present": false
+      },
+      {
+        "comparable": false,
+        "layer": 24,
+        "normal_present": true,
+        "point": "Qr_actual_quant_1",
+        "source_present": false
+      },
+      {
+        "comparable": false,
+        "layer": 24,
+        "normal_present": true,
+        "point": "Q_after_projection",
+        "source_present": false
+      },
+      {
+        "byte_equal": true,
+        "comparable": true,
+        "elements": 32768,
+        "layer": 24,
+        "max_abs_difference": 0.0,
+        "point": "Q_before_core",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "comparable": true,
+        "elements": 1,
+        "layer": 24,
+        "max_abs_difference": 0.0,
+        "point": "core_positions",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "comparable": true,
+        "elements": 64,
+        "layer": 24,
+        "max_abs_difference": 0.0,
+        "point": "sink",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "comparable": true,
+        "elements": 64,
+        "layer": 24,
+        "max_abs_difference": 0.0,
+        "point": "cos_sin_position_row",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "comparable": true,
+        "elements": 1,
+        "layer": 24,
+        "max_abs_difference": 0.0,
+        "point": "softmax_scale",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "comparable": true,
+        "elements": 32768,
+        "layer": 24,
+        "max_abs_difference": 23.0,
+        "point": "core_output",
+        "unequal_elements": 267
+      },
+      {
+        "byte_equal": true,
+        "comparable": true,
+        "elements": 256,
+        "layer": 24,
+        "max_abs_difference": 0.0,
+        "point": "core_scales",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "comparable": true,
+        "elements": 5120,
+        "layer": 24,
+        "max_abs_difference": 0.0390625,
+        "point": "output_projection5120",
+        "unequal_elements": 4500
+      },
+      {
+        "byte_equal": false,
+        "comparable": true,
+        "elements": 5120,
+        "layer": 24,
+        "max_abs_difference": 0.0390625,
+        "point": "pre_AR5120",
+        "unequal_elements": 4500
+      },
+      {
+        "byte_equal": false,
+        "comparable": true,
+        "elements": 5120,
+        "layer": 24,
+        "max_abs_difference": 0.0390625,
+        "point": "post_AR5120",
+        "unequal_elements": 4500
+      },
+      {
+        "byte_equal": false,
+        "comparable": true,
+        "elements": 5120,
+        "layer": 24,
+        "max_abs_difference": 0.0390625,
+        "point": "attention_output5120",
+        "unequal_elements": 4500
+      }
+    ],
+    "coefficient_FFN_causality_proven": false,
+    "common_actual_parameter_names": [
+      "kv_norm",
+      "mega.output_scale",
+      "mega.output_weight",
+      "mega.query_scale",
+      "mega.query_weight",
+      "mega.sink",
+      "q_norm",
+      "wkv.weight",
+      "wkv.weight_scales",
+      "wq_a_wkv.weight",
+      "wq_a_wkv.weight_scales"
+    ],
+    "common_actual_parameters_byte_equal": true,
+    "coverage": {
+      "normal": {
+        "D": [
+          {
+            "PID": 975416,
+            "SHA256": "cd71aec73641a31efad336a5e5059efe3d4808203c2e6a8de844a43f72f01ed8",
+            "empty": true,
+            "points": 0,
+            "world_rank": 0
+          },
+          {
+            "PID": 975417,
+            "SHA256": "ae4d5e3c550ca8373cef70f4f69dad19b55cfc95b69d39b506b20e7826079a98",
+            "empty": true,
+            "points": 0,
+            "world_rank": 1
+          },
+          {
+            "PID": 975418,
+            "SHA256": "b7b9d6ce2fc85155a5ac58cf917adfd9a3c4f6bbb8d0c24069a3659fdd2510dd",
+            "empty": true,
+            "points": 0,
+            "world_rank": 2
+          },
+          {
+            "PID": 975419,
+            "SHA256": "d9ff5ba8f6fa2900425f6bbfa8410db9e0ecb4bd98f506b9db7f27ee071b5e31",
+            "empty": true,
+            "points": 0,
+            "world_rank": 3
+          }
+        ],
+        "P": [
+          {
+            "PID": 1043268,
+            "SHA256": "0eb0b899b7b466a2fa4cc6e501f93aeff59b2602e22d564b0c89a30c320e5b32",
+            "empty": true,
+            "points": 0,
+            "world_rank": 1
+          },
+          {
+            "PID": 1043267,
+            "SHA256": "44dfe53c22653294cdc1ea947e5a8c8fa186111682c6f8709f7e5751758a5f3e",
+            "empty": false,
+            "points": 32,
+            "world_rank": 0
+          },
+          {
+            "PID": 1043269,
+            "SHA256": "35536ed878122c02bb6edbdd519ea5174d968e76450e1656bb358a709c4d3198",
+            "empty": true,
+            "points": 0,
+            "world_rank": 2
+          },
+          {
+            "PID": 1043270,
+            "SHA256": "2102c260c00f97d61aff39cff578d5e1533cfe8d90a6ed8668a4af65ed4179ee",
+            "empty": true,
+            "points": 0,
+            "world_rank": 3
+          }
+        ]
+      },
+      "source": {
+        "D": [
+          {
+            "PID": 975416,
+            "SHA256": "3b2f980032201ca740058d1ad67992df1081a0c9465875b76eb9ea4981d4bd1a",
+            "empty": false,
+            "points": 35,
+            "world_rank": 0
+          },
+          {
+            "PID": 975417,
+            "SHA256": "91610ed15d80f7257bc3d593ee24561034ad19605e1fd749bed9b7328c86cf9f",
+            "empty": true,
+            "points": 0,
+            "world_rank": 1
+          },
+          {
+            "PID": 975418,
+            "SHA256": "2b8f02b2d4b7cece8a78c518cc0b2226b46ae199e43c6416ff60d9103b102e9e",
+            "empty": true,
+            "points": 0,
+            "world_rank": 2
+          },
+          {
+            "PID": 975419,
+            "SHA256": "551d5fb500796298e28c5f155dd5b502dc769a2c5f142245edc622ee17bb6d90",
+            "empty": true,
+            "points": 0,
+            "world_rank": 3
+          }
+        ],
+        "P": [
+          {
+            "PID": 1043267,
+            "SHA256": "ef8c14dd00d65610690720ba70d555b5582d8c35f694b631b0a85d0836e903f7",
+            "empty": true,
+            "points": 0,
+            "world_rank": 0
+          },
+          {
+            "PID": 1043268,
+            "SHA256": "77ed7b8ca7e37c9e4236b26521a7c600743e29afd280f535e16651de9129425f",
+            "empty": true,
+            "points": 0,
+            "world_rank": 1
+          },
+          {
+            "PID": 1043269,
+            "SHA256": "19d44b4f3d43727735bdd5f303a2d4cb5f1557ffaf59c610fcbf866208be2498",
+            "empty": true,
+            "points": 0,
+            "world_rank": 2
+          },
+          {
+            "PID": 1043270,
+            "SHA256": "eb2cd0add9f01aeb9c5d84c0713de0ff4aece2a92b31a4355a26b29f7947809d",
+            "empty": true,
+            "points": 0,
+            "world_rank": 3
+          }
+        ]
+      }
+    },
+    "expert_routes_inputs_quantization_scales_and_full_batches_equal_proven": false,
+    "first_canonical_tensor_difference": {
+      "byte_equal": false,
+      "comparable": true,
+      "elements": 32768,
+      "layer": 24,
+      "max_abs_difference": 23.0,
+      "point": "core_output",
+      "unequal_elements": 267
+    },
+    "formal_acceptance": false,
+    "model_requests": 0,
+    "order_scope": "actual L24 attention normalized input, Qr/projection/Q, selected canonical KV and per-pool order, core, projection and reduction; cross-pool kernel traversal not inferred",
+    "parameter_differences": [],
+    "point_aliases": {
+      "source.Qr_before_Q_projection": "source.Qr_from_qkv"
+    },
+    "primitive_calls": 0,
+    "prior_capture42_checks": [
+      {
+        "byte_equal": true,
+        "case": "source",
+        "elements": 20480,
+        "point": "block_entry4HC",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "case": "source",
+        "elements": 5120,
+        "point": "actual_attention_input5120",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "case": "source",
+        "elements": 5120,
+        "point": "attention_output5120",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "case": "normal",
+        "elements": 20480,
+        "point": "block_entry4HC",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "case": "normal",
+        "elements": 5120,
+        "point": "actual_attention_input5120",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "case": "normal",
+        "elements": 5120,
+        "point": "attention_output5120",
+        "unequal_elements": 0
+      }
+    ],
+    "same_P_D_epochs": true,
+    "selected_KV": [
+      {
+        "canonical_bag_equal": false,
+        "canonical_order_equal": false,
+        "decode_format": "FP4 E2M1 adjacent-nibble group16 E4M3",
+        "normal_rows": 512,
+        "pool": "GLOBAL",
+        "source_rows": 512
+      },
+      {
+        "byte_equal": true,
+        "canonical_bag_equal": true,
+        "canonical_order_equal": true,
+        "decode_format": "FP8 E4M3 group32 UE8M0",
+        "elements": 65536,
+        "max_abs_difference": 0.0,
+        "normal_rows": 128,
+        "pool": "SWA",
+        "source_rows": 128,
+        "unequal_elements": 0,
+        "unequal_rows": 0
+      }
+    ],
+    "source_remote_destination_byte_equality_proven": false,
+    "state": "COMPARED_ACTUAL_HISTORICAL7045_L24_ATTENTION_CHAIN",
+    "whole_model_fixed": false
+  },
+  "comparison_result_SHA256": "f104e780ab890707e1698165c9776df0ee5448ac4fcc2794e45ab158dd1ec714",
+  "GLOBAL_audit": {
+    "actual_parameters": {
+      "normal": {
+        "names": [
+          "kv_norm",
+          "mega.output_scale",
+          "mega.output_weight",
+          "mega.query_scale",
+          "mega.query_weight",
+          "mega.sink",
+          "q_norm",
+          "wkv.weight",
+          "wkv.weight_scales",
+          "wq_a_wkv.weight",
+          "wq_a_wkv.weight_scales"
+        ],
+        "total_bytes": 90025728
+      },
+      "source": {
+        "names": [
+          "kv_norm",
+          "mega.output_scale",
+          "mega.output_weight",
+          "mega.query_scale",
+          "mega.query_weight",
+          "mega.sink",
+          "q_norm",
+          "wkv.weight",
+          "wkv.weight_scales",
+          "wq_a_wkv.weight",
+          "wq_a_wkv.weight_scales"
+        ],
+        "total_bytes": 90025728
+      }
+    },
+    "canonical_coordinate_shift_histogram": {
+      "0": 392,
+      "1": 31,
+      "10": 2,
+      "11": 6,
+      "12": 2,
+      "13": 1,
+      "147": 1,
+      "16": 1,
+      "17": 1,
+      "2": 20,
+      "26": 1,
+      "29": 2,
+      "3": 10,
+      "32": 1,
+      "34": 1,
+      "37": 1,
+      "38": 1,
+      "4": 11,
+      "5": 8,
+      "6": 5,
+      "7": 7,
+      "8": 3,
+      "9": 4
+    },
+    "common_rows": {
+      "elements": 261632,
+      "max_abs_difference": 0.0,
+      "unequal_elements": 0,
+      "unequal_rows": 0
+    },
+    "comparison_plan": {
+      "SHA256": "cab5ec036caba3de40a6a4a61848d1bc1448b44210e8b0b162f043e9d301e6ae",
+      "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/Capture44-Compare-plan-v2.json"
+    },
+    "comparison_result": {
+      "SHA256": "f104e780ab890707e1698165c9776df0ee5448ac4fcc2794e45ab158dd1ec714",
+      "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/capture44-historical7045-comparison-v2/result-safe.json"
+    },
+    "cross_pool_kernel_traversal_order_proven": false,
+    "exclusive_decoded_row_multisets_equal": false,
+    "mapping_checks": {
+      "normal_P": true,
+      "source_GLOBAL": true
+    },
+    "model_requests": 0,
+    "normal_canonical_range": [
+      0,
+      7045
+    ],
+    "normal_chunk_meta": [
+      [
+        0,
+        7169,
+        0
+      ]
+    ],
+    "normal_only_zero_rows": 0,
+    "primitive_calls": 0,
+    "root_cause_proven": false,
+    "rows": {
+      "common": 511,
+      "normal": 512,
+      "normal_only": 1,
+      "source": 512,
+      "source_only": 1
+    },
+    "same_decoded_row_multiset": false,
+    "same_decoded_row_order": false,
+    "same_slot_order_values": {
+      "elements": 262144,
+      "max_abs_difference": 8.625,
+      "unequal_elements": 59359,
+      "unequal_rows": 120
+    },
+    "selected_raw_and_decoded_digest": {
+      "normal_BF16": "9938d3b4dfe7da0ef04a2a1e4768075ddda67e28721a0023f3935d1a927fa22a",
+      "source_decoded": "966fccc345414087a151037183a56edfa0295a963f3001787ed62aefcb3398be",
+      "source_raw": "1f8f329e14b2c82d6a32a707d310e26cf22b3f84aa291fa3f12722a403e77f68"
+    },
+    "source_canonical_range": [
+      0,
+      7045
+    ],
+    "source_only_zero_rows": 0,
+    "state": "AUDITED_ACTUAL_GLOBAL_SELECTED_ROWS",
+    "topology": {
+      "normal": [
+        [
+          1,
+          64,
+          1,
+          20,
+          24,
+          0,
+          1
+        ]
+      ],
+      "source": [
+        [
+          1,
+          64,
+          1,
+          20,
+          24,
+          0,
+          1
+        ]
+      ]
+    },
+    "whole_model_fixed": false
+  },
+  "GLOBAL_audit_result_SHA256": "c3e57d715d0cb95ad1487c056757a19fafe03b245f8863ce105697b37433e092",
+  "three_route_complete_IDs_equal": false
+}
