@@ -124,7 +124,7 @@
     "derivation": "selected original producer weights/norms plus only Mega query/output/sink; source permutations preserve payload sizes; per-row scale expansion bounded under additional 15MiB; full cos table and duplicate Wqb/Woa excluded",
     "model_requests": 0
   },
-  "scope": "completed two original model requests/all4rank captures/typed CPU compare; next minimal calibrated GLOBAL membership intervention pending; whole-model precision not fixed",
+  "scope": "two real requests EOF/all4ranks plus CPU readset audit and3 calibrated GPU calls complete; one GLOBAL member suffices for full observed core difference; selector upstream reason and whole-model repair still open",
   "native_requests_completed_in_capture44": 2,
   "native_requests_completed_task": 43,
   "all_four_rank_evidence_complete": true,
@@ -674,5 +674,61 @@
     "whole_model_fixed": false
   },
   "GLOBAL_audit_result_SHA256": "c3e57d715d0cb95ad1487c056757a19fafe03b245f8863ce105697b37433e092",
-  "three_route_complete_IDs_equal": false
+  "three_route_complete_IDs_equal": false,
+  "GLOBAL_single_variable_replay": {
+    "GPU_after": {
+      "UUID": "GPU-a0d1832d-d3d7-02f4-bd0c-f90a7303f7ec",
+      "capability": [
+        10,
+        3
+      ],
+      "compute_apps": [
+        987037
+      ],
+      "index": 0,
+      "reserved_v2": 992739328,
+      "total_v2": 298013687808,
+      "used_bytes": 1842413568,
+      "used_v2": 849674240
+    },
+    "actual_D_branch_reproduced_via_P_primitive": true,
+    "backend": {
+      "SHA256": "fb8c9ab9439f12b920630906a67b62940b212dfb1e9e7b9015934ed49b0dd26c",
+      "path": "/home/admin/linshuo.zjl/c3-build/dependency-stage-native-closure/pip_cuda13_arm_torch_flash_mla/site-packages/flash_mla/cuda.cpython-310-aarch64-linux-gnu.so"
+    },
+    "both_actual_outputs_and_scales_reproduced": true,
+    "calibration": [
+      {
+        "actual_core_output_exact": true,
+        "actual_core_scales_exact": true,
+        "case": "normal",
+        "unequal_bytes": 0
+      },
+      {
+        "actual_core_output_exact": true,
+        "actual_core_scales_exact": true,
+        "case": "source",
+        "unequal_bytes": 0
+      }
+    ],
+    "candidate_commit": "031fc2af33111e7bbe13bbca6e72ebd6fc094d7c",
+    "formal_acceptance": false,
+    "intervention": {
+      "GLOBAL_normal_row_ordinal": 226,
+      "changed_GLOBAL_rows": 1,
+      "normal_actual_output_exact": false,
+      "normal_order_preserved": true,
+      "source_actual_output_exact": true
+    },
+    "model_requests": 0,
+    "one_GLOBAL_member_sufficient": true,
+    "only_intervention": "replace the one normal-only GLOBAL decoded row with actual source-only row at the same ordinal; keep normal order/Q/SWA/positions/params",
+    "primitive_calls": 3,
+    "primitive_calls_max": 3,
+    "state": "ACTUAL_L24_GLOBAL_MEMBER_CALIBRATION",
+    "torch_peak": 4957696,
+    "whole_model_fixed": false
+  },
+  "GLOBAL_single_variable_result_SHA256": "ce803280578e66b57b35cac30fb51bdd2b8c3f51b98477ad085c1fe2ded4404e",
+  "GLOBAL_run_plan_SHA256": "4457b01a1273611559ecd38984021f40382f594de27bf44f76bbe43c8c5838d8"
 }
