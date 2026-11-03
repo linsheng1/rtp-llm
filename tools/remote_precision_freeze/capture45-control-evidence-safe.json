@@ -1,0 +1,605 @@
+{
+  "candidate_commit": "031fc2af33111e7bbe13bbca6e72ebd6fc094d7c",
+  "actual_completed_model_requests": 45,
+  "new_capture45_model_requests": 2,
+  "both_natural_EOF": true,
+  "whole_model_fixed": false,
+  "formal_acceptance": false,
+  "scope": "C3 P12 D71 storage73; root Codex only; no DSH/agents",
+  "evidence": {
+    "comparison": {
+      "report_SHA256": "558618b7bac2b7806cb03b22fc22f260ce6808686db7c2fe7b4e652e956755fa",
+      "controller_state": "SUCCEEDED",
+      "status": {
+        "model_requests": 0,
+        "result": {
+          "SHA256": "e795efbe8f4a5a055797807be62072902bb7a9c3d649b5a4f74e9022d9570ecb",
+          "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/capture45-historical7045-comparison-v1/result-safe.json"
+        },
+        "state": "SUCCEEDED"
+      },
+      "result": {
+        "GPU_tokens_joined": true,
+        "actual_common_parameter_names": [
+          "index_weights",
+          "index_wq.weight",
+          "index_wq.weight_scales",
+          "kv_norm",
+          "mega.output_scale",
+          "mega.output_weight",
+          "mega.query_scale",
+          "mega.query_weight",
+          "mega.sink",
+          "q_norm",
+          "wkv.weight",
+          "wkv.weight_scales",
+          "wq_a_wkv.weight",
+          "wq_a_wkv.weight_scales"
+        ],
+        "actual_common_parameters_equal": true,
+        "all_prior_capture44_common_points_byte_equal": true,
+        "candidate_commit": "031fc2af33111e7bbe13bbca6e72ebd6fc094d7c",
+        "checks": [
+          {
+            "byte_equal": true,
+            "comparable": true,
+            "elements": 5120,
+            "point": "actual_attention_input5120",
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "comparable": true,
+            "elements": 4096,
+            "point": "indexer_raw_query_projection",
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "comparable": true,
+            "elements": 2048,
+            "point": "indexer_q_payload",
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "comparable": true,
+            "elements": 32,
+            "point": "indexer_q_packed_sf",
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": false,
+            "comparable": true,
+            "elements": 32,
+            "point": "indexer_scaled_head_weights",
+            "unequal_elements": 1
+          },
+          {
+            "byte_equal": true,
+            "comparable": true,
+            "elements": 1,
+            "point": "indexer_visible",
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "comparable": true,
+            "elements": 7046,
+            "point": "indexer_key_valid",
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": false,
+            "comparable": true,
+            "elements": 7046,
+            "point": "indexer_logits",
+            "unequal_elements": 229
+          }
+        ],
+        "coverage": {
+          "normal": {
+            "D": [
+              {
+                "PID": 993641,
+                "SHA256": "67bed17ac693843d71abd6c65d9b38ce34c7976118e994e43ebaadcd202740b8",
+                "empty": true,
+                "points": 0,
+                "world_rank": 0
+              },
+              {
+                "PID": 993642,
+                "SHA256": "7bedd72870184ecca57803458cabedfc8502f218c79e435c0e94b93c70b33873",
+                "empty": true,
+                "points": 0,
+                "world_rank": 1
+              },
+              {
+                "PID": 993643,
+                "SHA256": "aedbc1593c4b5edf536b296ef6c21a13f37ac9bec5131e4308fea8160cd33bee",
+                "empty": true,
+                "points": 0,
+                "world_rank": 2
+              },
+              {
+                "PID": 993644,
+                "SHA256": "c52b3c75bfc1ea84756ef16d631888e6e10dd535a585ec802f8535e0727b186b",
+                "empty": true,
+                "points": 0,
+                "world_rank": 3
+              }
+            ],
+            "P": [
+              {
+                "PID": 1059574,
+                "SHA256": "c82e5a3d1a61bd85c30f220f061aeb09dd121e325a0ce3969b42144629bc8918",
+                "empty": true,
+                "points": 0,
+                "world_rank": 1
+              },
+              {
+                "PID": 1059576,
+                "SHA256": "8acb27b93162869c6d379bd63f12ba91c8b26705a7bc37330711c5bf72bbe1d5",
+                "empty": true,
+                "points": 0,
+                "world_rank": 3
+              },
+              {
+                "PID": 1059575,
+                "SHA256": "4812b9a993cfd2a7a16f0c1bb8dbc561cb32c5f649f2c796f32792b110ba3158",
+                "empty": true,
+                "points": 0,
+                "world_rank": 2
+              },
+              {
+                "PID": 1059573,
+                "SHA256": "cbb33d8f96d1e48cb2c23466e6715c85c1f0628580b2074d6d12a91c147118b6",
+                "empty": false,
+                "points": 45,
+                "world_rank": 0
+              }
+            ]
+          },
+          "source": {
+            "D": [
+              {
+                "PID": 993641,
+                "SHA256": "8f091fbba60605c009a84744e3ac6872a871726bf3c9bf91034a7c441889f2b7",
+                "empty": false,
+                "points": 48,
+                "world_rank": 0
+              },
+              {
+                "PID": 993642,
+                "SHA256": "71fa148f9754de767026112d21f26108e125aff5679a5975bc5e16adaeff5656",
+                "empty": true,
+                "points": 0,
+                "world_rank": 1
+              },
+              {
+                "PID": 993643,
+                "SHA256": "6d7d561c6fe2cb9b019341eee327df20c466287e6d3506dd91cfe7d6fd39e24b",
+                "empty": true,
+                "points": 0,
+                "world_rank": 2
+              },
+              {
+                "PID": 993644,
+                "SHA256": "579f7c34b67e710af24c33b142c38a3c518b7d877e31554fae70a9ad3a18fcc7",
+                "empty": true,
+                "points": 0,
+                "world_rank": 3
+              }
+            ],
+            "P": [
+              {
+                "PID": 1059573,
+                "SHA256": "ab24dcc9cb51249214dfea0caff748d902b00bf706ad195baa05b7a7819ef2d6",
+                "empty": true,
+                "points": 0,
+                "world_rank": 0
+              },
+              {
+                "PID": 1059574,
+                "SHA256": "0d22887ea0b0060ce961f9e165abd315c4b7937ea9f133f1d3ba9fc309f100a9",
+                "empty": true,
+                "points": 0,
+                "world_rank": 1
+              },
+              {
+                "PID": 1059575,
+                "SHA256": "dc0c5663ffb4ef990b31735a2813d9594279c1088d7361b8eb6b1ccf396abb4b",
+                "empty": true,
+                "points": 0,
+                "world_rank": 2
+              },
+              {
+                "PID": 1059576,
+                "SHA256": "2d587c6633570ec3b2e75c5e6d8e3383446b079b7e6a047f48d2d3ed8481bbd5",
+                "empty": true,
+                "points": 0,
+                "world_rank": 3
+              }
+            ]
+          }
+        },
+        "exclusive_member_scores": [
+          {
+            "logical_key": 165,
+            "normal_score": -2.3125,
+            "normal_selected": true,
+            "source_score": -2.328125,
+            "source_selected": false
+          },
+          {
+            "logical_key": 1017,
+            "normal_score": -2.3125,
+            "normal_selected": false,
+            "source_score": -2.3125,
+            "source_selected": true
+          }
+        ],
+        "formal_acceptance": false,
+        "keys": {
+          "common_decoded_max_abs_difference": 0.0,
+          "common_decoded_unequal_elements": 0,
+          "common_decoded_unequal_rows": 0,
+          "decoded_finite": true,
+          "normal_valid": 7046,
+          "raw_byte_equal": true,
+          "source_valid": 7046,
+          "unequal_raw_bytes": 0,
+          "valid_mask_equal": true
+        },
+        "model_requests": 0,
+        "parameter_differences": [],
+        "primitive_calls": 0,
+        "prior_capture44_checks": [
+          {
+            "byte_equal": true,
+            "case": "source",
+            "elements": 20480,
+            "point": "block_entry4HC",
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "case": "source",
+            "elements": 5120,
+            "point": "actual_attention_input5120",
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "case": "source",
+            "elements": 32768,
+            "point": "Q_before_core",
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "case": "source",
+            "elements": 32768,
+            "point": "core_output",
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "case": "source",
+            "elements": 256,
+            "point": "core_scales",
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "case": "source",
+            "elements": 5120,
+            "point": "attention_output5120",
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "case": "normal",
+            "elements": 20480,
+            "point": "block_entry4HC",
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "case": "normal",
+            "elements": 5120,
+            "point": "actual_attention_input5120",
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "case": "normal",
+            "elements": 32768,
+            "point": "Q_before_core",
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "case": "normal",
+            "elements": 32768,
+            "point": "core_output",
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "case": "normal",
+            "elements": 256,
+            "point": "core_scales",
+            "unequal_elements": 0
+          },
+          {
+            "byte_equal": true,
+            "case": "normal",
+            "elements": 5120,
+            "point": "attention_output5120",
+            "unequal_elements": 0
+          }
+        ],
+        "query": {
+          "decoded_finite": true,
+          "decoded_max_abs_difference": 0.0,
+          "decoded_unequal_elements": 0
+        },
+        "root_cause_proven": false,
+        "same_P_D_epochs": true,
+        "score_max_abs_difference": 0.03125,
+        "score_unequal_elements": 229,
+        "score_vectors_byte_equal": false,
+        "selected_common": 511,
+        "selected_normal_only": 1,
+        "selected_source_only": 1,
+        "selection": {
+          "normal": {
+            "GLOBAL_core_member_set_equal": true,
+            "actual_selected_min": -2.3125,
+            "all_selected_at_or_above_cutoff": true,
+            "cutoff": -2.3125,
+            "finite": 7046,
+            "logits_dtype": "torch.bfloat16",
+            "selected_ties_at_cutoff": 16,
+            "stable_index_ascending_tie_policy_member_set_equal": true,
+            "strictly_above": 496,
+            "ties_at_cutoff": 39
+          },
+          "source": {
+            "GLOBAL_core_member_set_equal": true,
+            "actual_selected_min": -2.3125,
+            "all_selected_at_or_above_cutoff": true,
+            "cutoff": -2.3125,
+            "finite": 7046,
+            "logits_dtype": "torch.bfloat16",
+            "selected_ties_at_cutoff": 16,
+            "stable_index_ascending_tie_policy_member_set_equal": true,
+            "strictly_above": 496,
+            "ties_at_cutoff": 36
+          }
+        },
+        "state": "COMPARED_ACTUAL_L24_INDEXER_QUERY_KEYS_SCORES_SELECTION",
+        "whole_model_fixed": false
+      }
+    },
+    "projection_CPU": {
+      "report_SHA256": "9070c8293c4e066cef172c205afe5f4815aa487c3a97cccc5d44804f2036b958",
+      "controller_state": "SUCCEEDED",
+      "status": {
+        "model_requests": 0,
+        "result": {
+          "SHA256": "e8a39a51320065df896a0240ea63da22d83010e17cbd1748ca2716336d508a09",
+          "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/capture45-head-projection-check-v1/result-safe.json"
+        },
+        "state": "SUCCEEDED"
+      },
+      "result": {
+        "CUDA_initialized": false,
+        "actual_different_heads": [
+          11
+        ],
+        "actual_input_byte_equal": true,
+        "canonical_matches": {
+          "normal": false,
+          "source": true
+        },
+        "head11": {
+          "canonical_scaled": -0.006195068359375,
+          "exact_FP64_raw": -0.3955084002618605,
+          "normal_scaled": -0.00616455078125,
+          "source_scaled": -0.006195068359375
+        },
+        "model_requests": 0,
+        "state": "CPU_ACTUAL_HEAD_PROJECTION_INPUTS_PASS",
+        "surrounding_rows": "synthetic replicas of the captured row; not a claim of full actual batch identity",
+        "weight": {
+          "SHA256": "171e944d079981837806e7d29b9415ffffb3ce6df37cec14f39ae670002e8779",
+          "key": "layers.24.attn.indexer.weights_proj.weight",
+          "path": "/mnt/fuse/deepseek-ai/DeepSeek-V4.1-Flash/model-00027-of-00048.safetensors"
+        }
+      }
+    },
+    "projection_GPU": {
+      "report_SHA256": "09cd2ff9b582511824d419c018e15964b7d41c454d8aed111a2734bd733fbe90",
+      "controller_state": "SUCCEEDED",
+      "status": {
+        "model_requests": 0,
+        "result": {
+          "SHA256": "8d53deb70f91555975fd6c4c20e1fe132e3055dcbd5c08eaf3df498de16c8548",
+          "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/capture45-head-projection-run-v1/result-safe.json"
+        },
+        "state": "SUCCEEDED"
+      },
+      "result": {
+        "CPU_result": {
+          "SHA256": "e8a39a51320065df896a0240ea63da22d83010e17cbd1748ca2716336d508a09",
+          "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/capture45-head-projection-check-v1/result-safe.json"
+        },
+        "CUDA_initialized": false,
+        "GPU_after": {
+          "UUID": "GPU-a0d1832d-d3d7-02f4-bd0c-f90a7303f7ec",
+          "capability": [
+            10,
+            3
+          ],
+          "compute_apps": [
+            1007216
+          ],
+          "index": 0,
+          "reserved_v2": 992739328,
+          "total_v2": 298013687808,
+          "used_bytes": 1930493952,
+          "used_v2": 937754624
+        },
+        "P_actual_original_M_verified": false,
+        "actual_different_heads": [
+          11
+        ],
+        "actual_input_byte_equal": true,
+        "both_actual_vectors_reproduced": true,
+        "canonical_matches": {
+          "normal": false,
+          "source": true
+        },
+        "cases": [
+          {
+            "M": 4,
+            "canonical_unequal_heads": 0,
+            "head11_scaled": -0.006195068359375,
+            "matches_actual": {
+              "normal": false,
+              "source": true
+            },
+            "unequal_heads_to_actual": {
+              "normal": 1,
+              "source": 0
+            }
+          },
+          {
+            "M": 1762,
+            "canonical_unequal_heads": 1,
+            "head11_scaled": -0.00616455078125,
+            "matches_actual": {
+              "normal": true,
+              "source": false
+            },
+            "unequal_heads_to_actual": {
+              "normal": 0,
+              "source": 1
+            }
+          }
+        ],
+        "formal_acceptance": false,
+        "head11": {
+          "canonical_scaled": -0.006195068359375,
+          "exact_FP64_raw": -0.3955084002618605,
+          "normal_scaled": -0.00616455078125,
+          "source_scaled": -0.006195068359375
+        },
+        "model_requests": 0,
+        "primitive_calls": 2,
+        "state": "ACTUAL_HEAD_PROJECTION_SHAPE_REPLAY_COMPLETE",
+        "surrounding_rows": "synthetic replicas of the captured row; not a claim of full actual batch identity",
+        "torch_peak": 27835904,
+        "weight": {
+          "SHA256": "171e944d079981837806e7d29b9415ffffb3ce6df37cec14f39ae670002e8779",
+          "key": "layers.24.attn.indexer.weights_proj.weight",
+          "path": "/mnt/fuse/deepseek-ai/DeepSeek-V4.1-Flash/model-00027-of-00048.safetensors"
+        },
+        "whole_model_fixed": false
+      }
+    },
+    "score_CPU": {
+      "report_SHA256": "c2ae7720b7dc5de164620f771fce1c25f5ffe066a91a27fd7aba51f715c6537d",
+      "controller_state": "SUCCEEDED",
+      "status": {
+        "model_requests": 0,
+        "result": {
+          "SHA256": "3da2cce639d779f34c17df453d2f7143f5adf241eb8040bbf131809a39204837",
+          "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/capture45-head-score-check-v1/result-safe.json"
+        },
+        "state": "SUCCEEDED"
+      },
+      "result": {
+        "CUDA_initialized": false,
+        "actual_one_head_intervention": true,
+        "keys": 7046,
+        "model_requests": 0,
+        "state": "CPU_HEADWEIGHT_SCORE_INPUTS_PASS"
+      }
+    },
+    "score_GPU": {
+      "report_SHA256": "9bccf20ee57ec1a03d4928d0cd7bddb6b29092e409d1ee7273aa236766d1a83e",
+      "controller_state": "SUCCEEDED",
+      "status": {
+        "model_requests": 0,
+        "result": {
+          "SHA256": "6e732cb8375aca1550e9f43c1d6b16804f0594723a8c5f53d51df79d66c20374",
+          "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/capture45-head-score-run-v1/result-safe.json"
+        },
+        "state": "SUCCEEDED"
+      },
+      "result": {
+        "GPU_after": {
+          "UUID": "GPU-a0d1832d-d3d7-02f4-bd0c-f90a7303f7ec",
+          "capability": [
+            10,
+            3
+          ],
+          "compute_apps": [
+            1008030
+          ],
+          "index": 0,
+          "reserved_v2": 992739328,
+          "total_v2": 298013687808,
+          "used_bytes": 1821442048,
+          "used_v2": 828702720
+        },
+        "both_actual_score_vectors_reproduced": true,
+        "calibration": [
+          {
+            "actual_scores_byte_equal": true,
+            "case": "normal",
+            "max_abs_difference": 0.0,
+            "unequal_scores": 0
+          },
+          {
+            "actual_scores_byte_equal": true,
+            "case": "source",
+            "max_abs_difference": 0.0,
+            "unequal_scores": 0
+          }
+        ],
+        "formal_acceptance": false,
+        "model_requests": 0,
+        "only_changed_input": "one captured BF16 headweight; Q/SF/all causal keys/causal bounds/native primitive/order unchanged",
+        "primitive_calls": 2,
+        "state": "ACTUAL_HEADWEIGHT_ONLY_SCORE_INTERVENTION_COMPLETE",
+        "synthetic_surrounding_query_rows": 3,
+        "torch_peak": 622080,
+        "whole_model_fixed": false
+      }
+    }
+  },
+  "plans": {
+    "HC031-D-static-plan-v4.json": "e38d78f739ef30274bd1d37f4369149df9f2b2deeef1797f984cb1f021dc5a2a",
+    "HeadProjection-CPU-plan-v1.json": "6af50d6aa72224fe0d40c1d83d1b23501a7a05e656e7c0e8f7364ec4e7f91409",
+    "Capture45-Normal-plan-v2.json": "ba3b8809e2f179d68db77b614defbc3ca0c4aae114e30c332de07d4a9d4f1362",
+    "HC031-P-static-plan-v4.json": "83f43aaa1e84157c2467be7bd5ae7de1b72880c54342d12f4bf64125b6f6457f",
+    "P-consumer-v7-plan.json": "db22805506186721259916175abc978662f9fc1e853bb6910a7cbd9d8610f242",
+    "Capture45-D-stop-request-plan-v1.json": "a6c34cf6b5f68f009b59fcdc2ecd1e1796aed2cfb2525c48614dd2a2a3e483f2",
+    "HeadProjection-GPU-plan-v1.json": "b63aa8447f75764342a23117a836069bda21916e61827de7b2f59376e9cbb2ac",
+    "Capture45-Source-plan-v1.json": "b4a9a8d598133b17b7e53cbc15be8c62febd5eb3073748d9afa97239cf3af5d8",
+    "P-consumer-v6-plan.json": "d9f3ac969417c576e0b6a5dd79497c887ed57fd8a7a4c3146caa20430c3cda05",
+    "HeadScore-GPU-plan-v1.json": "3c1068c9c2335ff3112776aa6dd42c19914543707755244876b20a14da75d45a",
+    "Capture45-GPUChain-plan-v1.json": "d19ba1fe058fc983ae4d54538889ef17d15ce6667c16725c370b3927f8af6ef6",
+    "D-consumer-v6-plan.json": "1cf6367942c270a6056d39a2e2917b1c1673ac59986a91159b9354d5ea72af8c",
+    "Capture45-CPUChain-plan-v1.json": "7c04d4c10b9e20bf159dd4d41e2d54cfa2b2dc7a17651eeef8f2997a82440090",
+    "Capture45-Compare-plan-v1.json": "f3f7f47bf49a4c15a69c9c56186b1299f983e10b2297121f6aa841faa43cf71c",
+    "HeadScore-CPU-plan-v1.json": "e9d03b4c7d535ed2a2416ab4f1b6f246c29aac74446cd607ffeff5965bab857e",
+    "Capture45-Normal-plan-v1.json": "4441823d524de0e60a056399bfc6be671654a1cbdb1598909c7154e80b0e3f27",
+    "D-consumer-v7-plan.json": "71a4dfab782b828b573241e4b88b890c83a78c3861b406b28f192f6ba83e3d62"
+  },
+  "conclusion": "Actual normalized input and32x5120weight held constant; replicated-row M4/M1762 reproduce all32 actual headweights. Head11 alone reproduces both7046scorevectors. Prior capture44 one GLOBAL row reproduces core difference. Surrounding batches/original CED M not captured. No whole-model fix yet."
+}
