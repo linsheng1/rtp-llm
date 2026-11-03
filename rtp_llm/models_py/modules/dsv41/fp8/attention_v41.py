@@ -2166,10 +2166,15 @@ class AttentionV41FP8(AttentionFP8):
                 -1, self.index_n_heads, self.index_head_dim
             )
             ced_projection = shared.get("ced_indexer_projection")
-            if ced_projection is None:
-                raw_weights = F.linear(x, self.index_weights)
-            else:
-                raw_weights = ced_projection(x, self.index_weights)
+            from ._v41_indexer_head_projection import try_project_indexer_head_weights
+
+            raw_weights = try_project_indexer_head_weights(x, self.index_weights)
+            if raw_weights is None:
+                raw_weights = (
+                    F.linear(x, self.index_weights)
+                    if ced_projection is None
+                    else ced_projection(x, self.index_weights)
+                )
             fused_indexer = isinstance(
                 globals_by_req[0][1], prefill_indexer.PrefillIndexerKeys
             )
@@ -3275,6 +3280,25 @@ class AttentionV41FP8(AttentionFP8):
                 overlap=overlap,
             )
         q, weights, prepared = prepared_query
+        from ._v41_indexer_head_projection import try_project_indexer_head_weights
+
+        canonical_weights = try_project_indexer_head_weights(
+            x.reshape(T, -1), self.index_weights
+        )
+        if canonical_weights is not None:
+            weights = canonical_weights
+            if prepared is not None:
+                # Fused QKV/overlap can supply pre-scaled GEMM headweights.
+                # Keep their prepared Q/scale bytes and readiness ordering,
+                # replacing only the small head projection at this boundary.
+                prepared = (
+                    prepared[0],
+                    prepared[1],
+                    (
+                        weights.float()
+                        * (self.index_head_dim * self.index_n_heads) ** -0.5
+                    ).to(torch.bfloat16).view(B, S, self.index_n_heads),
+                )
         if q is not None:
             q = q.view(B, S, self.index_n_heads, self.index_head_dim)
         indexer_metadata = None if overlap is None else overlap.metadata

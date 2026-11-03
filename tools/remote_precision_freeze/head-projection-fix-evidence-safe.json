@@ -1,0 +1,101 @@
+{
+  "data_candidate": "031fc2af33111e7bbe13bbca6e72ebd6fc094d7c",
+  "classification": "proposed fix operator test; real model validation pending; no immutable wheel",
+  "controller_state": "SUCCEEDED",
+  "status": {
+    "model_requests": 0,
+    "result": {
+      "SHA256": "8f2874c47c0f8cf1ffdae8d6b0a64c39fbaa735eddfe072c4f1b1abe252a8283",
+      "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/capture45-head-projection-fix-run-v2/result-safe.json"
+    },
+    "state": "SUCCEEDED"
+  },
+  "result": {
+    "CPU_result": {
+      "SHA256": "e8a39a51320065df896a0240ea63da22d83010e17cbd1748ca2716336d508a09",
+      "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/capture45-head-projection-fix-check-v1/result-safe.json"
+    },
+    "CUDA_initialized": false,
+    "GPU_after": {
+      "UUID": "GPU-a0d1832d-d3d7-02f4-bd0c-f90a7303f7ec",
+      "capability": [
+        10,
+        3
+      ],
+      "compute_apps": [
+        1008769
+      ],
+      "index": 0,
+      "reserved_v2": 992739328,
+      "total_v2": 298013687808,
+      "used_bytes": 1899036672,
+      "used_v2": 906297344
+    },
+    "P_actual_original_M_verified": false,
+    "actual_different_heads": [
+      11
+    ],
+    "actual_input_byte_equal": true,
+    "both_actual_vectors_reproduced": false,
+    "canonical_matches": {
+      "normal": false,
+      "source": true
+    },
+    "cases": [
+      {
+        "M": 4,
+        "canonical_unequal_heads": 0,
+        "head11_scaled": -0.006195068359375,
+        "matches_actual": {
+          "normal": false,
+          "source": true
+        },
+        "unequal_heads_to_actual": {
+          "normal": 1,
+          "source": 0
+        }
+      },
+      {
+        "M": 1762,
+        "canonical_unequal_heads": 0,
+        "head11_scaled": -0.006195068359375,
+        "matches_actual": {
+          "normal": false,
+          "source": true
+        },
+        "unequal_heads_to_actual": {
+          "normal": 1,
+          "source": 0
+        }
+      }
+    ],
+    "classification": "proposed kernel unit only; actual model candidate not yet deployed",
+    "fixed_both_shapes_match_FP64": true,
+    "formal_acceptance": false,
+    "graph_capture_enqueues": 1,
+    "graph_changed_input_reference_pass": true,
+    "graph_replays": 2,
+    "head11": {
+      "canonical_scaled": -0.006195068359375,
+      "exact_FP64_raw": -0.3955084002618605,
+      "normal_scaled": -0.00616455078125,
+      "source_scaled": -0.006195068359375
+    },
+    "kernel": {
+      "SHA256": "66851b81c1ee5567fcccf68aa087480fc1d4dc8fbe4b84ebe2897fd2cab957e7",
+      "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/_v41_indexer_head_projection.py"
+    },
+    "kernel_enqueues": 6,
+    "model_requests": 0,
+    "primitive_calls": 6,
+    "state": "ACTUAL_FIXED_HEAD_PROJECTION_TEST_PASS",
+    "surrounding_rows": "synthetic replicas of the captured row; not a claim of full actual batch identity",
+    "torch_peak": 19316224,
+    "weight": {
+      "SHA256": "171e944d079981837806e7d29b9415ffffb3ce6df37cec14f39ae670002e8779",
+      "key": "layers.24.attn.indexer.weights_proj.weight",
+      "path": "/mnt/fuse/deepseek-ai/DeepSeek-V4.1-Flash/model-00027-of-00048.safetensors"
+    },
+    "whole_model_fixed": false
+  }
+}
