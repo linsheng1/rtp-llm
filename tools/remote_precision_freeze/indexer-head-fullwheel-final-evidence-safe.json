@@ -1,0 +1,671 @@
+{
+  "all_payload_bytes_remain_on_devices": true,
+  "classification": {
+    "P_only_max1_capped_preparation": 1,
+    "complete_native_EOF_below_output_cap": 5,
+    "runtime_ModelConfig_EOS_binding_verified": false
+  },
+  "comparison": {
+    "completion_event": true,
+    "controller": {
+      "alerts": [],
+      "child": {
+        "PGID": 1311562,
+        "PID": 1311562,
+        "PPID": 1311561,
+        "SID": 1311562,
+        "UID": 500,
+        "argv": [
+          "/opt/conda310/bin/python3.10",
+          "-B",
+          "-S",
+          "/home/admin/linshuo.zjl/publication-precision-20261101/control/compare_indexer_head_fullwheel_results_v1.py",
+          "--plan",
+          "/home/admin/linshuo.zjl/publication-precision-20261101/control/Head-Fullwheel-Compare-plan-v1.json",
+          "--sha256",
+          "cac8518652337369e73ac7bff6888ab4349f611a0ac3cdf8403f38aca39bd276"
+        ],
+        "start_ticks": "51532218",
+        "state": "R"
+      },
+      "command_returncode": 0,
+      "controller": {
+        "PGID": 1311561,
+        "PID": 1311561,
+        "PPID": 1,
+        "SID": 1311561,
+        "UID": 500,
+        "argv": [
+          "/opt/conda310/bin/python3.10",
+          "/home/admin/linshuo.zjl/publication-precision-20261101/control/device_controller_cluster23_v1.py",
+          "--root",
+          "/home/admin/linshuo.zjl/publication-precision-20261101/control",
+          "--name",
+          "headwheel-three-routes-compare-v1",
+          "--interval",
+          "20",
+          "run",
+          "--spec",
+          "/home/admin/linshuo.zjl/publication-precision-20261101/control/headwheel-three-routes-compare-v1-spec.json"
+        ],
+        "start_ticks": "51532214",
+        "state": "R"
+      },
+      "deadline_epoch": 1793702487.7812083,
+      "deadline_warning": true,
+      "finished_at": 1793702338.095054,
+      "heartbeat_at": 1793702338.095057,
+      "host": "hippo-010044061073.my212",
+      "interval_seconds": 20.0,
+      "last_progress_at": 1793702337.7812083,
+      "log": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headwheel-three-routes-compare-v1-stage.log",
+      "mode": "run",
+      "owned_processes": [
+        {
+          "PGID": 1311562,
+          "PID": 1311562,
+          "PPID": 1311561,
+          "SID": 1311562,
+          "UID": 500,
+          "argv": [
+            "/opt/conda310/bin/python3.10",
+            "-B",
+            "-S",
+            "/home/admin/linshuo.zjl/publication-precision-20261101/control/compare_indexer_head_fullwheel_results_v1.py",
+            "--plan",
+            "/home/admin/linshuo.zjl/publication-precision-20261101/control/Head-Fullwheel-Compare-plan-v1.json",
+            "--sha256",
+            "cac8518652337369e73ac7bff6888ab4349f611a0ac3cdf8403f38aca39bd276"
+          ],
+          "start_ticks": "51532218",
+          "state": "S"
+        },
+        {
+          "PGID": 1311562,
+          "PID": 1311565,
+          "PPID": 1311562,
+          "SID": 1311562,
+          "UID": 500,
+          "argv": [
+            "/opt/conda310/bin/python3.10",
+            "-B",
+            "-S",
+            "/home/admin/linshuo.zjl/publication-precision-20261101/control/c3_indexer_head_fullwheel_history_diagnostic_v1.py",
+            "--action",
+            "compare",
+            "--source",
+            "/home/admin/linshuo.zjl/publication-precision-20261101/control/headwheel-source1/request/native/result.json",
+            "--source-sha256",
+            "359bb0cecb5df549cfbbe0158a8a7203eb0848c9c60b87c0beab149123193a59",
+            "--output-dir",
+            "/home/admin/linshuo.zjl/publication-precision-20261101/control/headwheel-three-routes-compare-v1/comparison",
+            "--baseline",
+            "/home/admin/linshuo.zjl/publication-precision-20261101/control/headwheel-baseline-native-headwheelN2/native/result.json",
+            "--baseline-sha256",
+            "0fe4ed40eae992de4b0d49f3e23ad0f252873a71e13083dd4170861be0ab3c1f",
+            "--d-result",
+            "/home/admin/linshuo.zjl/publication-precision-20261101/control/headwheel-d-restore-native-headwheelD1/native/result.json",
+            "--d-result-sha256",
+            "6cb0b2a2f412271ce47189ea5bbcedc7caaaed7bc58b0e73926fe577faced858",
+            "--p-result",
+            "/home/admin/linshuo.zjl/publication-precision-20261101/control/headwheel-p-restore-native-headwheelP1/native/result.json",
+            "--p-result-sha256",
+            "0426c98f211af3ceca0caf52b505bc8030ae07c03ff59af61dc6668c946c035f"
+          ],
+          "start_ticks": "51532221",
+          "state": "R"
+        }
+      ],
+      "owner": "publication-precision-20261101",
+      "phase": "terminal",
+      "phase_acceptance": [
+        {
+          "bytes": 137,
+          "json_fields_verified": {
+            "model_requests": 0,
+            "state": "SUCCEEDED"
+          },
+          "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headwheel-three-routes-compare-v1/status.json"
+        }
+      ],
+      "reason": "command and explicit artifact acceptance passed",
+      "sample": {
+        "at": 1793702337.7839947,
+        "gpu_apps": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": ""
+        },
+        "gpu_memory": {
+          "returncode": 0,
+          "stderr": "",
+          "stdout": "0, 284208 MiB, 3 MiB\n1, 284208 MiB, 3 MiB\n2, 284208 MiB, 3 MiB\n3, 284208 MiB, 3 MiB\n"
+        },
+        "health": [],
+        "meminfo": {
+          "MemAvailable": "454461248 kB",
+          "MemFree": "93442112 kB",
+          "MemTotal": "503316480 kB",
+          "Shmem": "8400000 kB"
+        },
+        "processes": [],
+        "seconds": 0.09809344611130655
+      },
+      "sample_budget_seconds": 8,
+      "started_at": 1793702337.7812083,
+      "state": "SUCCEEDED",
+      "task_id": "publication-precision-20261101:headwheel-three-routes-compare-v1"
+    },
+    "observed_at": 1793702395.6323974,
+    "result": {
+      "actual_generation_profile_SHA256": "8b08c68b5accf3d411deab7495aff702d484c00631a4668393367ae92dcb4cee",
+      "actual_generation_profiles_equal": true,
+      "actual_source_suffix": {
+        "comparisons": {
+          "baseline": {
+            "complete_IDs_equal": true,
+            "first_difference": null
+          },
+          "d-result": {
+            "complete_IDs_equal": true,
+            "first_difference": null
+          },
+          "p-result": {
+            "complete_IDs_equal": true,
+            "first_difference": null
+          }
+        },
+        "consumed_source_output_tokens": 128,
+        "remaining_actual_source_tokens": 166,
+        "scope": "actual source token sequence only; no inferred computed/published KV boundary",
+        "source_output_tokens": 294
+      },
+      "artifact_kind": "immutable_wheel",
+      "business_acceptance": false,
+      "cache_evidence": {
+        "baseline": {
+          "local_reuse_len": 0,
+          "namespace": "pubprec_headwheel_Porigin_v1",
+          "remote_reuse_len": 0
+        },
+        "d-result": {
+          "empty_observer_requests": 0,
+          "empty_tree_node_count": 0,
+          "fresh_proof": {
+            "SHA256": "ef084956d3f67a33a77bc932a459c53649bc3a4cd507cd0cb475efba4e83b717",
+            "bytes": 5650,
+            "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/dgdet-stage-d-restore-headwheelD1/fresh-proof.json"
+          },
+          "local_reuse_len": 0,
+          "namespace": "pubprec_headwheel_Dorigin_v1",
+          "native_request_empty_metric_age_seconds": 2.4179883003234863,
+          "remote_reuse_len": 7168
+        },
+        "p-result": {
+          "empty_observer_requests": 0,
+          "empty_tree_node_count": 0,
+          "fresh_proof": {
+            "SHA256": "d99474c750bda9cb002460fe5987c32049a7e97c0a02064975a0b99fc8459111",
+            "bytes": 5648,
+            "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/dgdet-stage-p-restore-headwheelP1/fresh-proof.json"
+          },
+          "local_reuse_len": 0,
+          "namespace": "pubprec_headwheel_Porigin_v1",
+          "native_request_empty_metric_age_seconds": 1.730407953262329,
+          "remote_reuse_len": 7168
+        }
+      },
+      "candidate_commit": "fb09988a5c552f4f5ff716472d8b50647af22d2c",
+      "cross_epoch_normal_complete_IDs_equal": true,
+      "cross_epoch_normal_first_difference": null,
+      "cross_epoch_normal_reference_tested": true,
+      "exact_request_provenance": "PENDING",
+      "first_difference_positions": {
+        "d_result": null,
+        "p_result": null
+      },
+      "formal_acceptance": false,
+      "input_ids_sha256": "10932132ad309cbfd30ae5600e64d7f7bb2dd8d7d2ddb6af4c6349ce2381ef71",
+      "input_tokens": 7169,
+      "model_requests": 0,
+      "output_metadata": {
+        "baseline": {
+          "SHA256": "c8f32290469776961c8c562f05cb4924876ffbdbf258f1a4dc8dcfc640b103ca",
+          "tokens": 166
+        },
+        "d_result": {
+          "SHA256": "c8f32290469776961c8c562f05cb4924876ffbdbf258f1a4dc8dcfc640b103ca",
+          "tokens": 166
+        },
+        "p_result": {
+          "SHA256": "c8f32290469776961c8c562f05cb4924876ffbdbf258f1a4dc8dcfc640b103ca",
+          "tokens": 166
+        }
+      },
+      "outputs_equal": {
+        "d_result": true,
+        "p_result": true
+      },
+      "plan_SHA256": "cac8518652337369e73ac7bff6888ab4349f611a0ac3cdf8403f38aca39bd276",
+      "role_epochs": {
+        "baseline": {
+          "D": {
+            "GPU_ranks": [
+              {
+                "PID": 1046893,
+                "UID": 500,
+                "start_ticks": "51442798"
+              },
+              {
+                "PID": 1046894,
+                "UID": 500,
+                "start_ticks": "51442798"
+              },
+              {
+                "PID": 1046895,
+                "UID": 500,
+                "start_ticks": "51442803"
+              },
+              {
+                "PID": 1046896,
+                "UID": 500,
+                "start_ticks": "51442803"
+              }
+            ],
+            "model_root": {
+              "PID": 1046658,
+              "UID": 500,
+              "start_ticks": "51441894"
+            },
+            "namespace": "pubprec_headwheel_Dorigin_v1"
+          },
+          "P": {
+            "GPU_ranks": [
+              {
+                "PID": 1136174,
+                "UID": 500,
+                "start_ticks": "51492055"
+              },
+              {
+                "PID": 1136175,
+                "UID": 500,
+                "start_ticks": "51492055"
+              },
+              {
+                "PID": 1136176,
+                "UID": 500,
+                "start_ticks": "51492061"
+              },
+              {
+                "PID": 1136177,
+                "UID": 500,
+                "start_ticks": "51492061"
+              }
+            ],
+            "model_root": {
+              "PID": 1136033,
+              "UID": 500,
+              "start_ticks": "51491197"
+            },
+            "namespace": "pubprec_headwheel_Porigin_v1"
+          }
+        },
+        "d-result": {
+          "D": {
+            "GPU_ranks": [
+              {
+                "PID": 1036570,
+                "UID": 500,
+                "start_ticks": "51308516"
+              },
+              {
+                "PID": 1036571,
+                "UID": 500,
+                "start_ticks": "51308516"
+              },
+              {
+                "PID": 1036572,
+                "UID": 500,
+                "start_ticks": "51308521"
+              },
+              {
+                "PID": 1036573,
+                "UID": 500,
+                "start_ticks": "51308521"
+              }
+            ],
+            "model_root": {
+              "PID": 1036316,
+              "UID": 500,
+              "start_ticks": "51307585"
+            },
+            "namespace": "pubprec_headwheel_Dorigin_v1"
+          },
+          "P": {
+            "GPU_ranks": [
+              {
+                "PID": 1122049,
+                "UID": 500,
+                "start_ticks": "51388919"
+              },
+              {
+                "PID": 1122050,
+                "UID": 500,
+                "start_ticks": "51388919"
+              },
+              {
+                "PID": 1122051,
+                "UID": 500,
+                "start_ticks": "51388923"
+              },
+              {
+                "PID": 1122052,
+                "UID": 500,
+                "start_ticks": "51388923"
+              }
+            ],
+            "model_root": {
+              "PID": 1121952,
+              "UID": 500,
+              "start_ticks": "51388020"
+            },
+            "namespace": "pubprec_headwheel_Dorigin_v1"
+          }
+        },
+        "p-result": {
+          "D": {
+            "GPU_ranks": [
+              {
+                "PID": 1046893,
+                "UID": 500,
+                "start_ticks": "51442798"
+              },
+              {
+                "PID": 1046894,
+                "UID": 500,
+                "start_ticks": "51442798"
+              },
+              {
+                "PID": 1046895,
+                "UID": 500,
+                "start_ticks": "51442803"
+              },
+              {
+                "PID": 1046896,
+                "UID": 500,
+                "start_ticks": "51442803"
+              }
+            ],
+            "model_root": {
+              "PID": 1046658,
+              "UID": 500,
+              "start_ticks": "51441894"
+            },
+            "namespace": "pubprec_headwheel_Dorigin_v1"
+          },
+          "P": {
+            "GPU_ranks": [
+              {
+                "PID": 1136174,
+                "UID": 500,
+                "start_ticks": "51492055"
+              },
+              {
+                "PID": 1136175,
+                "UID": 500,
+                "start_ticks": "51492055"
+              },
+              {
+                "PID": 1136176,
+                "UID": 500,
+                "start_ticks": "51492061"
+              },
+              {
+                "PID": 1136177,
+                "UID": 500,
+                "start_ticks": "51492061"
+              }
+            ],
+            "model_root": {
+              "PID": 1136033,
+              "UID": 500,
+              "start_ticks": "51491197"
+            },
+            "namespace": "pubprec_headwheel_Porigin_v1"
+          }
+        }
+      },
+      "scope": "actual-D-history continuation diagnostic; NOT original business R; NOT formal acceptance",
+      "source_remote_destination_byte_equality": "PENDING",
+      "state": "TOKEN_ONLY_ACTUAL_D_HISTORY_DIAGNOSTIC_COMPARISON",
+      "wheel_SHA256": "6a77459e273388b3e6143b9b2c45d16e083cc6c4d658d382438e5ed5abfb4645",
+      "whole_wheel_three_route_numerical_gate": true
+    },
+    "result_reference": {
+      "SHA256": "88420ef443fbd7261fb129f88aa0265ca2c11487890cc6477d58e799d386c84c",
+      "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headwheel-three-routes-compare-v1/result-safe.json"
+    },
+    "status": {
+      "model_requests": 0,
+      "result_SHA256": "88420ef443fbd7261fb129f88aa0265ca2c11487890cc6477d58e799d386c84c",
+      "state": "SUCCEEDED"
+    }
+  },
+  "completed_model_requests_this_whole_wheel_batch": 6,
+  "cumulative_completed_model_requests": 57,
+  "execution_audit": {
+    "D": {
+      "deadline_epoch": 1793703233.701535,
+      "dependencies": {
+        "consumer91b-D-v7": {
+          "deadline_epoch": 1793706814.0018713,
+          "heartbeat_at": 1793702476.0022657,
+          "state": "READY"
+        },
+        "hc031-static-D-v4": {
+          "deadline_epoch": 1793706676.594567,
+          "heartbeat_at": 1793702475.0104244,
+          "state": "RUNNING"
+        }
+      },
+      "heartbeat_at": 1793702475.16339,
+      "model_root": {
+        "PID": 1046658,
+        "UID": 500,
+        "start_ticks": "51441894"
+      },
+      "namespace": "pubprec_headwheel_Dorigin_v1",
+      "observed_at": 1793702491.074535,
+      "ranks": [
+        {
+          "PID": 1046893,
+          "UID": 500,
+          "start_ticks": "51442798",
+          "world_rank": 0
+        },
+        {
+          "PID": 1046894,
+          "UID": 500,
+          "start_ticks": "51442798",
+          "world_rank": 1
+        },
+        {
+          "PID": 1046895,
+          "UID": 500,
+          "start_ticks": "51442803",
+          "world_rank": 2
+        },
+        {
+          "PID": 1046896,
+          "UID": 500,
+          "start_ticks": "51442803",
+          "world_rank": 3
+        }
+      ],
+      "state": "MODEL_READY_KV_EMPTY_PENDING"
+    },
+    "P": {
+      "deadline_epoch": 1793703728.7181342,
+      "dependencies": {
+        "consumer91b-P-v7": {
+          "deadline_epoch": 1793706813.0652502,
+          "heartbeat_at": 1793702475.541415,
+          "state": "READY"
+        },
+        "hc031-static-P-v4": {
+          "deadline_epoch": 1793706675.9498425,
+          "heartbeat_at": 1793702473.8577216,
+          "state": "RUNNING"
+        }
+      },
+      "heartbeat_at": 1793702490.430381,
+      "model_root": {
+        "PID": 1136033,
+        "UID": 500,
+        "start_ticks": "51491197"
+      },
+      "namespace": "pubprec_headwheel_Porigin_v1",
+      "observed_at": 1793702491.836112,
+      "ranks": [
+        {
+          "PID": 1136174,
+          "UID": 500,
+          "start_ticks": "51492055",
+          "world_rank": 0
+        },
+        {
+          "PID": 1136175,
+          "UID": 500,
+          "start_ticks": "51492055",
+          "world_rank": 1
+        },
+        {
+          "PID": 1136176,
+          "UID": 500,
+          "start_ticks": "51492061",
+          "world_rank": 2
+        },
+        {
+          "PID": 1136177,
+          "UID": 500,
+          "start_ticks": "51492061",
+          "world_rank": 3
+        }
+      ],
+      "state": "MODEL_READY_KV_EMPTY_PENDING"
+    },
+    "termination": {
+      "observed_at": 1793702484.2992117,
+      "requests": {
+        "Dremote": {
+          "artifact_kind": "immutable_wheel",
+          "finished_at": 1793701049.6405368,
+          "input_tokens": 7169,
+          "output_tokens": 166,
+          "reference": {
+            "SHA256": "6cb0b2a2f412271ce47189ea5bbcedc7caaaed7bc58b0e73926fe577faced858",
+            "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headwheel-d-restore-native-headwheelD1/native/result.json"
+          },
+          "started_at": 1793701045.6116133,
+          "termination_flags": {
+            "reached_output_cap": false,
+            "runtime_model_eos_verified": false
+          },
+          "wheel_SHA256": "6a77459e273388b3e6143b9b2c45d16e083cc6c4d658d382438e5ed5abfb4645"
+        },
+        "Premote": {
+          "artifact_kind": "immutable_wheel",
+          "finished_at": 1793702079.1297438,
+          "input_tokens": 7169,
+          "output_tokens": 166,
+          "reference": {
+            "SHA256": "0426c98f211af3ceca0caf52b505bc8030ae07c03ff59af61dc6668c946c035f",
+            "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headwheel-p-restore-native-headwheelP1/native/result.json"
+          },
+          "started_at": 1793702075.214069,
+          "termination_flags": {
+            "reached_output_cap": false,
+            "runtime_model_eos_verified": false
+          },
+          "wheel_SHA256": "6a77459e273388b3e6143b9b2c45d16e083cc6c4d658d382438e5ed5abfb4645"
+        },
+        "Pseed": {
+          "artifact_kind": "immutable_wheel",
+          "finished_at": 1793701580.2919862,
+          "input_tokens": 7169,
+          "output_tokens": 1,
+          "reference": {
+            "SHA256": "fbb7f15b1e0a9b8be57162dc77cd94948a12d04b1f70f5ef0ffe15f811eae235",
+            "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headwheel-p-seed-native-headwheelPS1/native/result.json"
+          },
+          "started_at": 1793701579.4075005,
+          "termination_flags": {
+            "reached_output_cap": true,
+            "runtime_model_eos_verified": false
+          },
+          "wheel_SHA256": "6a77459e273388b3e6143b9b2c45d16e083cc6c4d658d382438e5ed5abfb4645"
+        },
+        "normal": {
+          "artifact_kind": "immutable_wheel",
+          "finished_at": 1793700489.5078204,
+          "input_tokens": 7169,
+          "output_tokens": 166,
+          "reference": {
+            "SHA256": "874f13ab690378bd480506fab794de1fb7b65decf6da262c280fd386cb1b9bfe",
+            "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headwheel-baseline-native-headwheelN1/native/result.json"
+          },
+          "started_at": 1793700486.386164,
+          "termination_flags": {
+            "reached_output_cap": false,
+            "runtime_model_eos_verified": false
+          },
+          "wheel_SHA256": "6a77459e273388b3e6143b9b2c45d16e083cc6c4d658d382438e5ed5abfb4645"
+        },
+        "normal2": {
+          "artifact_kind": "immutable_wheel",
+          "finished_at": 1793702224.6838508,
+          "input_tokens": 7169,
+          "output_tokens": 166,
+          "reference": {
+            "SHA256": "0fe4ed40eae992de4b0d49f3e23ad0f252873a71e13083dd4170861be0ab3c1f",
+            "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headwheel-baseline-native-headwheelN2/native/result.json"
+          },
+          "started_at": 1793702221.5827632,
+          "termination_flags": {
+            "reached_output_cap": false,
+            "runtime_model_eos_verified": false
+          },
+          "wheel_SHA256": "6a77459e273388b3e6143b9b2c45d16e083cc6c4d658d382438e5ed5abfb4645"
+        },
+        "source": {
+          "artifact_kind": "immutable_wheel",
+          "finished_at": 1793700258.663731,
+          "input_tokens": 7041,
+          "output_tokens": 294,
+          "reference": {
+            "SHA256": "359bb0cecb5df549cfbbe0158a8a7203eb0848c9c60b87c0beab149123193a59",
+            "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headwheel-source1/request/native/result.json"
+          },
+          "started_at": 1793700252.211424,
+          "termination_flags": {
+            "reached_output_cap": false,
+            "runtime_model_eos_verified": false
+          },
+          "wheel_SHA256": "6a77459e273388b3e6143b9b2c45d16e083cc6c4d658d382438e5ed5abfb4645"
+        }
+      }
+    }
+  },
+  "original_business_fixture_acceptance": false,
+  "package": {
+    "build_invocations": 1,
+    "control_commit": "989caed99c74492da82f59d1355b2e7c1c0ce097",
+    "publication_manifest_SHA256": "ef9b4e3947ee7fd5bed45e3d5fc51118e64d1cc9bab6d56eab6d810a94a790a1",
+    "source_commit": "fb09988a5c552f4f5ff716472d8b50647af22d2c",
+    "wheel_SHA256": "6a77459e273388b3e6143b9b2c45d16e083cc6c4d658d382438e5ed5abfb4645",
+    "wheel_bytes": 1922266511,
+    "wheel_path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-full-wheel-v1/published/rtp_llm-0.2.0-cp310-cp310-linux_aarch64.whl"
+  },
+  "performance_accepted": false,
+  "state": "FULL_WHEEL_THREE_ROUTE_COMPLETE_IDS_AND_NORMAL_REGRESSION_PASS"
+}
