@@ -1,0 +1,299 @@
+{
+  "candidate_commit": "fb09988a5c552f4f5ff716472d8b50647af22d2c",
+  "actual_completed_model_requests": 51,
+  "current_candidate_requests": {
+    "total": 6,
+    "natural_business": 5,
+    "P_only_max1_preparation": 1
+  },
+  "controller_state": "SUCCEEDED",
+  "status": {
+    "model_requests": 0,
+    "result_SHA256": "79252b798edc625b352e0052411168d2a9cac46fd6f769ebc1dde01df78fae2b",
+    "state": "SUCCEEDED"
+  },
+  "result": {
+    "actual_generation_profile_SHA256": "8b08c68b5accf3d411deab7495aff702d484c00631a4668393367ae92dcb4cee",
+    "actual_generation_profiles_equal": true,
+    "actual_source_suffix": {
+      "comparisons": {
+        "baseline": {
+          "complete_IDs_equal": true,
+          "first_difference": null
+        },
+        "d-result": {
+          "complete_IDs_equal": true,
+          "first_difference": null
+        },
+        "p-result": {
+          "complete_IDs_equal": true,
+          "first_difference": null
+        }
+      },
+      "consumed_source_output_tokens": 128,
+      "remaining_actual_source_tokens": 166,
+      "scope": "actual source token sequence only; no inferred computed/published KV boundary",
+      "source_output_tokens": 294
+    },
+    "business_acceptance": false,
+    "cache_evidence": {
+      "baseline": {
+        "local_reuse_len": 0,
+        "namespace": "pubprec_headfb09988_Dorigin_v1",
+        "remote_reuse_len": 0
+      },
+      "d-result": {
+        "empty_observer_requests": 0,
+        "empty_tree_node_count": 0,
+        "fresh_proof": {
+          "SHA256": "3bf085d015b300f491b2b2d4f01e8cf98664a01536baa3ef0bd1c6abc4d277ea",
+          "bytes": 5665,
+          "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/dgdet-stage-d-restore-headfbD1/fresh-proof.json"
+        },
+        "local_reuse_len": 0,
+        "namespace": "pubprec_headfb09988_Dorigin_v1",
+        "native_request_empty_metric_age_seconds": 2.804227113723755,
+        "remote_reuse_len": 7168
+      },
+      "p-result": {
+        "empty_observer_requests": 0,
+        "empty_tree_node_count": 0,
+        "fresh_proof": {
+          "SHA256": "190c3c6367b4b7ec2a9f67d8303c09aa3c40bbbf5d98992618cf9b6ac083cda3",
+          "bytes": 5665,
+          "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/dgdet-stage-p-restore-headfbP1/fresh-proof.json"
+        },
+        "local_reuse_len": 0,
+        "namespace": "pubprec_headfb09988_Porigin_v1",
+        "native_request_empty_metric_age_seconds": 1.697033405303955,
+        "remote_reuse_len": 7168
+      }
+    },
+    "candidate_commit": "fb09988a5c552f4f5ff716472d8b50647af22d2c",
+    "cross_epoch_normal_complete_IDs_equal": true,
+    "cross_epoch_normal_first_difference": null,
+    "cross_epoch_normal_reference_tested": true,
+    "exact_request_provenance": "PENDING",
+    "first_difference_positions": {
+      "d_result": null,
+      "p_result": null
+    },
+    "formal_acceptance": false,
+    "input_ids_sha256": "10932132ad309cbfd30ae5600e64d7f7bb2dd8d7d2ddb6af4c6349ce2381ef71",
+    "input_tokens": 7169,
+    "model_requests": 0,
+    "output_metadata": {
+      "baseline": {
+        "SHA256": "c8f32290469776961c8c562f05cb4924876ffbdbf258f1a4dc8dcfc640b103ca",
+        "tokens": 166
+      },
+      "d_result": {
+        "SHA256": "c8f32290469776961c8c562f05cb4924876ffbdbf258f1a4dc8dcfc640b103ca",
+        "tokens": 166
+      },
+      "p_result": {
+        "SHA256": "c8f32290469776961c8c562f05cb4924876ffbdbf258f1a4dc8dcfc640b103ca",
+        "tokens": 166
+      }
+    },
+    "outputs_equal": {
+      "d_result": true,
+      "p_result": true
+    },
+    "plan_SHA256": "a20bcd5f4193726d71208d063ca3a375821b37274a36aaa08de855397b83ef25",
+    "role_epochs": {
+      "baseline": {
+        "D": {
+          "GPU_ranks": [
+            {
+              "PID": 1010573,
+              "UID": 500,
+              "start_ticks": "50670114"
+            },
+            {
+              "PID": 1010574,
+              "UID": 500,
+              "start_ticks": "50670114"
+            },
+            {
+              "PID": 1010575,
+              "UID": 500,
+              "start_ticks": "50670119"
+            },
+            {
+              "PID": 1010576,
+              "UID": 500,
+              "start_ticks": "50670119"
+            }
+          ],
+          "model_root": {
+            "PID": 1010327,
+            "UID": 500,
+            "start_ticks": "50669218"
+          },
+          "namespace": "pubprec_headfb09988_Dorigin_v1"
+        },
+        "P": {
+          "GPU_ranks": [
+            {
+              "PID": 1075191,
+              "UID": 500,
+              "start_ticks": "50669906"
+            },
+            {
+              "PID": 1075192,
+              "UID": 500,
+              "start_ticks": "50669906"
+            },
+            {
+              "PID": 1075193,
+              "UID": 500,
+              "start_ticks": "50669912"
+            },
+            {
+              "PID": 1075194,
+              "UID": 500,
+              "start_ticks": "50669912"
+            }
+          ],
+          "model_root": {
+            "PID": 1075054,
+            "UID": 500,
+            "start_ticks": "50669070"
+          },
+          "namespace": "pubprec_headfb09988_Dorigin_v1"
+        }
+      },
+      "d-result": {
+        "D": {
+          "GPU_ranks": [
+            {
+              "PID": 1010573,
+              "UID": 500,
+              "start_ticks": "50670114"
+            },
+            {
+              "PID": 1010574,
+              "UID": 500,
+              "start_ticks": "50670114"
+            },
+            {
+              "PID": 1010575,
+              "UID": 500,
+              "start_ticks": "50670119"
+            },
+            {
+              "PID": 1010576,
+              "UID": 500,
+              "start_ticks": "50670119"
+            }
+          ],
+          "model_root": {
+            "PID": 1010327,
+            "UID": 500,
+            "start_ticks": "50669218"
+          },
+          "namespace": "pubprec_headfb09988_Dorigin_v1"
+        },
+        "P": {
+          "GPU_ranks": [
+            {
+              "PID": 1084077,
+              "UID": 500,
+              "start_ticks": "50762592"
+            },
+            {
+              "PID": 1084078,
+              "UID": 500,
+              "start_ticks": "50762592"
+            },
+            {
+              "PID": 1084079,
+              "UID": 500,
+              "start_ticks": "50762597"
+            },
+            {
+              "PID": 1084080,
+              "UID": 500,
+              "start_ticks": "50762597"
+            }
+          ],
+          "model_root": {
+            "PID": 1083936,
+            "UID": 500,
+            "start_ticks": "50761772"
+          },
+          "namespace": "pubprec_headfb09988_Dorigin_v1"
+        }
+      },
+      "p-result": {
+        "D": {
+          "GPU_ranks": [
+            {
+              "PID": 1021816,
+              "UID": 500,
+              "start_ticks": "50844668"
+            },
+            {
+              "PID": 1021817,
+              "UID": 500,
+              "start_ticks": "50844668"
+            },
+            {
+              "PID": 1021818,
+              "UID": 500,
+              "start_ticks": "50844672"
+            },
+            {
+              "PID": 1021819,
+              "UID": 500,
+              "start_ticks": "50844672"
+            }
+          ],
+          "model_root": {
+            "PID": 1021567,
+            "UID": 500,
+            "start_ticks": "50843784"
+          },
+          "namespace": "pubprec_headfb09988_Dorigin_v1"
+        },
+        "P": {
+          "GPU_ranks": [
+            {
+              "PID": 1099409,
+              "UID": 500,
+              "start_ticks": "50921418"
+            },
+            {
+              "PID": 1099410,
+              "UID": 500,
+              "start_ticks": "50921418"
+            },
+            {
+              "PID": 1099413,
+              "UID": 500,
+              "start_ticks": "50921426"
+            },
+            {
+              "PID": 1099414,
+              "UID": 500,
+              "start_ticks": "50921426"
+            }
+          ],
+          "model_root": {
+            "PID": 1099276,
+            "UID": 500,
+            "start_ticks": "50920691"
+          },
+          "namespace": "pubprec_headfb09988_Porigin_v1"
+        }
+      }
+    },
+    "scope": "actual-D-history continuation diagnostic; NOT original business R; NOT formal acceptance",
+    "source_remote_destination_byte_equality": "PENDING",
+    "state": "TOKEN_ONLY_ACTUAL_D_HISTORY_DIAGNOSTIC_COMPARISON"
+  },
+  "formal_acceptance": false,
+  "full_wheel_SHA256": null,
+  "full_wheel_stage": "frozen once; prepare passed; build submission pending receipt"
+}
