@@ -1,0 +1,439 @@
+{
+  "candidate": "031fc2af33111e7bbe13bbca6e72ebd6fc094d7c",
+  "wheel_SHA256": null,
+  "task_completed_native_requests": 41,
+  "candidate031_completed_native_requests": 19,
+  "batch_completed_native_requests": 2,
+  "source_native": {
+    "EOF": true,
+    "SHA256": "3a2181ce53a2579f1793ec780c705fc4e5ded445fde711e5ba4a7045aaeb4452",
+    "input_SHA256": "22510597b00881511fec56f072a5ef0ed3593b8a32b069e4189f0d75f258e49c",
+    "input_tokens": 7041,
+    "output_tokens": 295,
+    "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/capture42-source-source1/request/native/result.json",
+    "request_id": 64124139076844
+  },
+  "source_calibration": {
+    "complete_EOF": true,
+    "first_difference_zero_based": null,
+    "full_output_IDs_equal": true,
+    "input_equal": true,
+    "output_tokens": 295,
+    "reference_output_tokens": 295
+  },
+  "normal_native": {
+    "EOF": true,
+    "SHA256": "72fab008d9ba2d08a31a060f5404ac055aed88e17c76a0160d01b521d3af87a9",
+    "input_SHA256": "3982930c351652d4c939acb4e883924ee85bc381454b3eeff16622e8f5edf63c",
+    "input_tokens": 7169,
+    "output_tokens": 176,
+    "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/capture42-N1/request/native/result.json",
+    "request_id": 69020846131145
+  },
+  "normal_calibration": {
+    "actual_profile_equal": true,
+    "complete_EOF": true,
+    "first_difference_zero_based": null,
+    "full_output_IDs_equal": true,
+    "input_equal": true,
+    "output_tokens": 176,
+    "reference_output_tokens": 176
+  },
+  "source_plan_SHA256": "6af93d81d83bc29b915b11cbe64389a5144f283f67daa9882f164707834f6f53",
+  "normal_plan_SHA256": "55b24dfec539d0031f50bc1cef521d9dd1f3fb5394348460ab16161b79b71368",
+  "comparison_plan_SHA256": "4f4b69122ae0be527550ff2086d1416562f605a1747b9706995c5b71134af0e3",
+  "comparison_result": {
+    "SHA256": "2297dd7c385f0563a689c7b6c3ae5734544dab91f674473cbb9613fad61ea50b",
+    "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/capture42-historical7045-comparison-v1/result-safe.json"
+  },
+  "result": {
+    "GPU_tokens_joined": true,
+    "all_prior_capture41_common_points_byte_equal": true,
+    "candidate_commit": "031fc2af33111e7bbe13bbca6e72ebd6fc094d7c",
+    "checks": [
+      {
+        "byte_equal": true,
+        "comparable": true,
+        "elements": 20480,
+        "first_unequal_element": null,
+        "layer": 24,
+        "max_abs_difference": 0.0,
+        "point": "block_entry4HC",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "comparable": true,
+        "elements": 20480,
+        "first_unequal_element": null,
+        "layer": 24,
+        "max_abs_difference": 0.0,
+        "point": "seam_residual4HC",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "comparable": true,
+        "elements": 4,
+        "first_unequal_element": null,
+        "layer": 24,
+        "max_abs_difference": 0.0,
+        "point": "attnHC_pre4",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "comparable": true,
+        "elements": 4,
+        "first_unequal_element": null,
+        "layer": 24,
+        "max_abs_difference": 0.0,
+        "point": "attnHC_post4",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "comparable": true,
+        "elements": 16,
+        "first_unequal_element": null,
+        "layer": 24,
+        "max_abs_difference": 0.0,
+        "point": "attnHC_comb16",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "comparable": true,
+        "elements": 5120,
+        "first_unequal_element": null,
+        "layer": 24,
+        "max_abs_difference": 0.0,
+        "point": "actual_attention_input5120",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": false,
+        "comparable": true,
+        "elements": 5120,
+        "first_unequal_element": 0,
+        "layer": 24,
+        "max_abs_difference": 0.0390625,
+        "point": "seam_attn_out5120",
+        "unequal_elements": 4500
+      },
+      {
+        "byte_equal": false,
+        "comparable": true,
+        "elements": 20480,
+        "first_unequal_element": 0,
+        "layer": 24,
+        "max_abs_difference": 0.0390625,
+        "point": "seam_post4HC",
+        "unequal_elements": 3757
+      },
+      {
+        "byte_equal": false,
+        "comparable": true,
+        "elements": 4,
+        "first_unequal_element": 0,
+        "layer": 24,
+        "max_abs_difference": 0.00044077634811401367,
+        "point": "FFNHC_pre4",
+        "unequal_elements": 4
+      },
+      {
+        "byte_equal": false,
+        "comparable": true,
+        "elements": 4,
+        "first_unequal_element": 0,
+        "layer": 24,
+        "max_abs_difference": 0.0004004240036010742,
+        "point": "FFNHC_post4",
+        "unequal_elements": 4
+      },
+      {
+        "byte_equal": false,
+        "comparable": true,
+        "elements": 16,
+        "first_unequal_element": 0,
+        "layer": 24,
+        "max_abs_difference": 5.0127506256103516e-05,
+        "point": "FFNHC_comb16",
+        "unequal_elements": 16
+      },
+      {
+        "byte_equal": false,
+        "comparable": true,
+        "elements": 5120,
+        "first_unequal_element": 2,
+        "layer": 24,
+        "max_abs_difference": 0.015625,
+        "point": "seam_FFN_norm5120",
+        "unequal_elements": 3203
+      },
+      {
+        "byte_equal": false,
+        "comparable": true,
+        "elements": 5120,
+        "first_unequal_element": 2,
+        "layer": 24,
+        "max_abs_difference": 0.015625,
+        "point": "FFN_input5120",
+        "unequal_elements": 3203
+      },
+      {
+        "byte_equal": false,
+        "comparable": true,
+        "elements": 5120,
+        "first_unequal_element": 0,
+        "layer": 24,
+        "max_abs_difference": 0.0322265625,
+        "point": "FFN_output5120",
+        "unequal_elements": 4804
+      },
+      {
+        "byte_equal": false,
+        "comparable": true,
+        "elements": 20480,
+        "first_unequal_element": 0,
+        "layer": 25,
+        "max_abs_difference": 0.064453125,
+        "point": "block_entry4HC",
+        "unequal_elements": 11163
+      },
+      {
+        "byte_equal": false,
+        "comparable": true,
+        "elements": 5120,
+        "first_unequal_element": 0,
+        "layer": 25,
+        "max_abs_difference": 0.0009765625,
+        "point": "actual_attention_input5120",
+        "unequal_elements": 3718
+      }
+    ],
+    "coefficient_FFN_causality_proven": false,
+    "common_actual_parameter_names": [
+      "L24.FFNHC.base",
+      "L24.FFNHC.fn",
+      "L24.FFNHC.scale",
+      "L24.FFN_norm.weight",
+      "L24.attnHC.base",
+      "L24.attnHC.fn",
+      "L24.attnHC.scale",
+      "L24.kv_norm",
+      "L24.q_norm",
+      "L24.wkv.weight",
+      "L24.wkv.weight_scales",
+      "L24.wq_a_wkv.weight",
+      "L24.wq_a_wkv.weight_scales"
+    ],
+    "common_actual_parameters_byte_equal": true,
+    "coverage": {
+      "normal": {
+        "D": [
+          {
+            "PID": 952548,
+            "SHA256": "3663cfa83e51e819a4ad8321310a1731d0ebb79d3093a2a1020350e228047e3c",
+            "empty": true,
+            "points": 0,
+            "world_rank": 0
+          },
+          {
+            "PID": 952549,
+            "SHA256": "a6f9e466aec92b891b51d6d772814173efc8f44778331a91ad1e743bc2fa165c",
+            "empty": true,
+            "points": 0,
+            "world_rank": 1
+          },
+          {
+            "PID": 952550,
+            "SHA256": "b925cbc6aed42b8bda8dd49a148ddf01371de6a0a592dea75785cbade8730c1d",
+            "empty": true,
+            "points": 0,
+            "world_rank": 2
+          },
+          {
+            "PID": 952551,
+            "SHA256": "f3b7f6f124486b4ca6d55409ac43d12b4694bb8d9c0d4b1b5de6a37f1f6e7c61",
+            "empty": true,
+            "points": 0,
+            "world_rank": 3
+          }
+        ],
+        "P": [
+          {
+            "PID": 1018457,
+            "SHA256": "ebe9a013d97b417684fa022611d0c643b00afe3da5c91edc33220d1ed09ef308",
+            "empty": false,
+            "points": 19,
+            "world_rank": 0
+          },
+          {
+            "PID": 1018460,
+            "SHA256": "7bedd60ef7f366abd57239a4cc7ec9f11f5dc2d7fbfdb3adad9e08db6f24fd8d",
+            "empty": true,
+            "points": 0,
+            "world_rank": 3
+          },
+          {
+            "PID": 1018458,
+            "SHA256": "24648aea9432cb6b72d099006f6621ea16ba7f45cacf5c723ecbc8fe9bef5c63",
+            "empty": true,
+            "points": 0,
+            "world_rank": 1
+          },
+          {
+            "PID": 1018459,
+            "SHA256": "69fe003a96dc01d5ae40c295b938e5e28f44a41838cec21f424c25edfb65f520",
+            "empty": true,
+            "points": 0,
+            "world_rank": 2
+          }
+        ]
+      },
+      "source": {
+        "D": [
+          {
+            "PID": 952548,
+            "SHA256": "7e36549720215f18edbef2d90f935081ef31a41a627b3c79549d94cb8afb6b33",
+            "empty": false,
+            "points": 29,
+            "world_rank": 0
+          },
+          {
+            "PID": 952549,
+            "SHA256": "b09b0e7047fd35ebf2789622e9c979035c54999d18aa020075fd47115b809ca7",
+            "empty": true,
+            "points": 0,
+            "world_rank": 1
+          },
+          {
+            "PID": 952550,
+            "SHA256": "28bda7e55b26fadd114cd9b12f4981419308fcc74a891ea0e49760aba77094e8",
+            "empty": true,
+            "points": 0,
+            "world_rank": 2
+          },
+          {
+            "PID": 952551,
+            "SHA256": "e2f786e4438cf81cb12414cac443724c8ed93970cc974e26a193a1b53c334931",
+            "empty": true,
+            "points": 0,
+            "world_rank": 3
+          }
+        ],
+        "P": [
+          {
+            "PID": 1018457,
+            "SHA256": "960e0b7123885dc18e62ad03adcdb1399614d728507449b9e764bd714d27f979",
+            "empty": true,
+            "points": 0,
+            "world_rank": 0
+          },
+          {
+            "PID": 1018458,
+            "SHA256": "16c2fba991b6dc64adddf999e55b9636d1793f0ff3c8b6be53748aeccbe7c851",
+            "empty": true,
+            "points": 0,
+            "world_rank": 1
+          },
+          {
+            "PID": 1018459,
+            "SHA256": "a7338b346a31cbf82c6589ce000385964f3dacd6c60b9de92a43cb522c343b7b",
+            "empty": true,
+            "points": 0,
+            "world_rank": 2
+          },
+          {
+            "PID": 1018460,
+            "SHA256": "d66a379510ae45ff9ed3d438573bf15b6a18ed0d1c7ddfa53b267703cb446726",
+            "empty": true,
+            "points": 0,
+            "world_rank": 3
+          }
+        ]
+      }
+    },
+    "expert_routes_inputs_quantization_scales_and_full_batches_equal_proven": false,
+    "first_canonical_tensor_difference": {
+      "byte_equal": false,
+      "comparable": true,
+      "elements": 5120,
+      "first_unequal_element": 0,
+      "layer": 24,
+      "max_abs_difference": 0.0390625,
+      "point": "seam_attn_out5120",
+      "unequal_elements": 4500
+    },
+    "formal_acceptance": false,
+    "model_requests": 0,
+    "order_scope": "actual L24 residual/attention HC inputs and output, postHC/FFNHC/prepared FFN input and output; recorded batch row counts are metadata only",
+    "primitive_calls": 0,
+    "prior_capture41_checks": [
+      {
+        "byte_equal": true,
+        "case": "source",
+        "layer": 24,
+        "point": "block_entry4HC",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "case": "source",
+        "layer": 24,
+        "point": "actual_attention_input5120",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "case": "source",
+        "layer": 25,
+        "point": "block_entry4HC",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "case": "source",
+        "layer": 25,
+        "point": "actual_attention_input5120",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "case": "normal",
+        "layer": 24,
+        "point": "block_entry4HC",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "case": "normal",
+        "layer": 24,
+        "point": "actual_attention_input5120",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "case": "normal",
+        "layer": 25,
+        "point": "block_entry4HC",
+        "unequal_elements": 0
+      },
+      {
+        "byte_equal": true,
+        "case": "normal",
+        "layer": 25,
+        "point": "actual_attention_input5120",
+        "unequal_elements": 0
+      }
+    ],
+    "same_P_D_epochs": true,
+    "source_remote_destination_byte_equality_proven": false,
+    "state": "COMPARED_ACTUAL_HISTORICAL7045_L24_SEAMS",
+    "whole_model_fixed": false
+  },
+  "whole_model_fixed": false,
+  "three_way_full_IDs_equal": false,
+  "next": "actualL24 Q/KV/indices/core/projection; do not independently attribute laterFFN/mHC differences"
+}
