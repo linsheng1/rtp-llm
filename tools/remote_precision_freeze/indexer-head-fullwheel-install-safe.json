@@ -1,0 +1,315 @@
+{
+  "build_invocations": 1,
+  "candidate_commit": "fb09988a5c552f4f5ff716472d8b50647af22d2c",
+  "formal_model_acceptance": false,
+  "model_requests_in_installation": 0,
+  "protobuf_descriptor_delta": {
+    "added_messages": [],
+    "enums_equal": true,
+    "message_changes": {
+      "MemoryOperationRequestPB": {
+        "added": {
+          "has_transfer_request_id": [
+            6,
+            8,
+            "",
+            1
+          ],
+          "transfer_request_id": [
+            5,
+            3,
+            "",
+            1
+          ],
+          "transfer_trace_id": [
+            4,
+            4,
+            "",
+            1
+          ]
+        },
+        "changed": {},
+        "removed": {}
+      }
+    },
+    "removed_messages": [],
+    "services_equal": true
+  },
+  "publication_manifest_SHA256": "ef9b4e3947ee7fd5bed45e3d5fc51118e64d1cc9bab6d56eab6d810a94a790a1",
+  "roles": {
+    "D": {
+      "controller": "SUCCEEDED",
+      "receipt": {
+        "SHA256": "ab2cbc7bbfce260c90d58863438b0b9de90b4884ed59e1821605bbf947b40af1",
+        "bytes": 7280,
+        "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-wheel-install-D-v1/result-v2.json"
+      },
+      "result": {
+        "CPU": {
+          "actual_returncode": 0,
+          "imports": {
+            "head": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-wheel-install-D-v1/site/rtp_llm/models_py/modules/dsv41/fp8/_v41_indexer_head_projection.py",
+            "protobuf": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-wheel-install-D-v1/site/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py",
+            "rtp": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-wheel-install-D-v1/site/rtp_llm/__init__.py",
+            "torch": "2.11.0+cu130"
+          }
+        },
+        "candidate_commit": "fb09988a5c552f4f5ff716472d8b50647af22d2c",
+        "environment": {
+          "SHA256": "7461dd38753812057ff24f40ff484b051db80308f3b7c73f802d18b0f5175282",
+          "bytes": 45333,
+          "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-wheel-install-D-v1/environment-v2.json"
+        },
+        "formal_model_acceptance": false,
+        "manifest": {
+          "SHA256": "c286489d82edd8434600075d6c97aeeaa8dcf52061c7d2e4ef0f00e5d33b9a49",
+          "bytes": 501011,
+          "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-wheel-install-D-v1/runtime-manifest-v2.json"
+        },
+        "member_count": 1135,
+        "model_requests": 0,
+        "package_delta": {
+          "changed": [],
+          "only_parent": [
+            "rtp_llm/RL/rl_inference_client.py",
+            "rtp_llm/cpp/__init__.py",
+            "rtp_llm/cpp/cache/block_tree_cache/benchmark/benchmark_cases.py",
+            "rtp_llm/cpp/cache/block_tree_cache/benchmark/run_block_tree_cache_benchmark.py",
+            "rtp_llm/cpp/cache/block_tree_cache/benchmark/run_block_tree_cache_benchmark_smoke_test.py",
+            "rtp_llm/cpp/cache/block_tree_cache/benchmark/run_block_tree_cache_benchmark_test.py",
+            "rtp_llm/cpp/config/model_config_test.py",
+            "rtp_llm/cpp/model_rpc/__init__.py",
+            "rtp_llm/cpp/model_rpc/proto/__init__.py",
+            "rtp_llm/cpp/model_rpc/proto/create_grpc_proto.py",
+            "rtp_llm/cpp/pybind/config_pickle_test.py",
+            "rtp_llm/cpp/pybind/rtp_llm_startup_test.py",
+            "rtp_llm/cpp/repetition/__init__.py",
+            "rtp_llm/dash_sc/generate_proto_py.py",
+            "rtp_llm/dash_sc/grammar_validation_smoke.py",
+            "rtp_llm/dash_sc/json_format_e2e_smoke.py",
+            "rtp_llm/dash_sc/proto/create_grpc_proto.py",
+            "rtp_llm/flexlb/tools/incremental-prediction/run.py",
+            "rtp_llm/flexlb/tools/online_eval/aggregate_canvas_run.py",
+            "rtp_llm/flexlb/tools/online_eval/analyze_burst_results.py",
+            "rtp_llm/flexlb/tools/online_eval/analyze_inflight_vs_qps.py",
+            "rtp_llm/flexlb/tools/online_eval/analyze_slo_batch.py",
+            "rtp_llm/flexlb/tools/online_eval/analyze_ttft_degradation.py",
+            "rtp_llm/flexlb/tools/online_eval/anomaly_smoke.py",
+            "rtp_llm/flexlb/tools/online_eval/cancel_smoke.py",
+            "rtp_llm/flexlb/tools/online_eval/canvas_report_gen.py",
+            "rtp_llm/flexlb/tools/online_eval/canvas_report_render_html.py",
+            "rtp_llm/flexlb/tools/online_eval/compare_ab.py",
+            "rtp_llm/flexlb/tools/online_eval/compare_twin.py",
+            "rtp_llm/flexlb/tools/online_eval/consolidate_run_outputs.py",
+            "rtp_llm/flexlb/tools/online_eval/eval_collectors.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/__init__.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/admission.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/balance.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/cancel.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/elastic.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/engine_fault.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/ha_support.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/kv.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/master.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/priority.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/status.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/context.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/engine_ops.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/grade.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/harness.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_functional_tests.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_load_client.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_smoke_base.py",
+            "rtp_llm/flexlb/tools/online_eval/generate_stability_report.py",
+            "rtp_llm/flexlb/tools/online_eval/mock_engine_cluster.py",
+            "rtp_llm/flexlb/tools/online_eval/mock_engine_shard_launcher.py",
+            "rtp_llm/flexlb/tools/online_eval/online_eval/__init__.py",
+            "rtp_llm/flexlb/tools/online_eval/online_eval/mock_engine.py",
+            "rtp_llm/flexlb/tools/online_eval/online_eval/proto_utils.py",
+            "rtp_llm/flexlb/tools/online_eval/online_eval/report.py",
+            "rtp_llm/flexlb/tools/online_eval/online_eval/rt_model.py",
+            "rtp_llm/flexlb/tools/online_eval/online_eval/stats.py",
+            "rtp_llm/flexlb/tools/online_eval/online_eval/trace_loader.py",
+            "rtp_llm/flexlb/tools/online_eval/parallel_runner.py",
+            "rtp_llm/flexlb/tools/online_eval/priority_preemption_smoke.py",
+            "rtp_llm/flexlb/tools/online_eval/reconstruct_summary.py",
+            "rtp_llm/flexlb/tools/online_eval/run_inflight_experiment.py",
+            "rtp_llm/flexlb/tools/online_eval/run_single_engine.py",
+            "rtp_llm/flexlb/tools/online_eval/scheduling_smoke.py",
+            "rtp_llm/flexlb/tools/online_eval/stability_monitor.py",
+            "rtp_llm/flexlb/tools/online_eval/test_resolve_decode.py",
+            "rtp_llm/flexlb/tools/routing-hotspots/run.py",
+            "rtp_llm/kserve_server.py",
+            "rtp_llm/models_py/bindings/py_model_inputs_compat_test.py",
+            "rtp_llm/models_py/modules/base/rocm/__init__.py",
+            "rtp_llm/models_py/modules/base/rocm/activation.py",
+            "rtp_llm/models_py/modules/base/rocm/moe_gating.py",
+            "rtp_llm/models_py/modules/base/rocm/norm.py",
+            "rtp_llm/models_py/modules/base/rocm/not_implemented_ops.py",
+            "rtp_llm/models_py/modules/base/rocm/select_topk.py",
+            "rtp_llm/models_py/modules/base/rocm/trt_allreduce.py",
+            "rtp_llm/models_py/standalone/__init__.py",
+            "rtp_llm/models_py/standalone/auto_model.py",
+            "rtp_llm/models_py/standalone/launcher.py",
+            "rtp_llm/models_py/triton_kernels/autotune_cache/scripts/__init__.py",
+            "rtp_llm/models_py/triton_kernels/autotune_cache/scripts/extract.py",
+            "rtp_llm/models_py/triton_kernels/autotune_cache/scripts/generators/__init__.py",
+            "rtp_llm/models_py/triton_kernels/autotune_cache/scripts/generators/kda.py",
+            "rtp_llm/tools/__init__.py"
+          ],
+          "only_wheel": []
+        },
+        "publication": {
+          "SHA256": "ef9b4e3947ee7fd5bed45e3d5fc51118e64d1cc9bab6d56eab6d810a94a790a1",
+          "URL": "http://10.44.61.73:19091/publication-precision-20261101/control/headfb09988-full-wheel-v1/published/manifest.json",
+          "bytes": 404592
+        },
+        "state": "FULL_WHEEL_INSTALLED_CPU_PASS",
+        "wheel": {
+          "SHA256": "6a77459e273388b3e6143b9b2c45d16e083cc6c4d658d382438e5ed5abfb4645",
+          "URL": "http://10.44.61.73:19091/publication-precision-20261101/control/headfb09988-full-wheel-v1/published/rtp_llm-0.2.0-cp310-cp310-linux_aarch64.whl",
+          "bytes": 1922266511
+        }
+      },
+      "status": "SUCCEEDED"
+    },
+    "P": {
+      "controller": "SUCCEEDED",
+      "receipt": {
+        "SHA256": "1da9b160e3ec9477aa84dd260588d5ed3e0502909921ae30338408b45bbecb2b",
+        "bytes": 7280,
+        "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-wheel-install-P-v1/result-v2.json"
+      },
+      "result": {
+        "CPU": {
+          "actual_returncode": 0,
+          "imports": {
+            "head": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-wheel-install-P-v1/site/rtp_llm/models_py/modules/dsv41/fp8/_v41_indexer_head_projection.py",
+            "protobuf": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-wheel-install-P-v1/site/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2.py",
+            "rtp": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-wheel-install-P-v1/site/rtp_llm/__init__.py",
+            "torch": "2.11.0+cu130"
+          }
+        },
+        "candidate_commit": "fb09988a5c552f4f5ff716472d8b50647af22d2c",
+        "environment": {
+          "SHA256": "09df68b0ca85e3b6c592e209f19694a4b71daffd58aaa6c10fe90d641eb367b2",
+          "bytes": 45333,
+          "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-wheel-install-P-v1/environment-v2.json"
+        },
+        "formal_model_acceptance": false,
+        "manifest": {
+          "SHA256": "83ea15a2d55f3c1784d2f6542aa4cff318c3b6f1d370e605e24e86460374b887",
+          "bytes": 501012,
+          "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-wheel-install-P-v1/runtime-manifest-v2.json"
+        },
+        "member_count": 1135,
+        "model_requests": 0,
+        "package_delta": {
+          "changed": [],
+          "only_parent": [
+            "rtp_llm/RL/rl_inference_client.py",
+            "rtp_llm/cpp/__init__.py",
+            "rtp_llm/cpp/cache/block_tree_cache/benchmark/benchmark_cases.py",
+            "rtp_llm/cpp/cache/block_tree_cache/benchmark/run_block_tree_cache_benchmark.py",
+            "rtp_llm/cpp/cache/block_tree_cache/benchmark/run_block_tree_cache_benchmark_smoke_test.py",
+            "rtp_llm/cpp/cache/block_tree_cache/benchmark/run_block_tree_cache_benchmark_test.py",
+            "rtp_llm/cpp/config/model_config_test.py",
+            "rtp_llm/cpp/model_rpc/__init__.py",
+            "rtp_llm/cpp/model_rpc/proto/__init__.py",
+            "rtp_llm/cpp/model_rpc/proto/create_grpc_proto.py",
+            "rtp_llm/cpp/pybind/config_pickle_test.py",
+            "rtp_llm/cpp/pybind/rtp_llm_startup_test.py",
+            "rtp_llm/cpp/repetition/__init__.py",
+            "rtp_llm/dash_sc/generate_proto_py.py",
+            "rtp_llm/dash_sc/grammar_validation_smoke.py",
+            "rtp_llm/dash_sc/json_format_e2e_smoke.py",
+            "rtp_llm/dash_sc/proto/create_grpc_proto.py",
+            "rtp_llm/flexlb/tools/incremental-prediction/run.py",
+            "rtp_llm/flexlb/tools/online_eval/aggregate_canvas_run.py",
+            "rtp_llm/flexlb/tools/online_eval/analyze_burst_results.py",
+            "rtp_llm/flexlb/tools/online_eval/analyze_inflight_vs_qps.py",
+            "rtp_llm/flexlb/tools/online_eval/analyze_slo_batch.py",
+            "rtp_llm/flexlb/tools/online_eval/analyze_ttft_degradation.py",
+            "rtp_llm/flexlb/tools/online_eval/anomaly_smoke.py",
+            "rtp_llm/flexlb/tools/online_eval/cancel_smoke.py",
+            "rtp_llm/flexlb/tools/online_eval/canvas_report_gen.py",
+            "rtp_llm/flexlb/tools/online_eval/canvas_report_render_html.py",
+            "rtp_llm/flexlb/tools/online_eval/compare_ab.py",
+            "rtp_llm/flexlb/tools/online_eval/compare_twin.py",
+            "rtp_llm/flexlb/tools/online_eval/consolidate_run_outputs.py",
+            "rtp_llm/flexlb/tools/online_eval/eval_collectors.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/__init__.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/admission.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/balance.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/cancel.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/elastic.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/engine_fault.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/ha_support.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/kv.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/master.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/priority.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/cases/status.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/context.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/engine_ops.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/grade.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_ft/harness.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_functional_tests.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_load_client.py",
+            "rtp_llm/flexlb/tools/online_eval/flexlb_smoke_base.py",
+            "rtp_llm/flexlb/tools/online_eval/generate_stability_report.py",
+            "rtp_llm/flexlb/tools/online_eval/mock_engine_cluster.py",
+            "rtp_llm/flexlb/tools/online_eval/mock_engine_shard_launcher.py",
+            "rtp_llm/flexlb/tools/online_eval/online_eval/__init__.py",
+            "rtp_llm/flexlb/tools/online_eval/online_eval/mock_engine.py",
+            "rtp_llm/flexlb/tools/online_eval/online_eval/proto_utils.py",
+            "rtp_llm/flexlb/tools/online_eval/online_eval/report.py",
+            "rtp_llm/flexlb/tools/online_eval/online_eval/rt_model.py",
+            "rtp_llm/flexlb/tools/online_eval/online_eval/stats.py",
+            "rtp_llm/flexlb/tools/online_eval/online_eval/trace_loader.py",
+            "rtp_llm/flexlb/tools/online_eval/parallel_runner.py",
+            "rtp_llm/flexlb/tools/online_eval/priority_preemption_smoke.py",
+            "rtp_llm/flexlb/tools/online_eval/reconstruct_summary.py",
+            "rtp_llm/flexlb/tools/online_eval/run_inflight_experiment.py",
+            "rtp_llm/flexlb/tools/online_eval/run_single_engine.py",
+            "rtp_llm/flexlb/tools/online_eval/scheduling_smoke.py",
+            "rtp_llm/flexlb/tools/online_eval/stability_monitor.py",
+            "rtp_llm/flexlb/tools/online_eval/test_resolve_decode.py",
+            "rtp_llm/flexlb/tools/routing-hotspots/run.py",
+            "rtp_llm/kserve_server.py",
+            "rtp_llm/models_py/bindings/py_model_inputs_compat_test.py",
+            "rtp_llm/models_py/modules/base/rocm/__init__.py",
+            "rtp_llm/models_py/modules/base/rocm/activation.py",
+            "rtp_llm/models_py/modules/base/rocm/moe_gating.py",
+            "rtp_llm/models_py/modules/base/rocm/norm.py",
+            "rtp_llm/models_py/modules/base/rocm/not_implemented_ops.py",
+            "rtp_llm/models_py/modules/base/rocm/select_topk.py",
+            "rtp_llm/models_py/modules/base/rocm/trt_allreduce.py",
+            "rtp_llm/models_py/standalone/__init__.py",
+            "rtp_llm/models_py/standalone/auto_model.py",
+            "rtp_llm/models_py/standalone/launcher.py",
+            "rtp_llm/models_py/triton_kernels/autotune_cache/scripts/__init__.py",
+            "rtp_llm/models_py/triton_kernels/autotune_cache/scripts/extract.py",
+            "rtp_llm/models_py/triton_kernels/autotune_cache/scripts/generators/__init__.py",
+            "rtp_llm/models_py/triton_kernels/autotune_cache/scripts/generators/kda.py",
+            "rtp_llm/tools/__init__.py"
+          ],
+          "only_wheel": []
+        },
+        "publication": {
+          "SHA256": "ef9b4e3947ee7fd5bed45e3d5fc51118e64d1cc9bab6d56eab6d810a94a790a1",
+          "URL": "http://10.44.61.73:19091/publication-precision-20261101/control/headfb09988-full-wheel-v1/published/manifest.json",
+          "bytes": 404592
+        },
+        "state": "FULL_WHEEL_INSTALLED_CPU_PASS",
+        "wheel": {
+          "SHA256": "6a77459e273388b3e6143b9b2c45d16e083cc6c4d658d382438e5ed5abfb4645",
+          "URL": "http://10.44.61.73:19091/publication-precision-20261101/control/headfb09988-full-wheel-v1/published/rtp_llm-0.2.0-cp310-cp310-linux_aarch64.whl",
+          "bytes": 1922266511
+        }
+      },
+      "status": "SUCCEEDED"
+    }
+  },
+  "wheel_SHA256": "6a77459e273388b3e6143b9b2c45d16e083cc6c4d658d382438e5ed5abfb4645",
+  "wheel_bytes": 1922266511
+}
