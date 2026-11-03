@@ -1,5 +1,7 @@
 当前冻结诊断输入的精度修复已通过完整 wheel 的真实模型验证。正常、P→remote→P、D→remote→P 的完整 166 个 token IDs 逐个一致，首个差异均为无；在最终相同 P/D 实例上的追加正常请求也一致。设备端还比较了完整输入列表、实际生成参数、实际源输出剩余序列、缓存与角色实例证据。
 
+正常对照的准确含义：P/D 部署仍启用 remote 功能及 D publication；baseline 请求使用 bypass，绕过缓存复用，实际本地命中0、remote命中0。本次没有另行部署完全关闭 remote 开关的普通 PD，也没有证明与该独立配置的输出一致。上面的三场景一致结论仅对应同一候选、当前输入和这组实际配置。
+
 源码候选：`fb09988a5c552f4f5ff716472d8b50647af22d2c`。已执行的持久控制入口 commit：`989caed99c74492da82f59d1355b2e7c1c0ce097`。本报告及 [安全证据](indexer-head-fullwheel-final-evidence-safe.json) 绑定这两个身份；报告归档 commit 只追加证据，不改变运行代码。
 
 完整 wheel 仅在第三套构建一次，1922266511 字节，SHA256：

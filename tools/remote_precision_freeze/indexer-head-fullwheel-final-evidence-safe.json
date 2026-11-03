@@ -1,5 +1,14 @@
 {
   "all_payload_bytes_remain_on_devices": true,
+  "baseline_control_semantics": {
+    "D_publication_enabled": true,
+    "actual_local_reuse": 0,
+    "actual_remote_reuse": 0,
+    "basis": "frozen c3_indexer_head_fullwheel_history_diagnostic_v1.py run() requires D_publication_enabled=True; baseline selects bypass",
+    "deployment_remote_enabled": true,
+    "request_mode": "bypass",
+    "separate_remote_disabled_PD_comparison": "NOT_EXECUTED"
+  },
   "classification": {
     "P_only_max1_capped_preparation": 1,
     "complete_native_EOF_below_output_cap": 5,
