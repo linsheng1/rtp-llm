@@ -1,0 +1,164 @@
+{
+  "candidate_commit": "fb09988a5c552f4f5ff716472d8b50647af22d2c",
+  "actual_completed_model_requests": 48,
+  "actual_candidate_requests": 3,
+  "natural_EOF": true,
+  "normal_vs_D_remote_full_IDs_equal": true,
+  "P_remote": "PENDING; not run",
+  "whole_model_fixed": false,
+  "formal_acceptance": false,
+  "immutable_wheel": null,
+  "reports": {
+    "source": {
+      "controller_state": "SUCCEEDED",
+      "status": {
+        "state": "D_SOURCE_COMPLETE",
+        "model_requests": 1,
+        "summary": {
+          "state": "COMPLETE_INNER_NATIVE_REQUEST_EVIDENCE_PENDING",
+          "action": "d-source",
+          "errors": [],
+          "model_requests": 1,
+          "result": {
+            "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-source1/request/native/result.json",
+            "bytes": 422344,
+            "SHA256": "f0baffe5eda7c9adeea906630f59b8673869017342e584a2d4e503ef783672c6"
+          },
+          "input_tokens": 7041,
+          "output_tokens": 294,
+          "input_ids_sha256": "22510597b00881511fec56f072a5ef0ed3593b8a32b069e4189f0d75f258e49c",
+          "output_ids_sha256": "7fb85f3ccc2a5cb9f33b107926effd2f885b3155966ceac407f5094e24c96117",
+          "max_new_tokens": 1024,
+          "actual_local_reuse_len": 0,
+          "actual_remote_reuse_len": 0,
+          "actual_PD": true,
+          "publication_committed": "NOT_ESTABLISHED_BY_RPC_COMPLETION",
+          "business_acceptance": false,
+          "formal_wheel_accepted": false
+        },
+        "finished_at": 1793693854.678519,
+        "probes": {
+          "P": {
+            "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-source1/P.json",
+            "bytes": 15743,
+            "SHA256": "d96f710e93485f1373114435c34d6ca44c50048b1195d96f4114f70f32b03597"
+          },
+          "D": {
+            "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-source1/D.json",
+            "bytes": 16519,
+            "SHA256": "a039583f7d13f72594ec3d4bf1b52be3ac6e1eefe295b8484f4e41bd3fd4c610"
+          }
+        },
+        "CPU_prepare_returncode": 0
+      },
+      "native_safe": {
+        "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-source1/request/native/result.json",
+        "SHA256": "f0baffe5eda7c9adeea906630f59b8673869017342e584a2d4e503ef783672c6",
+        "EOF": true,
+        "input_tokens": 7041,
+        "output_tokens": 294,
+        "input_ids_SHA256": "22510597b00881511fec56f072a5ef0ed3593b8a32b069e4189f0d75f258e49c",
+        "output_ids_SHA256": "7fb85f3ccc2a5cb9f33b107926effd2f885b3155966ceac407f5094e24c96117",
+        "actual_R_tokens": 7169,
+        "actual_R_SHA256": "10932132ad309cbfd30ae5600e64d7f7bb2dd8d7d2ddb6af4c6349ce2381ef71",
+        "namespace": "pubprec_headfb09988_Dorigin_v1",
+        "request_id": 67294682767790
+      }
+    },
+    "normal": {
+      "controller_state": "SUCCEEDED",
+      "status": {
+        "state": "STAGE_COMPLETE",
+        "action": "baseline",
+        "probes": {
+          "D": {
+            "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/dgdet-stage-baseline-headfbN1/D.json",
+            "bytes": 16520,
+            "SHA256": "0c9d75a6359d510d82dc77009966da1c5083aded3bf5710ba1286b3a7d3390c5"
+          },
+          "P": {
+            "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/dgdet-stage-baseline-headfbN1/P.json",
+            "bytes": 15744,
+            "SHA256": "a4d7e19746c2efa5975bf05f09ccf694b99aaf18e45a08135726299f4a7a7072"
+          }
+        },
+        "actual_request_returncode": 0,
+        "summary": {
+          "state": "COMPLETE_ACTUAL_D_HISTORY_DIAGNOSTIC",
+          "action": "baseline",
+          "input_tokens": 7169,
+          "output_tokens": 166,
+          "input_ids_sha256": "10932132ad309cbfd30ae5600e64d7f7bb2dd8d7d2ddb6af4c6349ce2381ef71",
+          "output_ids_sha256": "c8f32290469776961c8c562f05cb4924876ffbdbf258f1a4dc8dcfc640b103ca",
+          "actual_local_reuse_len": 0,
+          "actual_remote_reuse_len": 0
+        },
+        "finished_at": 1793694220.527945
+      },
+      "native_safe": {
+        "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-baseline-native-headfbN1/native/result.json",
+        "SHA256": "994d988dd4f6071bfd5991d79415c11fe08cf50c3481e983c51975e495f25796",
+        "EOF": true,
+        "input_tokens": 7169,
+        "output_tokens": 166,
+        "input_ids_SHA256": "10932132ad309cbfd30ae5600e64d7f7bb2dd8d7d2ddb6af4c6349ce2381ef71",
+        "output_ids_SHA256": "c8f32290469776961c8c562f05cb4924876ffbdbf258f1a4dc8dcfc640b103ca"
+      }
+    },
+    "D_remote": {
+      "controller_state": "SUCCEEDED",
+      "status": {
+        "state": "STAGE_COMPLETE",
+        "action": "d-restore",
+        "probes": {
+          "P": {
+            "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/dgdet-stage-d-restore-headfbD1/P.json",
+            "bytes": 15752,
+            "SHA256": "ec0272434d7814e197da501d24092ac2070d75ee5a7f8e0110fae61c3c625ea5"
+          },
+          "D": {
+            "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/dgdet-stage-d-restore-headfbD1/D.json",
+            "bytes": 16519,
+            "SHA256": "0f0050b91fe3c5787d1f245c1a63bbf09142513f610c2e1f1ea4b9a75ff8c18b"
+          }
+        },
+        "actual_request_returncode": 0,
+        "summary": {
+          "state": "COMPLETE_ACTUAL_D_HISTORY_DIAGNOSTIC",
+          "action": "d-restore",
+          "input_tokens": 7169,
+          "output_tokens": 166,
+          "input_ids_sha256": "10932132ad309cbfd30ae5600e64d7f7bb2dd8d7d2ddb6af4c6349ce2381ef71",
+          "output_ids_sha256": "c8f32290469776961c8c562f05cb4924876ffbdbf258f1a4dc8dcfc640b103ca",
+          "actual_local_reuse_len": 0,
+          "actual_remote_reuse_len": 7168
+        },
+        "finished_at": 1793694784.4592845
+      },
+      "native_safe": {
+        "path": "/home/admin/linshuo.zjl/publication-precision-20261101/control/headfb09988-d-restore-native-headfbD1/native/result.json",
+        "SHA256": "6e3e8dc4aba81dc3c106caaf1b3753d6c2ea56cce72c7ea590278ea40ccfe2be",
+        "EOF": true,
+        "input_tokens": 7169,
+        "output_tokens": 166,
+        "input_ids_SHA256": "10932132ad309cbfd30ae5600e64d7f7bb2dd8d7d2ddb6af4c6349ce2381ef71",
+        "output_ids_SHA256": "c8f32290469776961c8c562f05cb4924876ffbdbf258f1a4dc8dcfc640b103ca"
+      },
+      "comparison": {
+        "full_output_IDs_equal": true,
+        "normal_tokens": 166,
+        "D_remote_tokens": 166,
+        "first_difference_zero_based": null,
+        "same_input_IDs": true
+      }
+    }
+  },
+  "runtime": {
+    "environment_SHA256": "547ba6b20888e968e14ef5d31e8ae7c2037d225eecd12ffea06bb22ce91b4253",
+    "P_manifest_SHA256": "50c14fb899306f4bca0b582977a875ce6b750cdac483eb2c366f3f5cd96d1906",
+    "D_manifest_SHA256": "e7f577f8b70edd1551ba917e0d7aca2fb550f39ba71c63451a1a243611b84f73",
+    "new_native_build": false,
+    "base_checkpoint_loader_and_static_FDs_unchanged": true,
+    "Consumer7_reused": true
+  }
+}
