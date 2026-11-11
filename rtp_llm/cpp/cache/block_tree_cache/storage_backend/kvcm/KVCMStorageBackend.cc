@@ -127,6 +127,7 @@ public:
             std::shared_ptr<kvcm::ClientWrapper> client;
             std::shared_ptr<Operation> next;
         };
+        explicit CompletionResources(std::shared_ptr<kvcm::ClientWrapper> value): client(std::move(value)) {}
         using Session = kvcm::Session;
         void holdOperation(const std::shared_ptr<Operation>& operation) noexcept {
             std::lock_guard<std::mutex> lock(mutex);
@@ -2469,7 +2470,7 @@ private:
                                grpc::CompletionQueue*                      queue) {
                 const auto remaining = storage_request.transfer_task->remainingTimeout();
                 if (!remaining) {
-                    throw std::runtime_error("KVCM task expired before rank submission");
+                    throw BroadcastRpcNotStarted("KVCM task expired before rank submission");
                 }
                 context->set_deadline(std::chrono::system_clock::now() + *remaining);
                 return stub->AsyncExecuteFunction(context.get(), request, queue);

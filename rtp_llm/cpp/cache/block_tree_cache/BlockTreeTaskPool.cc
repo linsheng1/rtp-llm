@@ -143,7 +143,11 @@ BlockTreeTaskPool::reserveCompletion(std::function<void()> task, BlockTreeTaskCl
     auto node = std::make_shared<CompletionNode>(std::move(task), task_class == BlockTreeTaskClass::LOAD);
     auto ticket = std::shared_ptr<CompletionTicket>(new CompletionTicket(shared_from_this(), node));
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-    if (!started_ || shutdown_ || completion_admission_stopped_ || completion_outstanding_ >= completion_capacity_) {
+    // Keep LOAD admission headroom as well as dispatch priority. For tiny
+    // pools retain at least one BACKGROUND slot; capacity one cannot be split.
+    const size_t limit = node->load ? completion_capacity_ :
+        completion_capacity_ - std::min(kLoadReservedSlots, completion_capacity_ / 2);
+    if (!started_ || shutdown_ || completion_admission_stopped_ || completion_outstanding_ >= limit) {
         node->phase.store(CompletionPhase::ABANDONED); ++completion_rejected_; return {};
     }
     node->phase.store(CompletionPhase::RESERVED);

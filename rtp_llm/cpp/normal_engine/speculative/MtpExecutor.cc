@@ -1753,10 +1753,21 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& schedul
     };
     auto frame = publication_frame ? std::make_shared<SubmissionFrame>() : nullptr;
     if (frame) frame->streams.reserve(scheduled_streams.size());
-    auto close_frame = frame ? std::shared_ptr<void>(nullptr, [frame](void*) {
+    auto close_frame = frame ? std::shared_ptr<void>(nullptr, [this, frame](void*) {
         if (!frame->handed_off && !frame->streams.empty()) {
+            // A device drain cannot stop a host preparer from submitting more
+            // work afterwards. Join original host tasks before the GPU drain;
+            // an exception from one join must not skip the other obligations.
+            bool drained = true;
+            try { spec_logits_verify_async_runner_.sync(cuda_graph::graphGetCurrentStream()); }
+            catch (...) { drained = false; }
+            try { target_verify_prepare_runner_.sync(cuda_graph::graphGetCurrentStream()); }
+            catch (...) { drained = false; }
+            try { draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream()); }
+            catch (...) { drained = false; }
             try { cudaSyncAndCheck(); }
-            catch (...) { frame->unknown = frame; return; } // Keep actual sources if GPU drain is unknown.
+            catch (...) { drained = false; }
+            if (!drained) { frame->unknown = frame; return; } // Retain actual sources if any last-use proof is missing.
         }
         for (const auto& stream : frame->streams) stream->endDecodePublicationSubmission();
     }) : std::shared_ptr<void>{};

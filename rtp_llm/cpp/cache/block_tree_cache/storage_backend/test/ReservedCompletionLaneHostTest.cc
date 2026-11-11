@@ -93,6 +93,27 @@ void postAllocatesNothingAndNeverRunsInline() {
     lane->shutdown();
 }
 
+void backgroundSaturationLeavesLoadAdmissionAndAcceptedPostsIntact() {
+    for (const size_t capacity : {size_t{2}, size_t{8}}) {
+        auto lane = Lane::create(capacity); CHECK(lane->start());
+        const size_t writes = capacity / 2;
+        std::atomic<size_t> completed{0};
+        std::vector<std::shared_ptr<Lane::Ticket>> tickets;
+        for (size_t i = 0; i < writes; ++i) {
+            tickets.push_back(lane->reserve([&] { ++completed; }, false)); CHECK(tickets.back());
+        }
+        CHECK(!lane->reserve([] {}, false)); // Outstanding writes have not even posted their results yet.
+        for (size_t i = writes; i < capacity; ++i) {
+            tickets.push_back(lane->reserve([&] { ++completed; }, true)); CHECK(tickets.back());
+        }
+        CHECK(!lane->reserve([] {}, true)); CHECK(lane->snapshot().outstanding == capacity);
+        lane->stopAdmission();
+        for (const auto& ticket : tickets) CHECK(ticket->post());
+        lane->waitForIdle(); CHECK(completed == capacity); CHECK(lane->snapshot().outstanding == 0);
+        lane->shutdown();
+    }
+}
+
 void stopAdmissionStillHonorsAnAcceptedReservation() {
     auto lane = Lane::create(1); CHECK(lane->start()); std::atomic<int> calls{0};
     auto ticket = lane->reserve([&] { ++calls; }, false);
@@ -189,10 +210,11 @@ void thrownBusinessAndLateTicketDestructionKeepWorkerAndOwnersSafe() {
 
 int main() {
     preallocationAndAbandonNeverRunBusiness(); postAllocatesNothingAndNeverRunsInline();
+    backgroundSaturationLeavesLoadAdmissionAndAcceptedPostsIntact();
     stopAdmissionStillHonorsAnAcceptedReservation(); shutdownWaitsForPreReservedButNotYetPostedResult();
     loadPriorityHasFiniteBurstForBackgroundBusiness(); parallelCompletionDoesNotSerializeLoadBehindOneBlockedWrite();
     concurrentNotificationClaimsExactlyOnce();
     allocationFailureCannotDebitAnExistingReservation(); queuedBusinessMayReserveAfterNormalAdmissionStops();
     thrownBusinessAndLateTicketDestructionKeepWorkerAndOwnersSafe();
-    std::printf("ReservedCompletionLaneHostTest: 10 original-pool scenarios, %zu checks PASS\n", checks.load());
+    std::printf("ReservedCompletionLaneHostTest: 11 original-pool scenarios, %zu checks PASS\n", checks.load());
 }

@@ -21,6 +21,12 @@
 
 namespace rtp_llm {
 
+// Only a local preflight which has not entered gRPC may give this proof.
+class BroadcastRpcNotStarted: public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
 inline bool isGrpcConnectFailure(const grpc::Status& status) {
     if (status.error_code() != grpc::StatusCode::UNAVAILABLE) {
         return false;
@@ -528,7 +534,13 @@ public:
                 // Prepared ownership exists before gRPC may retain a raw tag/context.
                 // Ambiguous throws keep this anchor until a real CQ completion.
                 tags[rank]->anchor = tags[rank];
-                auto reader = rpc_call(ctx->stub, ctx->client_context, ctx->request, completion_queue_.get());
+                auto reader = [&] {
+                    try { return rpc_call(ctx->stub, ctx->client_context, ctx->request, completion_queue_.get()); }
+                    catch (const BroadcastRpcNotStarted&) {
+                        tags[rank]->anchor.reset(); // No Finish/raw tag handoff and no CQ can arrive.
+                        throw;
+                    }
+                }();
                 if (!reader) {
                     throw std::runtime_error("broadcast rpc call returned null reader");
                 }
