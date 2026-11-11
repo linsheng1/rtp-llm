@@ -2795,7 +2795,7 @@ bool KVCMStorageBackend::captureCompletedDecode(const BatchKVCacheResource& reso
             auto request = impl_->planCompletedDecode(resource, end);
             if (request.empty()) return false;
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
-                lifecycle.admissionDeadline(timeout_) - Clock::now());
+                lifecycle.admissionDeadline(operationTimeout()) - Clock::now());
             if (remaining.count() <= 0) return false;
             request.transfer_task.emplace(std::vector<TransferDescriptor>{}, remaining, request.request_id);
             auto task = prepareWrite(std::move(request));

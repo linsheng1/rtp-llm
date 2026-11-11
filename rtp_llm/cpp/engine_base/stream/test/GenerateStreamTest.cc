@@ -1973,6 +1973,17 @@ TEST(DecodePublicationSubmission, SourceGateDoesNotPretendBookkeepingIsPending) 
     EXPECT_FALSE(stream->isDeferredReleasePending());
 }
 
+TEST(DecodePublicationSubmission, CopiedStreamRetainsOriginalSubmissionClaim) {
+    auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3});
+    ASSERT_TRUE(stream->beginDecodePublicationSubmission());
+    auto copied = std::make_shared<NormalGenerateStream>(*stream);
+    copied->releaseResource();
+    EXPECT_TRUE(stream->isDeferredReleasePending());
+    EXPECT_FALSE(copied->hasPendingAsyncBookkeeping()); // Submission is distinct from worker bookkeeping.
+    stream->endDecodePublicationSubmission();
+    EXPECT_FALSE(copied->isDeferredReleasePending());
+}
+
 TEST(DecodePublicationSubmission, ReleaseDefersInsteadOfWaitingForUnlaunchedWorker) {
     auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3});
     stream->incPendingAsyncBookkeeping(); // Previous worker is still running.

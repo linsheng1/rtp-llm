@@ -246,7 +246,7 @@ void GenerateStream::releaseResource() {
         // wait for that worker here: its AsyncRunner may still be joining us.
         async_bookkeeping_->cv.wait(lock, [this] {
             return async_bookkeeping_->count.load(std::memory_order_acquire) == 0
-                || decode_publication_submissions_.load(std::memory_order_acquire) > 0;
+                || async_bookkeeping_->submissions.load(std::memory_order_acquire) > 0;
         });
     }
     tryReleaseResourceAfterBookkeeping();
@@ -256,7 +256,7 @@ void GenerateStream::tryReleaseResourceAfterBookkeeping() {
     // A worker must never wait for another task queued on its own runner.
     // Recheck under the submission gate so a newly admitted frame cannot race release.
     std::lock_guard<std::mutex> lock(*mutex_);
-    if (hasPendingAsyncBookkeeping() || decode_publication_submissions_ || unknown_decode_publication_) {
+    if (hasPendingAsyncBookkeeping() || async_bookkeeping_->submissions || unknown_decode_publication_) {
         markDeferredRelease();
         return;
     }
@@ -278,7 +278,7 @@ bool GenerateStream::beginDecodePublicationSubmission() {
     std::lock_guard<std::mutex> lock(*mutex_);
     if (!stream_cache_resource_ || stream_cache_resource_->isResourceReleased() || isFinished()
         || hasErrorWithoutLock() || unknown_decode_publication_) return false;
-    ++decode_publication_submissions_;
+    ++async_bookkeeping_->submissions;
     {
         std::lock_guard<std::mutex> wait_lock(async_bookkeeping_->mu);
         async_bookkeeping_->cv.notify_all();
@@ -296,9 +296,9 @@ void GenerateStream::endDecodePublicationSubmission() {
     bool release = false;
     {
         std::lock_guard<std::mutex> lock(*mutex_);
-        RTP_LLM_CHECK(decode_publication_submissions_ > 0);
-        --decode_publication_submissions_;
-        if (!decode_publication_submissions_ && !hasPendingAsyncBookkeeping())
+        RTP_LLM_CHECK(async_bookkeeping_->submissions > 0);
+        --async_bookkeeping_->submissions;
+        if (!async_bookkeeping_->submissions && !hasPendingAsyncBookkeeping())
             release = async_bookkeeping_->defer_release.exchange(false);
     }
     if (release) tryReleaseResourceAfterBookkeeping();

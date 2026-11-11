@@ -213,6 +213,7 @@ public:
 
 protected:
     using Task = StorageBackendExecutor::Task;
+    std::chrono::milliseconds operationTimeout() const noexcept { return timeout_; }
     // The completion callable only checks results and updates local state; it
     // must not start blocking I/O on the RPC completion/settlement thread.
     using ReadCompletion = std::function<void(Task)>;

@@ -10,7 +10,7 @@
 #endif
 
 namespace {
-using Fanout = rtp_llm::BroadcastResult<rtp_llm::FunctionRequestPB, rtp_llm::FunctionResponsePB>;
+using Fanout = rtp_llm::BroadcastResult<::FunctionRequestPB, ::FunctionResponsePB>;
 std::atomic<size_t> checks{0};
 #define CHECK(expression) do { ++checks; if (!(expression)) { std::fprintf(stderr, "%d: %s\n", __LINE__, #expression); std::abort(); } } while (false)
 auto future() { return Fanout::Clock::now() + std::chrono::seconds(30); }

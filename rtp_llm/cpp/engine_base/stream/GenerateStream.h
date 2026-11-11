@@ -1067,8 +1067,10 @@ protected:
     // GenerateStream copies captured by async workers.
     std::shared_ptr<GenerateStream> unknown_decode_publication_;
     void tryReleaseResourceAfterBookkeeping();
-    std::atomic<size_t> decode_publication_submissions_{0}; // transitions under the stream mutex
     struct AsyncBookkeepingCoordinator {
+        // Copies already share the stream mutex/resources and this coordinator.
+        // Keep submission claims shared too; a raw atomic member deletes the copy constructor.
+        std::atomic<size_t>     submissions{0};
         std::atomic<int>        count{0};
         std::atomic<bool>       defer_release{false};
         std::mutex              mu;
