@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include <cstdlib>
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include <algorithm>
 #include <limits>
 #include <memory>
@@ -203,7 +204,30 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     cudaProfilerBegin();
 }
 
-absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
+absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& scheduled_streams, int64_t schedule_time_us) {
+    const bool publication_frame = remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE && !warm_up_ && !is_propose_;
+    struct SubmissionFrame {
+        std::vector<GenerateStreamPtr> streams;
+        bool handed_off{false};
+        std::shared_ptr<SubmissionFrame> unknown;
+    };
+    auto frame = publication_frame ? std::make_shared<SubmissionFrame>() : nullptr;
+    if (frame) frame->streams.reserve(scheduled_streams.size());
+    auto close_frame = frame ? std::shared_ptr<void>(nullptr, [frame](void*) {
+        if (!frame->handed_off && !frame->streams.empty()) {
+            try { cudaSyncAndCheck(); }
+            catch (...) { frame->unknown = frame; return; } // Keep actual sources if GPU drain is unknown.
+        }
+        for (const auto& stream : frame->streams) stream->endDecodePublicationSubmission();
+    }) : std::shared_ptr<void>{};
+    std::list<GenerateStreamPtr> publication_streams;
+    const auto& streams = publication_frame ? publication_streams : scheduled_streams;
+    if (frame) for (const auto& stream : scheduled_streams) {
+        if (stream->beginDecodePublicationSubmission()) {
+            frame->streams.push_back(stream); // Capacity prepared before acquiring the submission gate.
+            publication_streams.push_back(stream);
+        }
+    }
     const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     if (schedule_time_us <= 0) {
         schedule_time_us = process_start_time_us;
@@ -386,17 +410,24 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us, token_counts_by_priority);
 
-        return dispatchOutputAsync(stream_groups,
+        auto dispatched = dispatchOutputAsync(stream_groups,
                                    std::move(model_output),
                                    std::move(sampler_output),
                                    std::move(sampler_event),
                                    profile_step_finish_);
+        if (frame) frame->handed_off = dispatched.ok();
+        return dispatched;
     }
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output");
         int64_t      start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         absl::Status result;
+        if (publication_frame) {
+            auto writer_done = cuda_graph::makeGraphEvent();
+            writer_done.record(cuda_graph::graphGetCurrentStream());
+            writer_done.synchronize();
+        }
         if (zero_token_batch) {
             cudaSyncAndCheck();
             const auto context_kv_gpu_ready_at =
@@ -422,6 +453,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         if (profile_step_finish_) {
             profile_step_finish_();
         }
+        if (frame) frame->handed_off = result.ok();
         return result;
     }
 }
@@ -755,31 +787,64 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
     // Claim each stream's KV resource before handing work to the runner so
     // releaseResource defers while the worker reads/updates those blocks.
     auto streams_for_inc = stream_groups_copy.allStreams();
-    for (auto& s : streams_for_inc) {
-        s->incPendingAsyncBookkeeping();
+    struct BookkeepingHold {
+        std::list<GenerateStreamPtr> streams;
+        std::shared_ptr<torch::Event> initial;
+        std::optional<torch::Event> final_event;
+        std::optional<torch::Stream> worker_stream;
+        bool counted{false}, protect{false};
+        std::atomic<bool> entered{false}, writer_ready{false}, retired{false};
+        ~BookkeepingHold() { finish(); }
+        void finish() {
+            if (!counted || retired.exchange(true)) return;
+            bool safe = true;
+            try {
+                if (!entered.load()) {
+                    if (initial) initial->synchronize(); else safe = false;
+                } else if (protect) {
+                    safe = writer_ready.load();
+                    if (safe) {
+                        final_event->record(*worker_stream);
+                        final_event->synchronize(); // Includes bookkeeping GPU copies, not just the model writer.
+                    }
+                }
+            } catch (...) { safe = false; }
+            for (const auto& stream : streams) {
+                if (!safe) stream->retainUnknownDecodePublication(stream);
+                stream->decPendingAsyncBookkeepingAndMaybeRelease();
+            }
+        }
+    };
+    auto retirement = std::make_shared<BookkeepingHold>();
+    retirement->streams = std::move(streams_for_inc);
+    retirement->initial = sampler_event;
+    retirement->protect = remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE;
+    if (retirement->protect) {
+        retirement->worker_stream = dispatch_runner_.stream();
+        retirement->final_event.emplace(cuda_graph::makeGraphEvent());
     }
+    for (const auto& stream : retirement->streams) stream->incPendingAsyncBookkeeping();
+    retirement->counted = true;
 
-    dispatch_runner_.launch([processor,
+    dispatch_runner_.launch([processor, retirement,
                              stream_groups_copy  = std::move(stream_groups_copy),
                              model_output_copy   = std::move(model_output_copy),
                              sampler_output_copy = std::move(sampler_output_copy),
                              sampler_event]() mutable {
+        retirement->entered.store(true); // Before any fallible profiling or worker preparation.
+        struct Finish { BookkeepingHold* hold; ~Finish() { hold->finish(); } } finish{retirement.get()};
+        const auto& worker_streams = retirement->streams;
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output_worker");
-
-        auto worker_streams = stream_groups_copy.allStreams();
-
-        // RAII: every captured stream is decremented exactly once, and the
-        // value capture keeps GenerateStreamPtr alive until after dec runs.
-        auto dec_guard = std::shared_ptr<void>(nullptr, [worker_streams](void*) {
-            for (auto& s : worker_streams) {
-                s->decPendingAsyncBookkeepingAndMaybeRelease();
-            }
-        });
-
         // Queue a stream wait, then do pinned D2H on the worker stream while
         // the main thread continues to the next gather.
         if (sampler_event) {
-            sampler_event->block(cuda_graph::graphGetCurrentStream());
+            if (remoteCacheDecodePublicationEnabled()) {
+                try { sampler_event->synchronize(); retirement->writer_ready.store(true); }
+                catch (...) {
+                    for (const auto& stream : worker_streams) stream->retainUnknownDecodePublication(stream);
+                    throw;
+                }
+            } else sampler_event->block(cuda_graph::graphGetCurrentStream());
         }
 
         auto status =
@@ -787,7 +852,7 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("[normal-stream-async] dispatch (worker) failed: %s", status.ToString().c_str());
         }
-        // dec_guard destructs here, dec'ing each stream's pending count.
+        // Finish drains the worker's last GPU use before returning its pending claim.
     });
 
     // Kineto requires profiler enable/disable on the same thread. Keep finish

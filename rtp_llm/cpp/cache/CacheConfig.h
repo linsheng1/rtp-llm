@@ -62,6 +62,8 @@ public:
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
 
+    bool mtp_cache_lookahead{false};
+
     CacheConfig() {}
 
     uint32_t layer_all_num() const {

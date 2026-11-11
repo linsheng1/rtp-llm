@@ -11,7 +11,7 @@ namespace {
 class DefaultStorageBackendExecutor final: public StorageBackendExecutor {
 public:
     DefaultStorageBackendExecutor(size_t thread_count, size_t queue_size):
-        pool_(thread_count, queue_size, "remote_cache") {}
+        pool_(std::make_shared<BlockTreeTaskPool>(thread_count, queue_size, "remote_cache", queue_size ? thread_count : 0, queue_size)) {}
 
     ~DefaultStorageBackendExecutor() override {
         shutdown();
@@ -19,39 +19,48 @@ public:
 
     bool start() override {
         std::lock_guard<std::mutex> lock(shutdown_mutex_);
-        return pool_.start();
+        return pool_->start();
     }
 
     bool submit(Task task, BlockTreeTaskClass task_class) override {
-        return pool_.submit(task_class, std::move(task));
+        return pool_->submit(task_class, std::move(task));
     }
 
     bool submitWithDeadline(Task task, BlockTreeTaskClass task_class, std::optional<Clock::time_point> deadline) override {
         Task on_timeout = deadline ? task : Task{};
-        return pool_.submit(task_class, std::move(task), deadline, std::move(on_timeout));
+        return pool_->submit(task_class, std::move(task), deadline, std::move(on_timeout));
     }
 
     bool submitCompletion(Task task) override {
-        return pool_.submitCompletion(std::move(task));
+        return pool_->submitCompletion(std::move(task));
+    }
+
+    bool hasCompletionReservations() const noexcept override { return pool_->completionSnapshot().capacity != 0; }
+    std::shared_ptr<BlockTreeTaskPool::CompletionTicket>
+    reserveCompletion(Task task, BlockTreeTaskClass task_class) override {
+        return pool_->reserveCompletion(std::move(task), task_class);
     }
 
     BlockTreeQueueSizes queueSizes() const override {
-        return pool_.queueSizes();
+        return pool_->queueSizes();
     }
 
     void stopAdmission() noexcept override {
-        pool_.stopAdmission();
+        pool_->stopAdmission();
+        // Accepted queued tasks reserve their completion before starting I/O.
+        // Keep that admission open until the business pool has drained; pool
+        // shutdown then closes reservations and drains all accepted results.
     }
 
     void shutdown() noexcept override {
         std::lock_guard<std::mutex> lock(shutdown_mutex_);
         stopAdmission();
-        pool_.waitForIdle();
-        pool_.shutdown();
+        pool_->waitForIdle();
+        pool_->shutdown();
     }
 
 private:
-    BlockTreeTaskPool pool_;
+    std::shared_ptr<BlockTreeTaskPool> pool_;
     std::mutex        shutdown_mutex_;
 };
 

@@ -27,6 +27,11 @@ public:
     virtual bool submitCompletion(Task task) {
         return submit(std::move(task), BlockTreeTaskClass::LOAD);
     }
+    // Default KVCM executors reserve a bounded, allocation-free post before
+    // external I/O. Custom legacy executors keep their existing contract.
+    virtual bool hasCompletionReservations() const noexcept { return false; }
+    virtual std::shared_ptr<BlockTreeTaskPool::CompletionTicket>
+    reserveCompletion(Task, BlockTreeTaskClass) { return {}; }
     virtual BlockTreeQueueSizes queueSizes() const { return {}; }
     // Async executors leave the completion queue open while the backend drains
     // external I/O. Synchronous executors can finish their queued work here.

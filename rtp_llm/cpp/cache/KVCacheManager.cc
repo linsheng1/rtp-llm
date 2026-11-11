@@ -2,6 +2,11 @@
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
 #include <algorithm>
+#if USING_CUDA
+#include <cuda_runtime.h>
+#include <ATen/cuda/CUDAContext.h>
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
+#endif
 #include <array>
 #include <stdexcept>
 #include <chrono>
@@ -423,6 +428,7 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     // resetAndReturnOldResources(), so a batch reshape between attempts correctly forces a recompute
     // even though the surviving batch rows still hold keys. Only the attempt that actually
     // initialises the keys owns the metric.
+    malloc_info.batch_kv_cache_resource->cache_key_lookahead = config_.mtp_cache_lookahead;
     const bool keys_already_initialized = malloc_info.batch_kv_cache_resource->cacheKeysInitialized();
     bool       keys_initialized_now     = false;
     if (is_first_malloc) {
@@ -517,6 +523,121 @@ std::function<void()> KVCacheManager::allocationChangeCallback() const {
             notifyAllocationChangeState(state);
         }
     };
+}
+
+size_t KVCacheManager::decodePublicationUnit() const {
+    const auto& cp = parallelism_config_.prefill_cp_config;
+    size_t unit = config_.seq_size_per_block * (cp.kv_cache_sharded ? cp.prefill_cp_size : 1);
+    for (const auto& group : config_.topology().groups()) {
+        if (!group.policy.enable_prefix_reuse || group.policy.group_type == CacheGroupType::FULL) continue;
+        const auto span = group.seqSizePerBlock();
+        const auto multiplier = span / std::gcd(unit, span);
+        if (!unit || multiplier > std::numeric_limits<size_t>::max() / unit) return 0;
+        unit *= multiplier;
+    }
+    return unit;
+}
+
+std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
+    const torch::Tensor& physical_ids, const std::vector<std::string>& tags, size_t row, size_t end) const {
+    // Decode owns the native pages locally; the existing D->P projection
+    // performs the actual target-CP slicing at publication time.
+    static std::atomic<bool> copy_stopped{false};
+    if (copy_stopped.load() || !isAllocatorOwner() || !coordinator_manager_ || !end) return {};
+    const auto unit = decodePublicationUnit();
+    if (!unit || end % unit || physical_ids.dim() != 3 || physical_ids.is_cuda()
+        || physical_ids.scalar_type() != torch::kInt32 || row >= static_cast<size_t>(physical_ids.size(1))
+        || tags.size() != static_cast<size_t>(physical_ids.size(0))) return {};
+    struct Page {
+        DeviceBlockPoolPtr pool;
+        BlockIndicesType blocks;
+        bool request_owned{false};
+        std::function<void()> release;
+        ~Page() {
+            if (request_owned) {
+                try { pool->decRef(blocks); }
+                catch (...) { if (pool->hasRequestRef(blocks.front())) std::terminate(); }
+            }
+            if (release) release();
+        }
+    };
+    struct Pages { std::vector<std::shared_ptr<Page>> holds; };
+    auto endpoint = std::make_shared<DecodeEndpoint>(); endpoint->end = end;
+    auto pages = std::make_shared<Pages>(); endpoint->owner = pages;
+    std::vector<TaggedBlockIdPair> copies;
+    const auto& pools = coordinator_manager_->groupBlockPools();
+    const size_t canonical = config_.seq_size_per_block *
+        (parallelism_config_.prefill_cp_config.kv_cache_sharded ? parallelism_config_.prefill_cp_config.prefill_cp_size : 1);
+    for (size_t group_id = 0; group_id < config_.groupTags().size(); ++group_id) {
+        const auto& tag = config_.groupTags()[group_id];
+        const auto& group = config_.topology().group(tag);
+        if (!group.policy.enable_prefix_reuse) continue;
+        const auto it = std::find(tags.begin(), tags.end(), tag);
+        if (it == tags.end() || group_id >= pools.size()) return {};
+        const auto& pool = pools[group_id];
+        if (!pool || pool->where() != MemoryType::MEMORY_GPU) return {};
+        const size_t count = end / group.seqSizePerBlock();
+        if (!count) return {};
+        auto& blocks = endpoint->blocks[tag]; blocks.assign(count, NULL_BLOCK_IDX);
+        const size_t first = group.policy.group_type == CacheGroupType::FULL ? 0 :
+            count - std::min(count, group.reuseBlockCount(end / canonical));
+        const auto input = physical_ids.select(0, it - tags.begin()).select(0, row);
+        for (size_t slot = first; slot < count; ++slot) {
+            if (!input.numel() || (group.policy.group_type == CacheGroupType::FULL && slot >= static_cast<size_t>(input.numel()))) return {};
+            const auto source = input[slot % input.numel()].item<int32_t>();
+            if (isNullBlockIdx(source) || !pool->isAllocated(source)) return {};
+            auto hold = std::make_shared<Page>(); hold->pool = pool; hold->blocks.resize(1);
+            pages->holds.push_back(hold); // Prepare host ownership before acquiring a page.
+            if (group.policy.group_type != CacheGroupType::LINEAR) {
+                hold->blocks[0] = source;
+                hold->release = pool->pinForRemotePublication(source);
+                blocks[slot] = source; // Complete FULL/SWA pages use distinct subsequent pages; pin prevents recycling.
+                continue;
+            }
+            // LINEAR accepted swaps may recycle the writer's physical page.
+            // Preserve only these necessary end pages using the original pool/copy.
+            BlockIndicesType allocated; int need = 0;
+            if (pool->freeBlocksNum() <= 1
+                || !pool->tryReplaceRequestReferences({}, 1, allocated, need)) return {};
+            hold->blocks[0] = allocated.front(); hold->request_owned = true;
+            hold->release = pool->pinForRemotePublication(hold->blocks[0]);
+            try { pool->decRef(hold->blocks); }
+            catch (...) { if (pool->hasRequestRef(hold->blocks[0])) throw; }
+            hold->request_owned = false;
+            auto source_hold = std::make_shared<Page>(); source_hold->pool = pool; source_hold->blocks = {source};
+            pages->holds.push_back(source_hold);
+            source_hold->release = pool->pinForRemotePublication(source);
+            for (const auto layer : config_.layerIdsForGroup(tag)) {
+                const auto src = convertIndexToAddr(layer, tag, source);
+                const auto dst = convertIndexToAddr(layer, tag, hold->blocks[0]);
+                const auto& physical = config_.physicalGroupForLayer(layer, tag);
+                if (!src.kv_addr || !dst.kv_addr || (physical.kvScaleStrideBytes() && (!src.kv_scale_addr || !dst.kv_scale_addr)))
+                    return {}; // Original batch-copy's missing-address continue is not completion proof.
+            }
+            copies.push_back({tag, source, hold->blocks[0]});
+            blocks[slot] = hold->blocks[0];
+        }
+    }
+    try {
+        coordinator_manager_->blockBatchCopyByGroup(copies);
+#if USING_CUDA
+        // Original copy API owns temporary descriptors and has a synchronous
+        // contract. Keep the original stream; no destination enters a Graph.
+        check_cuda_value(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream().stream()));
+#endif
+    } catch (...) {
+#if USING_CUDA
+        if (cudaDeviceSynchronize() != cudaSuccess) {
+            // No release without last-use proof. Stop optional capture and
+            // retain this preallocated owner; pool capacity bounds the hold.
+            copy_stopped.store(true);
+            endpoint->unknown_owner = endpoint;
+        }
+#endif
+        throw;
+    }
+    RTP_LLM_LOG_INFO("DSV41_NATIVE_ENDPOINT H=%zu state_copies=%zu source=original_pages", end, copies.size());
+    return endpoint;
 }
 
 bool KVCacheManager::captureCompletedDecode(const BatchKVCacheResource& resource,

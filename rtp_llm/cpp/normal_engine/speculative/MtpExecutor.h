@@ -296,6 +296,8 @@ private:
                                int64_t              schedule_time_us,
                                int64_t              model_forward_us);
 
+    void retainDecodePublicationPages(const StreamGroups&, const GptModelInputs&, const GptModelInputs&,
+                                      const speculative::SpeculativeSamplerOutput&);
     GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
 
     std::unique_ptr<ModelBase>                                               model_;

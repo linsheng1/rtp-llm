@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <unordered_map>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -10,6 +11,13 @@
 #include "rtp_llm/cpp/utils/DecodePublicationLifecycle.h"
 
 namespace rtp_llm {
+// One actual complete endpoint. No schema, per-token history or Graph inputs.
+struct DecodeEndpoint {
+    size_t end{0};
+    std::unordered_map<std::string, BlockIndicesType> blocks;
+    std::shared_ptr<const void> owner;
+    mutable std::shared_ptr<const DecodeEndpoint> unknown_owner;
+};
 class BatchKVCacheResource {
 public:
     BatchKVCacheResource() {}
@@ -22,8 +30,10 @@ public:
         if (batch_size != batch_resource.size()) {
             decode_completion_submitted_ = false;
             decode_completion_lifecycle_.reset();
+            decode_endpoint.reset(); decode_round_endpoints.clear(); raw_prefix_keys.clear();
         }
         batch_resource.resize(batch_size);
+        raw_prefix_keys.resize(batch_size);
         cache_keys_initialized_ = false;
     }
 
@@ -98,6 +108,7 @@ public:
     void clearBlocks() {
         decode_completion_submitted_ = false;
         decode_completion_lifecycle_.reset();
+        decode_endpoint.reset(); decode_round_endpoints.clear();
         resizeBlocks(0, 0);
     }
 
@@ -182,6 +193,10 @@ public:
     }
 
     void swap(BatchKVCacheResource& other) noexcept {
+        std::swap(cache_key_lookahead, other.cache_key_lookahead);
+        raw_prefix_keys.swap(other.raw_prefix_keys);
+        decode_endpoint.swap(other.decode_endpoint);
+        decode_round_endpoints.swap(other.decode_round_endpoints);
         std::swap(decode_completion_submitted_, other.decode_completion_submitted_);
         std::swap(decode_completion_lifecycle_, other.decode_completion_lifecycle_);
         swapBlockStorage(other);
@@ -248,6 +263,12 @@ public:
     void swapBlocks(int32_t batch_id, std::string_view group_tag, size_t rhs, size_t lhs) {
         cacheResource(batch_id).swapBlocks(group_tag, rhs, lhs);
     }
+
+    bool cache_key_lookahead{false};
+    std::vector<CacheKeysType> raw_prefix_keys;
+    std::shared_ptr<const DecodeEndpoint> decode_endpoint;
+    // Candidates belong only to the current verify packet, not token history.
+    std::vector<std::shared_ptr<const DecodeEndpoint>> decode_round_endpoints;
 
     // Scheduler-owned idempotency only. Payloads stay in their native GPU pools;
     // StorageBackend owns the retained references after EOS admission.

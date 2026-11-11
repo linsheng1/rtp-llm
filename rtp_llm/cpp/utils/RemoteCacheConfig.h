@@ -11,6 +11,13 @@ bool remoteCacheGdrEnabled();
 // flags are read. Publication is disabled unless explicitly enabled.
 bool remoteCacheDecodePublicationEnabled();
 
+// Process-wide metadata identity storage, independent of source DMA budgets.
+struct MetadataSessionLimits {
+    size_t sessions = 1024;
+    size_t bytes = 4ULL * 1024 * 1024;
+};
+std::optional<MetadataSessionLimits> remoteCacheMetadataSessionLimits();
+
 struct DecodePublicationLimits {
     // Configuration-only default for a 4 GiB pool. Backend initialization
     // derives bytes from its actual unique physical pools instead.

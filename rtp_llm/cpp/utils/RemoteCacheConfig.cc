@@ -22,6 +22,16 @@ bool remoteCacheDecodePublicationEnabled() {
     return value != nullptr && std::string_view(value) == "1";
 }
 
+std::optional<MetadataSessionLimits> remoteCacheMetadataSessionLimits() {
+    MetadataSessionLimits limits;
+    auto sessions = readPositiveSize("RTP_LLM_REMOTE_CACHE_SESSION_SLOTS", limits.sessions, 65536);
+    auto bytes = readPositiveSize("RTP_LLM_REMOTE_CACHE_SESSION_BYTES", limits.bytes, 128ULL * 1024 * 1024);
+    if (!sessions || !bytes) return std::nullopt;
+    limits.sessions = *sessions;
+    limits.bytes = *bytes;
+    return limits;
+}
+
 std::optional<DecodePublicationLimits> remoteCacheDecodePublicationLimits(size_t native_pool_bytes) {
     if (native_pool_bytes == 0)
         return std::nullopt;

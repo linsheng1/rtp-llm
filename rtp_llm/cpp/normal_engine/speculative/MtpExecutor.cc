@@ -24,6 +24,7 @@
 #include "rtp_llm/cpp/models/logits_processor/TreeLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include <algorithm>
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include <chrono>
 #include <cstring>
 #include <sstream>
@@ -35,6 +36,7 @@
 #include "autil/TimeUtility.h"
 #include <cmath>
 #include <exception>
+#include <stdexcept>
 #include <limits>
 #include <cstdlib>
 #include <memory>
@@ -58,6 +60,61 @@ bool MtpExecutor::dsparkDraftGraphAllowed(bool is_dspark, RoleType role_type) {
 
 int MtpExecutor::selectMtpPreviousSeqLenUpperBound(bool pending, int previous_next_bound, int host_seq_len) {
     return pending && previous_next_bound > 0 ? previous_next_bound : host_seq_len;
+}
+
+void MtpExecutor::retainDecodePublicationPages(const StreamGroups& streams, const GptModelInputs& target,
+    const GptModelInputs& draft, const speculative::SpeculativeSamplerOutput& sampled) {
+    if (!remoteCacheDecodePublicationEnabled() || role_type_ != RoleType::DECODE || !isTpRank0() || !cache_manager_) return;
+    const size_t unit = cache_manager_->decodePublicationUnit();
+    if (!unit) return;
+    bool crossing = false;
+    for (const auto& stream : streams.allStreams())
+        crossing |= stream->mayCrossDecodePublicationBoundary(unit, propose_step_ + 1);
+    if (!crossing) return; // No payload copy or metadata join on ordinary rounds.
+    if (!sampled.transfer_done_event || !target.prefix_lengths.defined() || !target.input_lengths.defined()
+        || !draft.prefix_lengths.defined() || !draft.input_lengths.defined() || !target.kv_cache_block_id.defined()) return;
+    try {
+    // Join only a possible complete-page boundary. This is GPU metadata, not a
+    // CPU KV snapshot; inference stays on the original async/Graph algorithm.
+    sampled.transfer_done_event->synchronize();
+    auto accepted = sampled.accept_len_cpu.to(torch::kCPU).to(torch::kInt32).contiguous();
+    auto prefixes = target.prefix_lengths.to(torch::kCPU).to(torch::kInt32).contiguous();
+    auto target_lengths = target.input_lengths.to(torch::kCPU).to(torch::kInt32).contiguous();
+    auto draft_prefixes = draft.prefix_lengths.to(torch::kCPU).to(torch::kInt32).contiguous();
+    auto draft_lengths = draft.input_lengths.to(torch::kCPU).to(torch::kInt32).contiguous();
+    auto ids = target.kv_cache_block_id.to(torch::kCPU).to(torch::kInt32).contiguous();
+    if (is_dspark_ && (!draft.last_hidden_states.defined() || draft.last_hidden_states.numel() == 0)) return;
+    size_t row = 0;
+    for (const auto& stream : streams.allStreams()) {
+        std::vector<std::shared_ptr<const DecodeEndpoint>> endpoints;
+        try {
+            if (stream->currentBatchSize() != 1 || stream->nextBatchSize() != 1
+                || row >= static_cast<size_t>(accepted.numel()) || row >= static_cast<size_t>(prefixes.numel())
+                || row >= static_cast<size_t>(target_lengths.numel())
+                || row >= static_cast<size_t>(draft_prefixes.numel()) || row >= static_cast<size_t>(draft_lengths.numel()))
+                throw std::runtime_error("invalid DSV4.1 writer row geometry");
+            const int prefix = prefixes.data_ptr<int32_t>()[row];
+            const int count = accepted.data_ptr<int32_t>()[row];
+            const int target_end = prefix + count;
+            const int draft_end = draft_prefixes.data_ptr<int32_t>()[row] + draft_lengths.data_ptr<int32_t>()[row];
+            if (prefix < 0 || count <= 0 || count > target_lengths.data_ptr<int32_t>()[row]
+                || target_end < prefix || draft_end < 0) throw std::runtime_error("invalid DSV4.1 writer range");
+            const size_t end = std::min(target_end, draft_end) / unit * unit;
+            // Include all complete endpoints in this actual accept packet:
+            // EOS/stop can subsequently trim it to an earlier candidate.
+            for (size_t h = (static_cast<size_t>(prefix) / unit + 1) * unit; h <= end; h += unit) {
+                auto endpoint = cache_manager_->retainDecodeEndpoint(ids, target.kv_cache_group_tags, row, h);
+                if (endpoint) endpoints.push_back(std::move(endpoint));
+            }
+        } catch (const std::exception& error) {
+            RTP_LLM_LOG_WARNING("DSV4.1 optional endpoint capture failed: %s", error.what());
+        }
+        stream->setDecodePublicationPages(std::move(endpoints));
+        ++row;
+    }
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_WARNING("DSV4.1 optional endpoint metadata failed: %s", error.what());
+    }
 }
 
 GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role) {
@@ -1684,15 +1741,39 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 +-------------------------------+
 */
 
-absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams,
+absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& scheduled_streams,
                                      MtpMetricsCollector&                metrics_collector) {
-    RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(decode_stream_size=%zu)", streams.size());
+    RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(decode_stream_size=%zu)", scheduled_streams.size());
 
+    const bool publication_frame = remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE;
+    struct SubmissionFrame {
+        std::vector<GenerateStreamPtr> streams;
+        bool handed_off{false};
+        std::shared_ptr<SubmissionFrame> unknown;
+    };
+    auto frame = publication_frame ? std::make_shared<SubmissionFrame>() : nullptr;
+    if (frame) frame->streams.reserve(scheduled_streams.size());
+    auto close_frame = frame ? std::shared_ptr<void>(nullptr, [frame](void*) {
+        if (!frame->handed_off && !frame->streams.empty()) {
+            try { cudaSyncAndCheck(); }
+            catch (...) { frame->unknown = frame; return; } // Keep actual sources if GPU drain is unknown.
+        }
+        for (const auto& stream : frame->streams) stream->endDecodePublicationSubmission();
+    }) : std::shared_ptr<void>{};
+    std::list<GenerateStreamPtr> publication_streams;
+    const auto& streams = publication_frame ? publication_streams : scheduled_streams;
+    if (frame) for (const auto& stream : scheduled_streams) {
+        if (stream->beginDecodePublicationSubmission()) {
+            frame->streams.push_back(stream); // Capacity prepared before acquiring the submission gate.
+            publication_streams.push_back(stream);
+        }
+    }
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
 
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     GptModelOutputs draft_prefill_model_output;
+    GptModelInputs publication_target;
 
     SamplerOutput                         draft_sampler_output;
     speculative::SpeculativeSamplerOutput speculative_sampler_output;
@@ -1973,8 +2054,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                 model_input.combo_tokens.numel(),
                 model_input.is_packed_target_verify,
                 model_input.is_fake_stream);
+            if (remoteCacheDecodePublicationEnabled()) publication_target = model_input;
             model_output = runTargetVerifyForward(model_input, stream_groups);
         } else {
+            if (remoteCacheDecodePublicationEnabled()) publication_target = model_input;
             model_output = runTargetVerifyForward(model_input, stream_groups);
         }
         maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, model_input.combo_tokens.numel());
@@ -2187,6 +2270,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         // round's proposal is produced at the next round head, from this
         // freshly committed ring.
         draft_prefill_model_output = runDraftPrefillForward(model_input);
+        retainDecodePublicationPages(stream_groups, publication_target, model_input, speculative_sampler_output);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
@@ -2222,7 +2306,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     // Record after draft_model_sample so worker all_probs/token_ids reads wait
     // on the earliest valid point, not metrics or dispatch slicing.
-    if (useStreamAsync()) {
+    if (useStreamAsync() || publication_frame) {
         draft_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
         // Include asynchronous sampling results in the worker's final KV-use fence.
         if (speculative_sampler_output.graph_buffers) {
@@ -2265,6 +2349,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                              std::move(draft_event),
                              engram_anchor_windows,
                              next_history);
+    if (frame) frame->handed_off = dispatch_result.ok();
     if (dispatch_result.ok() && dspark_budget_finish
         && std::none_of(speculative_sampler_output.processor_errors.begin(),
                         speculative_sampler_output.processor_errors.end(),
@@ -3135,6 +3220,7 @@ absl::Status MtpExecutor::dispatchDecodeOutput(const StreamGroups&              
     } else {
         MergedOutput draft_prefill_output{std::move(draft_prefill_model_output),
                                           std::move(draft_prefill_sampler_output)};
+        if (remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE && draft_event) draft_event->synchronize();
         result = batch_stream_processor_->dispatchDecode(
             stream_groups, speculative_sampler_output, draft_prefill_output, std::move(target_logprobs));
         if (result.ok() && useAsyncDeviceState()) {
@@ -3940,32 +4026,67 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     auto stream_groups_copy   = stream_groups;
 
     auto streams_for_inc = stream_groups_copy.allStreams();
-    for (auto& s : streams_for_inc) {
-        s->incPendingAsyncBookkeeping();
+    struct BookkeepingHold {
+        std::list<GenerateStreamPtr> streams;
+        std::shared_ptr<torch::Event> initial;
+        std::optional<torch::Event> final_event;
+        std::optional<torch::Stream> worker_stream;
+        bool counted{false}, protect{false};
+        std::atomic<bool> entered{false}, writer_ready{false}, retired{false};
+        ~BookkeepingHold() { finish(); }
+        void finish() {
+            if (!counted || retired.exchange(true)) return;
+            bool safe = true;
+            try {
+                if (!entered.load()) {
+                    if (initial) initial->synchronize(); else safe = false;
+                } else if (protect) {
+                    safe = writer_ready.load();
+                    if (safe) {
+                        final_event->record(*worker_stream);
+                        final_event->synchronize(); // Includes bookkeeping GPU copies, not just the model writer.
+                    }
+                }
+            } catch (...) { safe = false; }
+            for (const auto& stream : streams) {
+                if (!safe) stream->retainUnknownDecodePublication(stream);
+                stream->decPendingAsyncBookkeepingAndMaybeRelease();
+            }
+        }
+    };
+    auto retirement = std::make_shared<BookkeepingHold>();
+    retirement->streams = std::move(streams_for_inc);
+    retirement->initial = draft_event;
+    retirement->protect = remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE;
+    if (retirement->protect) {
+        retirement->worker_stream = spec_bookkeeping_runner_.stream();
+        retirement->final_event.emplace(cuda_graph::makeGraphEvent());
     }
+    for (const auto& stream : retirement->streams) stream->incPendingAsyncBookkeeping();
+    retirement->counted = true;
 
-    spec_bookkeeping_runner_.launch([processor,
+    spec_bookkeeping_runner_.launch([processor, retirement,
                                      stream_groups_copy   = std::move(stream_groups_copy),
                                      spec_decode_copy     = std::move(spec_decode_copy),
                                      target_logprobs_copy = std::move(target_logprobs_copy),
                                      draft_prefill_copy   = std::move(draft_prefill_copy),
                                      rejection_event,
                                      draft_event]() mutable {
+        retirement->entered.store(true); // Before any fallible profiling or worker preparation.
+        struct Finish { BookkeepingHold* hold; ~Finish() { hold->finish(); } } finish{retirement.get()};
+        const auto& worker_streams = retirement->streams;
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_bookkeeping_worker)");
-
-        auto worker_streams = stream_groups_copy.allStreams();
-
-        auto dec_guard = std::shared_ptr<void>(nullptr, [worker_streams](void*) {
-            for (auto& s : worker_streams) {
-                s->decPendingAsyncBookkeepingAndMaybeRelease();
-            }
-        });
-
         if (rejection_event) {
             rejection_event->block(cuda_graph::graphGetCurrentStream());
         }
         if (draft_event) {
-            draft_event->block(cuda_graph::graphGetCurrentStream());
+            if (remoteCacheDecodePublicationEnabled()) {
+                try { draft_event->synchronize(); retirement->writer_ready.store(true); }
+                catch (...) {
+                    for (const auto& stream : worker_streams) stream->retainUnknownDecodePublication(stream);
+                    throw;
+                }
+            } else draft_event->block(cuda_graph::graphGetCurrentStream());
         }
 
         // Move into dispatch so the worker closure itself does not retain the

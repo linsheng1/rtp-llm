@@ -482,3 +482,10 @@ cc_test(
     exec_properties = {"gpu": "L20_CU13"},
     tags = ["L20_CU13"],
 )
+
+cc_test(
+    name = "mtp_cache_lookahead_test",
+    srcs = ["MtpCacheLookaheadTest.cc"],
+    copts = test_copts,
+    deps = test_deps + ["//rtp_llm/cpp/cache:cache_core", "//rtp_llm/cpp/utils:hash_util"],
+)

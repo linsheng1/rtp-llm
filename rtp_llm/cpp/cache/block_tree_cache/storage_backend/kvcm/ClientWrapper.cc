@@ -395,8 +395,29 @@ ClientWrapper::getWriteLocation(const std::string&              unique_id,
                                 const std::vector<std::string>& location_spec_group_names,
                                 int64_t                         write_timeout_seconds,
                                 int32_t                         min_replica_count) {
+    auto result = getWriteLocationWithDisposition(unique_id, trace_id, keys, tokens, location_spec_group_names,
+                                                   write_timeout_seconds, min_replica_count, nullptr);
+    if (!result.first) return {false, {}};  // Preserve the legacy bool/result contract.
+    return result;
+}
+
+std::pair<bool, kv_cache_manager::WriteLocation> ClientWrapper::getWriteLocationWithDisposition(
+    const std::string& unique_id, const std::string& trace_id, const std::vector<int64_t>& keys,
+    const std::vector<int64_t>& tokens, const std::vector<std::string>& location_spec_group_names,
+    int64_t write_timeout_seconds, int32_t min_replica_count, MetadataCallDisposition* disposition) {
+    MetadataCallDisposition local;
+    auto& status = disposition ? *disposition : local;
+    status = MetadataCallDisposition::NOT_SENT;
     CHECK_INIT2(unique_id);
-    CALL_CLIENT2(StartWrite, trace_id, keys, tokens, location_spec_group_names, write_timeout_seconds, min_replica_count);
+    status = MetadataCallDisposition::UNKNOWN;
+    auto [ec, result] = client->StartWrite(trace_id, keys, tokens, location_spec_group_names,
+                                          write_timeout_seconds, min_replica_count);
+    if (!checkError(ec, client)) {
+        RTP_LLM_LOG_WARNING("StartWrite fail, ec [%d]", ec);
+        return {false, std::move(result)};  // An error reply may still identify its allocation.
+    }
+    status = MetadataCallDisposition::ACKNOWLEDGED;
+    return {true, std::move(result)};
 }
 
 bool ClientWrapper::removeCache(const std::string& unique_id, const std::string& trace_id,
@@ -475,12 +496,23 @@ bool ClientWrapper::finishWrite(const std::string&                 unique_id,
                                 const std::string&                 write_session_id,
                                 const kv_cache_manager::BlockMask& block_mask,
                                 const kv_cache_manager::Locations& locations) {
+    return finishWriteWithDisposition(unique_id, trace_id, write_session_id, block_mask, locations, nullptr);
+}
+
+bool ClientWrapper::finishWriteWithDisposition(const std::string& unique_id, const std::string& trace_id,
+    const std::string& write_session_id, const kv_cache_manager::BlockMask& block_mask,
+    const kv_cache_manager::Locations& locations, MetadataCallDisposition* disposition) {
+    MetadataCallDisposition local;
+    auto& status = disposition ? *disposition : local;
+    status = MetadataCallDisposition::NOT_SENT;
     CHECK_INIT1(unique_id);
+    status = MetadataCallDisposition::UNKNOWN;
     auto ec = client->FinishWrite(trace_id, write_session_id, block_mask, locations);
     if (!checkError(ec, client)) {
         RTP_LLM_LOG_WARNING("FinishWrite fail, ec [%d]", ec);
         return false;
     }
+    status = MetadataCallDisposition::ACKNOWLEDGED;
     return true;
 }
 
@@ -489,36 +521,11 @@ bool ClientWrapper::abortWrite(const std::string& unique_id, const std::string& 
     if (write_session_id.empty()) {
         return false;
     }
-    // SDK retries do not cover CHECK_INIT rejecting an unsent request.
-    constexpr int max_attempts = 3;
-    auto attempt_abort = [&]() -> std::optional<kv_cache_manager::ClientErrorCode> {
-        CHECK_INIT_BASE(unique_id, std::nullopt);
-        const auto ec = client->FinishWrite(trace_id, write_session_id, kv_cache_manager::BlockMaskOffset{0}, {});
-        checkError(ec, client);
-        return ec;
-    };
-    for (int attempt = 0; attempt < max_attempts; ++attempt) {
-        std::optional<kv_cache_manager::ClientErrorCode> ec;
-        try {
-            ec = attempt_abort();
-        } catch (...) {
-            RTP_LLM_LOG_WARNING("KVCM abort attempt threw, session=%s", write_session_id.c_str());
-        }
-        if (ec && *ec == kv_cache_manager::ClientErrorCode::ER_OK) {
-            return true;
-        }
-        RTP_LLM_LOG_WARNING("KVCM abort unconfirmed, session=%s attempt=%d code=%d",
-                            write_session_id.c_str(), attempt + 1, ec ? static_cast<int>(*ec) : -1);
-        if (ec && *ec != kv_cache_manager::ClientErrorCode::ER_INVALID_GRPCSTATUS
-            && *ec != kv_cache_manager::ClientErrorCode::ER_INVALID_STUB
-            && *ec != kv_cache_manager::ClientErrorCode::ER_CONNECT_FAIL) {
-            return false;
-        }
-        if (attempt + 1 < max_attempts && !waitForRetry(/*sleep_time_ms=*/20)) {
-            return false;
-        }
-    }
-    return false;
+    // Finish(0) may already have executed when its ACK is lost. Never replay it.
+    try {
+        return finishWriteWithDisposition(unique_id, trace_id, write_session_id,
+                                           kv_cache_manager::BlockMaskOffset{0}, {}, nullptr);
+    } catch (...) { return false; }
 }
 
 bool ClientWrapper::checkError(kv_cache_manager::ClientErrorCode ec,

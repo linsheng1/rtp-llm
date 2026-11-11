@@ -125,6 +125,24 @@ snapshotRequests(const std::shared_ptr<KVCMBroadcastState>& state) {
 
 class MockClientWrapper final: public kvcm::ClientWrapper {
 public:
+    std::pair<bool, kv_cache_manager::WriteLocation> getWriteLocationWithDisposition(
+        const std::string& id, const std::string& trace, const std::vector<int64_t>& keys,
+        const std::vector<int64_t>& tokens, const std::vector<std::string>& groups, int64_t timeout,
+        int32_t replicas, kvcm::MetadataCallDisposition* disposition) override {
+        if (disposition) *disposition = kvcm::MetadataCallDisposition::UNKNOWN;
+        auto result = getWriteLocation(id, trace, keys, tokens, groups, timeout, replicas);
+        if (disposition && result.first) *disposition = kvcm::MetadataCallDisposition::ACKNOWLEDGED;
+        return result;
+    }
+    bool finishWriteWithDisposition(const std::string& id, const std::string& trace, const std::string& session,
+        const kv_cache_manager::BlockMask& mask, const kv_cache_manager::Locations& locations,
+        kvcm::MetadataCallDisposition* disposition) override {
+        if (disposition) *disposition = kvcm::MetadataCallDisposition::UNKNOWN;
+        const auto result = finishWrite(id, trace, session, mask, locations);
+        if (disposition && result) *disposition = kvcm::MetadataCallDisposition::ACKNOWLEDGED;
+        return result;
+    }
+
     MockClientWrapper(): ClientWrapper(std::make_unique<kvcm::MockClientFactory>()) {
         ON_CALL(*this, abortWrite(_, _, _)).WillByDefault(Invoke(
             [this](const std::string& id, const std::string& trace, const std::string& session) {

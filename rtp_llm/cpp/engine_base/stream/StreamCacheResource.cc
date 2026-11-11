@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
+#include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include <algorithm>
 #include <limits>
 #include <thread>
@@ -99,6 +100,21 @@ void StreamCacheResource::releaseResource() {
     resource_released_ = true;
 }
 
+void StreamCacheResource::publishCompletedDecode(size_t computed_end) {
+    if (!remoteCacheDecodePublicationEnabled() || resource_context_.role_type != RoleType::DECODE
+        || !resource_context_.cache_manager || !reuseCache() || stream_->hasErrorWithoutLock() || !computed_end
+        || !stream_->hasEventWithoutLock(StreamEvents::GenerateDone)) return;
+    const auto& config = resource_context_.cache_manager->cacheConfig();
+    try {
+    // Use final retained tokens; old per-round rolling keys can lag an EOS packet.
+    initCacheKeys(batch_kv_cache_resource_, stream_->completeTokenIdsPtr(),
+                  config.seq_size_per_block, config.cache_key_hash_seed);
+    (void)resource_context_.cache_manager->captureCompletedDecode(*batch_kv_cache_resource_, computed_end, true);
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_WARNING("optional D publication failed before submission: %s", error.what());
+    }
+}
+
 int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("stream [%s] try release [%lu] blocks", stream_->streamLogTag().c_str(), nums);
@@ -124,14 +140,8 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
                               stream_->streamId(),
                               total_blocks,
                               tierName(target_tier));
-            if (remoteCacheDecodePublicationEnabled() && resource_context_.role_type == RoleType::DECODE
-                && !autil::EnvUtil::getEnv("RTP_LLM_STREAM_ASYNC", false)
-                && stream_->completeTokenIdsPtr()->seqLength() > 0) {
-                (void)resource_context_.cache_manager->captureCompletedDecode(
-                    *batch_kv_cache_resource_,
-                    static_cast<size_t>(stream_->completeTokenIdsPtr()->seqLength() - 1),
-                    true);
-            }
+            if (stream_->completeTokenIdsPtr()->seqLength() > 0)
+                publishCompletedDecode(stream_->completeTokenIdsPtr()->seqLength() - 1);
             if (target_tier != Tier::NONE) {
                 InsertInfo insert_info{
                     batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier, stream_->streamId()};

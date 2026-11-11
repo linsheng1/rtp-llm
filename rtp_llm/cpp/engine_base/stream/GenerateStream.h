@@ -202,6 +202,7 @@ public:
         return GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
     }
     void update(const StreamUpdateInfo& update_info);
+    void setDecodePublicationPages(std::vector<std::shared_ptr<const DecodeEndpoint>> pages);
     void specUpdate(const StreamSpecUpdateInfo& update_info);
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);
 
@@ -651,6 +652,10 @@ public:
     // Count worker claims on this stream's KV resource.
     // releaseResource waits for zero so worker-side update/specUpdate cannot
     // write into blocks already returned to the pool.
+    bool mayCrossDecodePublicationBoundary(size_t unit, size_t advance) const;
+    bool beginDecodePublicationSubmission();
+    void endDecodePublicationSubmission();
+    void retainUnknownDecodePublication(const std::shared_ptr<GenerateStream>& owner);
     void incPendingAsyncBookkeeping();
     void decPendingAsyncBookkeepingAndMaybeRelease();
     bool hasPendingAsyncBookkeeping() const;
@@ -1060,6 +1065,9 @@ protected:
     // Separate lock/cv avoids deadlocking releaseResource with worker updates
     // that need mutex_. Shared ownership preserves the coordinator across
     // GenerateStream copies captured by async workers.
+    std::shared_ptr<GenerateStream> unknown_decode_publication_;
+    void tryReleaseResourceAfterBookkeeping();
+    std::atomic<size_t> decode_publication_submissions_{0}; // transitions under the stream mutex
     struct AsyncBookkeepingCoordinator {
         std::atomic<int>        count{0};
         std::atomic<bool>       defer_release{false};

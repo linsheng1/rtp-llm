@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstring>
 #include <memory>
+#include <iterator>
 #include <map>
 #include <limits>
 #include <typeinfo>
@@ -239,11 +240,68 @@ void GenerateStream::releaseResource() {
     RTP_LLM_PROFILE_FUNCTION();
     // Return KV blocks only after all workers that captured this stream finish.
     // Earlier release could let a worker write into blocks owned by another stream.
-    waitPendingAsyncBookkeeping();
+    {
+        std::unique_lock<std::mutex> lock(async_bookkeeping_->mu);
+        // A submitting frame will hand resources to the next worker. Do not
+        // wait for that worker here: its AsyncRunner may still be joining us.
+        async_bookkeeping_->cv.wait(lock, [this] {
+            return async_bookkeeping_->count.load(std::memory_order_acquire) == 0
+                || decode_publication_submissions_.load(std::memory_order_acquire) > 0;
+        });
+    }
+    tryReleaseResourceAfterBookkeeping();
+}
+
+void GenerateStream::tryReleaseResourceAfterBookkeeping() {
+    // A worker must never wait for another task queued on its own runner.
+    // Recheck under the submission gate so a newly admitted frame cannot race release.
     std::lock_guard<std::mutex> lock(*mutex_);
+    if (hasPendingAsyncBookkeeping() || decode_publication_submissions_ || unknown_decode_publication_) {
+        markDeferredRelease();
+        return;
+    }
     if (!stream_cache_resource_->isResourceReleased()) {
         stream_cache_resource_->releaseResource();
     }
+}
+
+bool GenerateStream::mayCrossDecodePublicationBoundary(size_t unit, size_t advance) const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (!unit || seqLength() <= 0 || hasErrorWithoutLock() || isFinished()) return false;
+    const auto state = getMtpAsyncDeviceState();
+    const size_t before = std::max(0, seqLength() - 1);
+    const size_t upper = std::max(seqLength(), state.next_seq_len_upper_bound) + advance - 1;
+    return before / unit != upper / unit;
+}
+
+bool GenerateStream::beginDecodePublicationSubmission() {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (!stream_cache_resource_ || stream_cache_resource_->isResourceReleased() || isFinished()
+        || hasErrorWithoutLock() || unknown_decode_publication_) return false;
+    ++decode_publication_submissions_;
+    {
+        std::lock_guard<std::mutex> wait_lock(async_bookkeeping_->mu);
+        async_bookkeeping_->cv.notify_all();
+    }
+    return true;
+}
+
+void GenerateStream::retainUnknownDecodePublication(const std::shared_ptr<GenerateStream>& owner) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    RTP_LLM_CHECK(owner.get() == this);
+    unknown_decode_publication_ = owner; // No GPU last-use proof: retain actual pages, not just logical IDs.
+}
+
+void GenerateStream::endDecodePublicationSubmission() {
+    bool release = false;
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        RTP_LLM_CHECK(decode_publication_submissions_ > 0);
+        --decode_publication_submissions_;
+        if (!decode_publication_submissions_ && !hasPendingAsyncBookkeeping())
+            release = async_bookkeeping_->defer_release.exchange(false);
+    }
+    if (release) tryReleaseResourceAfterBookkeeping();
 }
 
 void GenerateStream::incPendingAsyncBookkeeping() {
@@ -261,7 +319,7 @@ void GenerateStream::decPendingAsyncBookkeepingAndMaybeRelease() {
         // The last worker performs any deferred release after its update lock
         // has unwound, so releaseResource() can safely re-enter mutex_.
         if (async_bookkeeping_->defer_release.exchange(false, std::memory_order_acq_rel)) {
-            releaseResource();
+            tryReleaseResourceAfterBookkeeping();
         }
     }
 }
@@ -1350,6 +1408,13 @@ void GenerateStream::matchStopWordsList(int batch_id) {
     }
 }
 
+void GenerateStream::setDecodePublicationPages(std::vector<std::shared_ptr<const DecodeEndpoint>> pages) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (!stream_cache_resource_ || hasErrorWithoutLock() || isFinished()) return;
+    auto& pending = kvCacheMutable().decode_round_endpoints;
+    pending.insert(pending.end(), std::make_move_iterator(pages.begin()), std::make_move_iterator(pages.end()));
+}
+
 void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     // Worker-thread MTP bookkeeping updates tokens/output and finish checks
     // before the next async dispatch. The speculative propose_step+1 window
@@ -1514,6 +1579,23 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   .output_start_pos       = old_seq_length,
                   .logprobs_offset        = logprobs_offset});
     updateLogprobsContentStarted(old_seq_length);
+    if (remoteCacheDecodePublicationEnabled() && stream_cache_resource_ && seqLength() > 0) {
+        auto& resource = kvCacheMutable();
+        const size_t final_computed = seqLength() - 1;
+        if (resource.decode_endpoint && resource.decode_endpoint->end > final_computed) resource.decode_endpoint.reset();
+        for (const auto& endpoint : resource.decode_round_endpoints)
+            if (endpoint && endpoint->end <= final_computed
+                && (!resource.decode_endpoint || endpoint->end > resource.decode_endpoint->end)) resource.decode_endpoint = endpoint;
+        const bool finished = generate_status_->checkFinished();
+        auto& pending = resource.decode_round_endpoints;
+        pending.erase(std::remove_if(pending.begin(), pending.end(), [&](const auto& endpoint) {
+            return finished || !endpoint || endpoint->end <= final_computed;
+        }), pending.end());
+        if (finished && hasEventWithoutLock(StreamEvents::GenerateDone)
+            && !hasErrorWithoutLock() && resource.decode_endpoint)
+            stream_cache_resource_->publishCompletedDecode(final_computed);
+    }
+
 }
 
 void GenerateStream::update(const StreamUpdateInfo& update_info) {
@@ -1628,10 +1710,10 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     // any final block remapping. The backend prepares pinned GPU handles and
     // queues the existing Prefill writer; no decode-progress CPU snapshots.
     if (is_done && hasEventWithoutLock(StreamEvents::GenerateDone) && !hasEventWithoutLock(StreamEvents::Error)
-        && !hasErrorWithoutLock() && resourceContext().cache_manager && !useStreamAsyncReserveTokens()
+        && !hasErrorWithoutLock() && resourceContext().cache_manager
         && num_new_tokens == 1 && currentBatchSize() == 1 && remoteCacheDecodePublicationEnabled()
         && resourceContext().role_type == RoleType::DECODE && stream_cache_resource_->reuseCache() && seqLength() > 0) {
-        resourceContext().cache_manager->captureCompletedDecode(kvCache(), seqLength() - 1, true);
+        stream_cache_resource_->publishCompletedDecode(seqLength() - 1);
     }
 
     if (!is_done || stream_cache_resource_->reuseCache()) {
