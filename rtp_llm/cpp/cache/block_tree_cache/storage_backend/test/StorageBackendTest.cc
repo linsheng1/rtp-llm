@@ -31,6 +31,30 @@ TEST(StorageBackendExecutorTest, RejectsZeroWorkersAndAllowsUnboundedQueue) {
     EXPECT_NO_THROW((void)makeStorageBackendExecutor(/*thread_count=*/1, /*queue_size=*/0));
 }
 
+TEST(StorageBackendExecutorTest, CompletionCapabilityDoesNotBypassReservationAdmission) {
+    auto unbounded = makeStorageBackendExecutor(1, 0);
+    EXPECT_FALSE(unbounded->hasCompletionReservations());
+    ASSERT_TRUE(unbounded->start());
+    EXPECT_FALSE(unbounded->hasCompletionReservations());
+    unbounded->shutdown();
+
+    auto bounded = makeStorageBackendExecutor(1, 2);
+    EXPECT_TRUE(bounded->hasCompletionReservations());
+    EXPECT_FALSE(bounded->reserveCompletion([] {}, BlockTreeTaskClass::LOAD));
+    ASSERT_TRUE(bounded->start());
+    std::atomic<int> calls{0};
+    auto ticket = bounded->reserveCompletion([&] { ++calls; }, BlockTreeTaskClass::LOAD);
+    ASSERT_TRUE(ticket);
+    bounded->stopAdmission();
+    EXPECT_FALSE(bounded->submit([] {}));
+    EXPECT_TRUE(ticket->post());
+    ticket.reset(); // Also releases the reservation if the post unexpectedly failed.
+    bounded->shutdown();
+    EXPECT_EQ(calls.load(), 1);
+    EXPECT_TRUE(bounded->hasCompletionReservations());
+    EXPECT_FALSE(bounded->reserveCompletion([] {}, BlockTreeTaskClass::LOAD));
+}
+
 TEST(StorageBackendExecutorTest, HonorsConfiguredWorkerAndQueueCapacity) {
     auto executor = makeStorageBackendExecutor(/*thread_count=*/2, /*queue_size=*/1);
     ASSERT_TRUE(executor->start());
@@ -719,6 +743,41 @@ TEST(StorageBackendTest, SingleWorkerStartsNextReadWhileFirstRetainsPinsThroughS
     EXPECT_EQ(pool->refCount(block), 1u);
     pool->decRef(block);
     pool->decRef(next_block);
+}
+
+TEST(StorageBackendTest, DeferredResultKeepsItsOwnerThroughExactlyOnceBusinessSettlement) {
+    for (const bool reserved : {false, true}) {
+        SCOPED_TRACE(reserved);
+        auto pool = std::make_shared<TestBlockPool>();
+        const auto block = pool->malloc().value();
+        pool->incRef(block);
+        auto executor = reserved ? makeStorageBackendExecutor(1, 8) : makeStorageBackendExecutor(1, 0);
+        DeferredReadBackend backend(true, executor);
+        ASSERT_TRUE(initBackend(backend, pool));
+        auto owner = std::make_shared<int>(17);
+        const std::weak_ptr<int> weak = owner;
+        std::atomic<int> callbacks{0}, result_calls{0};
+        std::promise<void> completed;
+        auto done = completed.get_future();
+        backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) {
+            EXPECT_TRUE(error.ok());
+            if (callbacks.fetch_add(1) == 0) completed.set_value();
+        });
+        ASSERT_TRUE(backend.waitForRead());
+        EXPECT_EQ(pool->refCount(block), 2u);
+        backend.complete([retained = std::move(owner), &result_calls] {
+            EXPECT_EQ(*retained, 17);
+            ++result_calls;
+        }, true);
+        ASSERT_EQ(done.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        backend.shutdown();
+        EXPECT_EQ(callbacks.load(), 1);
+        EXPECT_EQ(result_calls.load(), 1);
+        EXPECT_TRUE(weak.expired());
+        EXPECT_EQ(pool->refCount(block), 1u);
+        EXPECT_FALSE(pool->isFrozen(block));
+        pool->decRef(block);
+    }
 }
 
 TEST(StorageBackendTest, ReadCompletionSettlesOnceAndPreservesIsolation) {

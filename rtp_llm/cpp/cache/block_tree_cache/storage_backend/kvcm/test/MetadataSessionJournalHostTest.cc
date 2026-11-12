@@ -11,8 +11,13 @@
 #ifdef NDEBUG
 #error "Session tests require active checks"
 #endif
-namespace { std::atomic<size_t> allocations{0}, checks{0}; }
-void* operator new(size_t bytes) { ++allocations; if (auto* p = std::malloc(bytes ? bytes : 1)) return p; throw std::bad_alloc(); }
+namespace { std::atomic<size_t> allocations{0}, checks{0}; std::atomic<bool> fail_next_allocation{false}; }
+void* operator new(size_t bytes) {
+    ++allocations;
+    if (fail_next_allocation.exchange(false)) throw std::bad_alloc();
+    if (auto* p = std::malloc(bytes ? bytes : 1)) return p;
+    throw std::bad_alloc();
+}
 void* operator new[](size_t bytes) { return ::operator new(bytes); }
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete[](void* p) noexcept { std::free(p); }
@@ -43,8 +48,32 @@ Limits limits(size_t n) { return {n, Peer::bytes(n)}; }
 void close(S& s) { CHECK(s.finishInvoked(false)); s.observeFinish(D::ACKNOWLEDGED, true); CHECK(!s); }
 void limitsAndFrozenConfiguration() {
     bool bad = false; try { S::configure({0, 1}); } catch (const std::invalid_argument&) { bad = true; } CHECK(bad);
-    S::configure(limits(2)); const auto u = S::usage(limits(2)); CHECK(u.capacity == 2 && u.storage_bytes == Peer::bytes(2));
+    S::configure(limits(2)); const auto u = S::usage(limits(2)); CHECK(u.capacity == 2 && u.storage_bytes == Peer::bytes(0));
     bad = false; try { S::configure(limits(3)); } catch (const std::invalid_argument&) { bad = true; } CHECK(bad);
+}
+void lazyStorageFailureLeavesQuotaFreeAndUnknownSurvivesReconfigure() {
+    const auto l = limits(2); S::configure(l);
+    const auto configured_allocations = allocations.load();
+    S::configure(l);
+    CHECK(allocations.load() == configured_allocations);
+    CHECK(S::usage(l).storage_bytes == Peer::bytes(0));
+    fail_next_allocation = true;
+    bool failed = false;
+    try { (void)S::reserve(l); } catch (const std::bad_alloc&) { failed = true; }
+    CHECK(failed);
+    CHECK(S::usage(l).occupied == 0 && S::usage(l).unknown == 0);
+    CHECK(S::usage(l).storage_bytes == Peer::bytes(0));
+    auto a = S::reserve(l); CHECK(a);
+    CHECK(S::usage(l).storage_bytes == Peer::bytes(2));
+    const auto before_start = allocations.load();
+    a->startInvoked(); CHECK(a->observeStart(D::ACKNOWLEDGED, true, "lost-ack"));
+    a->payloadMayHaveStarted(); CHECK(a->finishInvoked(false));
+    a->observeFinish(D::UNKNOWN, false); a.reset();
+    S::configure(l);
+    CHECK(allocations.load() == before_start);
+    CHECK(S::usage(l).occupied == 1 && S::usage(l).unknown == 1);
+    auto b = S::reserve(l); CHECK(b); CHECK(!S::reserve(l));
+    b.reset(); CHECK(S::usage(l).occupied == 1 && S::usage(l).unknown == 1);
 }
 void moveAbandonAndQuota() {
     const auto l = limits(2); auto a = S::reserve(l); CHECK(a && *a);
@@ -119,7 +148,7 @@ void parallelSessions() {
 int main() {
     // Real process-lifetime records are never reset. Each scenario has its own
     // child process, just like the existing backend process regression tests.
-    const std::vector<void(*)()> cases{limitsAndFrozenConfiguration, moveAbandonAndQuota, noSendAndDuplicateStart,
+    const std::vector<void(*)()> cases{limitsAndFrozenConfiguration, lazyStorageFailureLeavesQuotaFreeAndUnknownSurvivesReconfigure, moveAbandonAndQuota, noSendAndDuplicateStart,
         emptyAndErrorStartNeverAuthorizeFinish, exactAndOversizedId, finishOnceAndLostUnusedAck,
         actualIdsDoNotCoalesceAndStaleCannotTouchNewSession, fixedBytesAndCounterExhaustion,
         noAllocationAfterReservationAndNoSourceOwner, parallelSessions};
@@ -128,5 +157,5 @@ int main() {
         if (!pid) { run(); _exit(0); }
         int status = 0; CHECK(waitpid(pid, &status, 0) == pid); CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
-    std::puts("10 original Session scenarios completed");
+    std::puts("11 Session scenarios completed");
 }

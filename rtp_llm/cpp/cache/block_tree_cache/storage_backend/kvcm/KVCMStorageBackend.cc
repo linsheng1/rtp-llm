@@ -10,6 +10,7 @@
 #include <future>
 #include <map>
 #include <numeric>
+#include <new>
 #include <set>
 #include <tuple>
 #include <atomic>
@@ -922,13 +923,19 @@ public:
         const std::string trace_id     = nextTraceId("write", write_trace_sequence_);
         publication.resources = completion_resources_;
         (void)remainingTimeout(request, "before StartWrite");
-        publication.session = CompletionResources::Session::reserve(session_limits_);
+        try {
+            publication.session = CompletionResources::Session::reserve(session_limits_);
+        } catch (const std::bad_alloc&) {
+            // Lazy ID storage failed before StartWrite or payload submission.
+            throw StorageOperationBufferSafeFailure("KVCM metadata storage allocation failed before StartWrite");
+        }
         if (!publication.session) {
             const auto slots = CompletionResources::Session::usage(session_limits_);
             RTP_LLM_LOG_WARNING("KVCM metadata session budget full occupied=%zu unknown=%zu capacity=%zu",
                                 slots.occupied, slots.unknown, slots.capacity);
             throw StorageOperationBufferSafeFailure("KVCM metadata session budget full");
         }
+        (void)remainingTimeout(request, "after metadata reservation");
         auto [success, allocation] = [&] {
             const auto stage_start = Clock::now();
             block_tree_cache_detail::ScopeRollback timer([&] {

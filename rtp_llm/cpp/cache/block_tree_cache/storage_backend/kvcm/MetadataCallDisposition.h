@@ -46,6 +46,14 @@ public:
         if (p.free_head == p.capacity) {
             saturate(p.capacity < p.limits.sessions ? p.rejected_bytes : p.rejected_slots); return {};
         }
+        // Configure freezes the quota, but read-only/idle backends need no ID array.
+        // Allocate before a slot is admitted and before any StartWrite can execute.
+        if (!p.entries) {
+            auto entries = std::make_unique<Entry[]>(p.capacity);
+            for (size_t i = 0; i < p.capacity; ++i) entries[i].next = i + 1;
+            p.entries = std::move(entries);
+            p.storage_bytes = sizeof(Pool) + p.capacity * sizeof(Entry);
+        }
         auto& entry = p.entries[p.free_head];
         if (entry.generation == std::numeric_limits<uint64_t>::max()) {
             p.exhausted = true; saturate(p.rejected_counters); return {};
@@ -103,9 +111,7 @@ private:
                 throw std::invalid_argument("invalid metadata session limits");
             capacity = std::min(limits.sessions, (limits.bytes - sizeof(Pool)) / sizeof(Entry));
             if (!capacity) throw std::invalid_argument("metadata bytes cannot hold a Session");
-            entries = std::make_unique<Entry[]>(capacity);
-            for (size_t i = 0; i < capacity; ++i) entries[i].next = i + 1;
-            storage_bytes = sizeof(Pool) + capacity * sizeof(Entry);
+            storage_bytes = sizeof(Pool);
         }
         MetadataSessionLimits limits;
         std::mutex mutex;
