@@ -33,7 +33,6 @@ public:
             decode_endpoint.reset(); decode_round_endpoints.clear(); raw_prefix_keys.clear();
         }
         batch_resource.resize(batch_size);
-        raw_prefix_keys.resize(batch_size);
         cache_keys_initialized_ = false;
     }
 

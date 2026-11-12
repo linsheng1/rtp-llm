@@ -1,5 +1,7 @@
 #include <cuda_runtime_api.h>
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PayloadDispatchProof.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PublicationSettlement.h"
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -15,6 +17,36 @@
 
 namespace rtp_llm {
 namespace {
+TEST(DecodePublicationSessionTest, ConfirmedUnusedAttemptsBeyondCapacityDoNotExhaustSlots) {
+    const auto limits = remoteCacheMetadataSessionLimits();
+    ASSERT_TRUE(limits);
+    const auto before = kvcm::Session::usage(*limits);
+    ASSERT_LT(before.occupied, before.capacity);
+    for (size_t i = 0; i <= before.capacity; ++i) {
+        auto session = kvcm::Session::reserve(*limits);
+        ASSERT_TRUE(session);
+        session->startInvoked();
+        ASSERT_TRUE(session->observeStart(kvcm::MetadataCallDisposition::ACKNOWLEDGED, true, "unused"));
+        kvcm::PayloadDispatchProof proof;
+        proof.pending();
+        EXPECT_FALSE(proof.neverStarted());
+        proof.notStarted();
+        EXPECT_EQ(kvcm::failedPublicationAction(!proof.neverStarted(), false),
+                  kvcm::FailedPublicationAction::ABORT_UNCOMMITTED);
+        ASSERT_TRUE(session->finishInvoked(true));
+        session->observeFinish(kvcm::MetadataCallDisposition::ACKNOWLEDGED, true);
+        EXPECT_FALSE(static_cast<bool>(*session));
+    }
+    EXPECT_EQ(kvcm::Session::usage(*limits).occupied, before.occupied);
+    EXPECT_EQ(kvcm::Session::usage(*limits).unknown, before.unknown);
+    kvcm::PayloadDispatchProof possible;
+    possible.pending(); possible.started(); possible.notStarted();
+    EXPECT_FALSE(possible.neverStarted());
+    EXPECT_EQ(kvcm::failedPublicationAction(!possible.neverStarted(), false),
+              kvcm::FailedPublicationAction::RETAIN_SESSION);
+    EXPECT_EQ(kvcm::failedPublicationAction(false, true), kvcm::FailedPublicationAction::RETAIN_SESSION);
+}
+
 TEST(DecodePublicationConfigTest, MetadataLimitsUseValidatedPositiveSizeParser) {
     autil::EnvGuard slots("RTP_LLM_REMOTE_CACHE_SESSION_SLOTS", "2");
     autil::EnvGuard bytes("RTP_LLM_REMOTE_CACHE_SESSION_BYTES", "8192");
@@ -128,6 +160,92 @@ TEST(DecodePublicationConfigTest, DefaultBudgetTracksPhysicalPoolWithoutRounding
         ASSERT_TRUE(limits.has_value());
         EXPECT_EQ(limits->bytes, sample.second);
         EXPECT_EQ(limits->jobs, 4u);
+    }
+}
+
+
+TEST(FeatureOffNativeTest, PrefillRemoteRoundTripPreservesLocalPrefixPayloadAndReferences) {
+    for (const bool unset : {false, true}) {
+        SCOPED_TRACE(unset);
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+        if (unset) ASSERT_EQ(unsetenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH"), 0);
+        auto env = makeBackendEnvironment("feature_off_prefill_payload");
+        ScopedReferencedBlocks pages(env.device_pool, 3);
+        const auto ids = pages.get();
+        const auto pool = env.device_pool;
+        std::vector<size_t> refs;
+        for (size_t i = 0; i < ids.size(); ++i) {
+            refs.push_back(pool->refCount(ids[i]));
+            for (const auto& part : environmentBuffers(env, 0, "default", ids[i]))
+                ASSERT_EQ(cudaMemset(part.addr, 0x41 + i, part.size_bytes), cudaSuccess);
+        }
+        auto client = std::make_shared<MockClientWrapper>();
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        auto parallel = singleRankConfig();
+        parallel.role_type = RoleType::PREFILL;
+        auto backend = makeBackend(env, parallel, client);
+        ASSERT_TRUE(initSingleRank(*backend.backend, env));
+        kv_cache_manager::Locations locations{{{"tp0_Fdefault", "off://102"}},
+                                             {{"tp0_Fdefault", "off://103"}}};
+        EXPECT_CALL(*client, match(_, _, _, std::vector<int64_t>({101, 102, 103}), _, _))
+            .WillOnce(Return(std::make_pair(true, locations)));
+        auto request = makeStorageRequest(env, {101, 102, 103}, 1, ids);
+        auto hit = match(*backend.backend, request);
+        ASSERT_TRUE(hit.success);
+        ASSERT_EQ(hit.matched_blocks_num, 3u);
+        ASSERT_NE(hit.match_meta, nullptr);
+        EXPECT_CALL(*client, loadKvCachesForTag("default", kv_cache_manager::UriStrVec({"off://102", "off://103"}), _, _))
+            .WillOnce(Invoke([](const auto&, const auto&, auto& buffers, const auto&) {
+                if (buffers.size() != 2u) return false;
+                for (size_t i = 0; i < buffers.size(); ++i)
+                    for (const auto& iov : buffers[i].iovs)
+                        if (cudaMemset(iov.base, 0x52 + i, iov.size) != cudaSuccess) return false;
+                return true;
+            }));
+        ASSERT_TRUE(read(*backend.backend, request, std::move(hit.match_meta)));
+        ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+        for (size_t i = 0; i < ids.size(); ++i) {
+            EXPECT_EQ(pool->refCount(ids[i]), refs[i]);
+            EXPECT_FALSE(pool->isFrozen(ids[i]));
+            for (const auto& part : environmentBuffers(env, 0, "default", ids[i])) {
+                std::vector<unsigned char> bytes(part.size_bytes);
+                ASSERT_EQ(cudaMemcpy(bytes.data(), part.addr, bytes.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+                const auto expected = i == 0 ? 0x41 : 0x51 + i;
+                EXPECT_TRUE(std::all_of(bytes.begin(), bytes.end(), [&](auto value) { return value == expected; }));
+            }
+        }
+        kv_cache_manager::WriteLocation allocation;
+        allocation.write_session_id = "feature-off-acknowledged";
+        allocation.block_mask = kv_cache_manager::BlockMaskOffset{0};
+        allocation.locations = locations;
+        EXPECT_CALL(*client, getWriteLocation(_, _, std::vector<int64_t>({102, 103}), _, _, _, 0))
+            .WillOnce(Return(std::make_pair(true, allocation)));
+        EXPECT_CALL(*client, saveKvCachesForTag("default", kv_cache_manager::UriStrVec({"off://102", "off://103"}), _, _))
+            .WillOnce(Invoke([](const auto&, const auto& uris, const auto& buffers, const auto&) {
+                if (buffers.size() != 2u) return std::make_pair(false, uris);
+                for (size_t i = 0; i < buffers.size(); ++i)
+                    for (const auto& iov : buffers[i].iovs) {
+                        std::vector<unsigned char> bytes(iov.size);
+                        if (cudaMemcpy(bytes.data(), iov.base, bytes.size(), cudaMemcpyDeviceToHost) != cudaSuccess)
+                            return std::make_pair(false, uris);
+                        EXPECT_TRUE(std::all_of(bytes.begin(), bytes.end(), [&](auto value) { return value == 0x52 + i; }));
+                    }
+                return std::make_pair(true, uris);
+            }));
+        EXPECT_CALL(*client, finishWrite(_, _, "feature-off-acknowledged",
+                    ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{2}}), locations))
+            .WillOnce(Return(true));
+        EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
+        auto task = backend.backend->prepareWrite(makeStorageRequest(env, {102, 103}, 0, {ids[1], ids[2]}));
+        ASSERT_TRUE(static_cast<bool>(task));
+        ASSERT_TRUE(backend.backend->write(std::move(task)));
+        ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+        backend.backend->shutdown();
+        for (size_t i = 0; i < ids.size(); ++i) {
+            EXPECT_EQ(pool->refCount(ids[i]), refs[i]);
+            EXPECT_FALSE(pool->isFrozen(ids[i]));
+        }
     }
 }
 
@@ -982,6 +1100,48 @@ protected:
         }
     };
 };
+
+TEST_P(EosGpuCompletionTest, DisabledAtInitializationDoesNotPublishPinOrChangeNativePages) {
+    for (const bool unset : {false, true}) {
+        SCOPED_TRACE(unset);
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+        if (unset) ASSERT_EQ(unsetenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH"), 0);
+        Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
+        std::map<std::string, std::vector<size_t>> refs;
+        for (const auto& tag : {std::string("full"), std::string("state")}) {
+            const auto& blocks = tag == "full" ? s.full : s.state;
+            for (const auto block : blocks) refs[tag].push_back(s.env.pools_by_tag.at(tag)->refCount(block));
+        }
+        ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end(), false));
+        ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end(), true));
+        ASSERT_TRUE(waitForBackendOperationsForTest(*s.backend));
+        EXPECT_EQ(s.starts, 0);
+        EXPECT_EQ(s.saves, 0);
+        EXPECT_EQ(s.finishes, 0);
+        EXPECT_EQ(s.aborts, 0);
+        EXPECT_FALSE(s.resource.decodeCompletionSubmitted());
+        EXPECT_FALSE(s.resource.decode_endpoint);
+        EXPECT_TRUE(s.resource.decode_round_endpoints.empty());
+        for (const auto& tag : {std::string("full"), std::string("state")}) {
+            const auto& blocks = tag == "full" ? s.full : s.state;
+            const auto pool = s.env.pools_by_tag.at(tag);
+            for (size_t i = 0; i < blocks.size(); ++i) {
+                EXPECT_EQ(pool->refCount(blocks[i]), refs[tag][i]);
+                EXPECT_FALSE(pool->isFrozen(blocks[i]));
+                for (const auto& part : environmentBuffers(s.env, tag == "full" ? 0 : 1, tag, blocks[i])) {
+                    std::vector<unsigned char> bytes(part.size_bytes);
+                    ASSERT_EQ(cudaMemcpy(bytes.data(), part.addr, bytes.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+                    const auto expected = tag == "full" ? i + 1 : 100 + i;
+                    EXPECT_TRUE(std::all_of(bytes.begin(), bytes.end(), [&](auto value) { return value == expected; }));
+                }
+            }
+        }
+        s.dropRequestRefs();
+        for (const auto block : s.full) EXPECT_FALSE(s.env.pools_by_tag.at("full")->isAllocated(block));
+        for (const auto block : s.state) EXPECT_FALSE(s.env.pools_by_tag.at("state")->isAllocated(block));
+    }
+}
+
 TEST_P(EosGpuCompletionTest, RuntimeDisableSkipsEosBeforePinsAndAllowsLaterPublication) {
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
     const auto pool = s.env.pools_by_tag.at("full");

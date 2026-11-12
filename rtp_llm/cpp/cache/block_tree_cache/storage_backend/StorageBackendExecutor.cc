@@ -11,7 +11,8 @@ namespace {
 class DefaultStorageBackendExecutor final: public StorageBackendExecutor {
 public:
     DefaultStorageBackendExecutor(size_t thread_count, size_t queue_size):
-        pool_(std::make_shared<BlockTreeTaskPool>(thread_count, queue_size, "remote_cache", queue_size ? thread_count : 0, queue_size)) {}
+        pool_(std::make_shared<BlockTreeTaskPool>(thread_count, queue_size, "remote_cache", queue_size ? thread_count : 0, queue_size)),
+        has_completion_reservations_(queue_size != 0) {}
 
     ~DefaultStorageBackendExecutor() override {
         shutdown();
@@ -35,7 +36,7 @@ public:
         return pool_->submitCompletion(std::move(task));
     }
 
-    bool hasCompletionReservations() const noexcept override { return pool_->completionSnapshot().capacity != 0; }
+    bool hasCompletionReservations() const noexcept override { return has_completion_reservations_; }
     std::shared_ptr<BlockTreeTaskPool::CompletionTicket>
     reserveCompletion(Task task, BlockTreeTaskClass task_class) override {
         return pool_->reserveCompletion(std::move(task), task_class);
@@ -61,6 +62,7 @@ public:
 
 private:
     std::shared_ptr<BlockTreeTaskPool> pool_;
+    const bool has_completion_reservations_; // Immutable capability; reserveCompletion still checks admission.
     std::mutex        shutdown_mutex_;
 };
 

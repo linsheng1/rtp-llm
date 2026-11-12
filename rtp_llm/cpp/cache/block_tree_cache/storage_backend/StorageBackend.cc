@@ -82,21 +82,26 @@ template<typename Result, typename Settle>
 auto makeIoCompletion(std::shared_ptr<StorageBackendExecutor> executor,
                       std::shared_ptr<StorageTaskState> state, Settle settle,
                       BlockTreeTaskClass task_class) {
-    auto continuation = std::make_shared<Settle>(std::move(settle));
-    auto retained_result = std::make_shared<Result>();
+    struct Continuation {
+        Settle settle;
+        Result result{};
+        explicit Continuation(Settle&& value): settle(std::move(value)) {}
+    };
+    // One pre-I/O allocation holds both the settlement and its terminal result.
+    auto continuation = std::make_shared<Continuation>(std::move(settle));
     std::shared_ptr<BlockTreeTaskPool::CompletionTicket> reservation;
     if (executor->hasCompletionReservations()) {
-        reservation = executor->reserveCompletion([continuation, retained_result]() mutable {
-            (*continuation)(std::move(*retained_result), true);
+        reservation = executor->reserveCompletion([continuation]() mutable {
+            continuation->settle(std::move(continuation->result), true);
         }, task_class);
         if (!reservation) throw StorageOperationBufferSafeFailure("storage business completion capacity rejected before I/O");
     }
     return [executor = std::move(executor), state = std::move(state), continuation,
-            retained_result, reservation = std::move(reservation)](Result result, bool asynchronous) mutable {
+            reservation = std::move(reservation)](Result result, bool asynchronous) mutable {
         if (state->completion_started.exchange(true))
             return;
         if (asynchronous && reservation) {
-            *retained_result = std::move(result);
+            continuation->result = std::move(result);
             // This accepted obligation cannot be rejected by stopAdmission or
             // a deque allocation at terminal CQ time. Never settle SDK/metadata
             // business on a notifying CQ/driver lane.
@@ -108,12 +113,12 @@ auto makeIoCompletion(std::shared_ptr<StorageBackendExecutor> executor,
         if (asynchronous) {
             try {
                 if (executor->submitCompletion([continuation, result]() mutable {
-                        (*continuation)(std::move(result), true);
+                        continuation->settle(std::move(result), true);
                     }))
                     return;
             } catch (...) {}
         }
-        (*continuation)(std::move(result), !asynchronous);
+        continuation->settle(std::move(result), !asynchronous);
     };
 }
 
