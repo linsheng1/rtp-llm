@@ -904,8 +904,9 @@ public:
         }
         const bool defer = static_cast<bool>(done);
         auto async_write = defer ? std::make_shared<WritePublication>() : nullptr;
-        WritePublication local;
-        auto&      publication = defer ? *async_write : local;
+        std::optional<WritePublication> local;
+        if (!defer) local.emplace();
+        auto&      publication = defer ? *async_write : *local;
         auto&      collector   = publication.collector;
         bool       sdk_failed  = false;
         const auto start       = Clock::now();
@@ -1436,7 +1437,8 @@ public:
     }
 
     bool executePayload(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response,
-                        const TransferTask& task, bool* source_may_be_touched = nullptr) {
+                        const TransferTask& task, bool* source_may_be_touched = nullptr,
+                        kvcm::PayloadDispatchProof* proof = nullptr) {
         response.set_sdk_failed(false);
         response.set_payload_buffer_safe(true);
         if (request.timeout_ms() < 0 || task.expired()) {
@@ -1444,7 +1446,7 @@ public:
             return false;
         }
         if (decode_publication_enabled_) {
-            return executeProtectedPayload(request, response, task, source_may_be_touched);
+            return executeProtectedPayload(request, response, task, source_may_be_touched, proof);
         }
         const std::vector<std::string>    tags(request.group_tags().begin(), request.group_tags().end());
         const std::vector<int32_t>        blocks(request.block_ids().begin(), request.block_ids().end());
@@ -1465,7 +1467,7 @@ public:
             if (source_may_be_touched) *source_may_be_touched = unknown;
         });
         const auto result = executeTagTransfers(request.op(), tags, blocks, uris, buffers, response,
-                                                unknown, nullptr, task, &request);
+                                                unknown, nullptr, task, &request, proof);
         response.set_transfer_status(result == TransferResult::SUCCESS ? REMOTE_TRANSFER_STATUS_SUCCESS :
                                      result == TransferResult::TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
                                                                          REMOTE_TRANSFER_STATUS_FAILED);
@@ -1473,7 +1475,8 @@ public:
     }
 
     bool executeProtectedPayload(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response,
-                                 const TransferTask& task, bool* source_may_be_touched) {
+                                 const TransferTask& task, bool* source_may_be_touched,
+                                 kvcm::PayloadDispatchProof* proof = nullptr) {
         // Preflight rejection cannot have submitted a payload. The SDK scope
         // below replaces this proof before any potentially asynchronous I/O.
         response.set_payload_buffer_safe(true);
@@ -1517,7 +1520,7 @@ public:
         });
         response.set_payload_buffer_safe(false);
         const auto result = executeTagTransfers(request.op(), operation->tags, operation->blocks,
-            operation->uris, operation->buffers, response, unknown, nullptr, task, &request);
+            operation->uris, operation->buffers, response, unknown, nullptr, task, &request, proof);
         response.set_transfer_status(result == TransferResult::SUCCESS ? REMOTE_TRANSFER_STATUS_SUCCESS :
                                      result == TransferResult::TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT :
                                                                          REMOTE_TRANSFER_STATUS_FAILED);
@@ -2038,7 +2041,8 @@ private:
                                          bool& source_may_be_touched,
                                          bool* transfer_attempted,
                                          const TransferTask& task,
-                                         const RemoteOperationRequestPB* request = nullptr) {
+                                         const RemoteOperationRequestPB* request = nullptr,
+                                         kvcm::PayloadDispatchProof* proof = nullptr) {
         const auto                           trace_info = makeTransferTraceInfo(blocks, request);
         auto completion = kvcm::ClientWrapper::TransferCompletion::NOT_SUBMITTED;
         RtpLLMRemoteCacheSDKMetricsCollector collector;
@@ -2064,6 +2068,7 @@ private:
         if (task.expired()) {
             return TransferResult::TIMEOUT;
         }
+        if (proof) proof->started(); // Before the SDK wrapper can submit, including throw/inline completion.
         if (operation == REMOTE_OPERATION_READ) {
             const auto ec = client_wrapper_->loadKvCachesForTagWithStatus(
                 client_tag, uris, buffers, trace_info, &completion,
@@ -2102,7 +2107,8 @@ private:
                                        bool& source_may_be_touched,
                                        bool* transfer_attempted,
                                        const TransferTask& task,
-                                       const RemoteOperationRequestPB* request = nullptr) {
+                                       const RemoteOperationRequestPB* request = nullptr,
+                                       kvcm::PayloadDispatchProof* proof = nullptr) {
         if (operation != REMOTE_OPERATION_READ && operation != REMOTE_OPERATION_WRITE) {
             RTP_LLM_LOG_WARNING("KVCM transfer has invalid operation [%d]", operation);
             return TransferResult::FAILED;
@@ -2113,7 +2119,7 @@ private:
             // request unchanged; the SDK selects normal or gather/scatter mode.
             const auto result =
                 executeClientTransfer(operation, registration_tags_.front(), blocks, uris, buffers, actual_uris,
-                                      response, source_may_be_touched, transfer_attempted, task, request);
+                                      response, source_may_be_touched, transfer_attempted, task, request, proof);
             if (result != TransferResult::SUCCESS) {
                 return result;
             }
@@ -2142,7 +2148,7 @@ private:
                 }
                 const auto result =
                     executeClientTransfer(operation, tag, tag_blocks, tag_uris, tag_buffers, tag_actual_uris,
-                                          response, source_may_be_touched, transfer_attempted, task);
+                                          response, source_may_be_touched, transfer_attempted, task, nullptr, proof);
                 if (result != TransferResult::SUCCESS) {
                     return result;
                 }
@@ -2313,10 +2319,9 @@ private:
             setCudaDevice();
             if (!operation->tags.empty()) {
                 result->markMayTouch(peer);
-                write->proof->started();
                 const auto status = executeTagTransfers(REMOTE_OPERATION_WRITE, operation->tags, operation->blocks,
                     operation->uris, operation->buffers, response, touched, nullptr, write->task,
-                    &write->requests[peer].remote_request());
+                    &write->requests[peer].remote_request(), write->proof.get());
                 response.set_transfer_status(status == TransferResult::SUCCESS ? REMOTE_TRANSFER_STATUS_SUCCESS :
                     status == TransferResult::TIMEOUT ? REMOTE_TRANSFER_STATUS_TIMEOUT : REMOTE_TRANSFER_STATUS_FAILED);
             } else response.set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
@@ -2425,11 +2430,10 @@ private:
             dispatchProjectedAsync(requests, request, source_may_be_touched, std::move(prepare_completion), std::move(proof));
             return;
         }
-        if (proof) proof->started(); // Conservative pre-handoff marker for the existing P path.
         if (broadcast_manager_) {
-            auto result = dispatchRemoteRequests(requests, request, source_may_be_touched);
-            onPayloadDone(result, prepare_completion([this, result](bool& touched, bool& sdk_failed) {
-                return collectResponses(result, touched, sdk_failed);
+            auto result = dispatchRemoteRequests(requests, request, source_may_be_touched, proof.get());
+            onPayloadDone(result, prepare_completion([this, result, proof](bool& touched, bool& sdk_failed) {
+                return collectResponses(result, touched, sdk_failed, proof.get());
             }));
             return;
         }
@@ -2453,25 +2457,46 @@ private:
             return std::move(local->responses);
         });
         // complete owns the StorageRequest and its pins through settlement.
-        auto run = [this, requests = std::move(requests), &request, local, complete]() mutable {
+        auto run = [this, requests = std::move(requests), &request, local, complete, proof]() mutable {
             try {
-                local->responses = dispatchRequests(requests, request, local->touched, local->sdk_failed);
+                local->responses = dispatchRequests(requests, request, local->touched, local->sdk_failed, proof.get());
             } catch (...) {
+                if (proof) proof->notStarted(); // Never downgrades a possibly started transfer.
                 local->error = std::current_exception();
             }
             complete();
         };
-        auto expire = [local, error = buffer_safe_failure_, complete = std::move(complete)]() mutable {
+        auto expire = [local, proof, error = buffer_safe_failure_, complete = std::move(complete)]() mutable {
+            if (proof) proof->notStarted();
             local->error = error;  // Expired in the queue, before any buffer access.
             complete();
         };
-        if (!local_payload_pool_->submit(task_class, std::move(run), deadline, std::move(expire)))
+        if (proof) proof->pending(); // Must precede submit: an expired task can complete inline.
+        bool accepted = false;
+        try {
+            accepted = local_payload_pool_->submit(task_class, std::move(run), deadline, std::move(expire));
+        } catch (...) {
+            // This concrete pool has no throwing work after enqueue; failed insertion did not hand off.
+            if (proof) proof->notStarted();
+            throw;
+        }
+        if (!accepted) {
+            if (proof) proof->notStarted();
             throw StorageOperationBufferSafeFailure("KVCM local payload queue rejected transfer");
+        }
     }
 
     std::shared_ptr<PayloadResult> dispatchRemoteRequests(std::vector<FunctionRequestPB>& requests,
                                                           const StorageRequest&           storage_request,
-                                                          bool&                           source_may_be_touched) {
+                                                          bool&                           source_may_be_touched,
+                                                          kvcm::PayloadDispatchProof* proof = nullptr) {
+        block_tree_cache_detail::ScopeRollback submission_closed([&] {
+            if (proof) {
+                proof->notStarted(); // Only succeeds if no rank reached its RPC handoff.
+                if (proof->neverStarted()) source_may_be_touched = false;
+            }
+        });
+        if (proof) proof->pending();
         const int timeout_ms = remainingTimeout(storage_request, "before payload dispatch");
         for (auto& request : requests) {
             request.mutable_remote_request()->set_timeout_ms(timeout_ms);
@@ -2487,6 +2512,7 @@ private:
                     throw BroadcastRpcNotStarted("KVCM task expired before rank submission");
                 }
                 context->set_deadline(std::chrono::system_clock::now() + *remaining);
+                if (proof) proof->started(); // Sticky if any rank may have handed off.
                 return stub->AsyncExecuteFunction(context.get(), request, queue);
             };
             source_may_be_touched = true;
@@ -2500,7 +2526,12 @@ private:
     }
 
     std::vector<FunctionResponsePB> collectResponses(const std::shared_ptr<PayloadResult>& result,
-                                                     bool& source_may_be_touched, bool& sdk_failed) {
+                                                     bool& source_may_be_touched, bool& sdk_failed,
+                                                     kvcm::PayloadDispatchProof* proof = nullptr) {
+        if (proof && proof->neverStarted()) {
+            source_may_be_touched = false;
+            std::rethrow_exception(buffer_safe_failure_);
+        }
         auto       responses = result->responses();
         const bool success   = result->success();
         for (size_t rank = 0; rank < responses.size(); ++rank) {
@@ -2556,11 +2587,10 @@ private:
                                                      const StorageRequest&           storage_request,
                                                      bool&                           source_may_be_touched,
                                                      bool&                           sdk_failed, kvcm::PayloadDispatchProof* proof = nullptr) {
-        if (proof) proof->started();
         if (broadcast_manager_) {
-            auto result = dispatchRemoteRequests(requests, storage_request, source_may_be_touched);
+            auto result = dispatchRemoteRequests(requests, storage_request, source_may_be_touched, proof);
             (void)result->waitDone(/*timeout_ms=*/0, /*fatal_on_error=*/false);
-            return collectResponses(result, source_may_be_touched, sdk_failed);
+            return collectResponses(result, source_may_be_touched, sdk_failed, proof);
         }
         const int timeout_ms = remainingTimeout(storage_request, "before payload dispatch");
         RTP_LLM_CHECK_WITH_INFO(
@@ -2573,7 +2603,7 @@ private:
                 sdk_failed = sdk_failed || local_response.sdk_failed();
             });
             executePayload(requests.front().remote_request(), local_response,
-                           *storage_request.transfer_task, &source_may_be_touched);
+                           *storage_request.transfer_task, &source_may_be_touched, proof);
         }
         return validateResponses(std::move(responses), 1, source_may_be_touched);
     }

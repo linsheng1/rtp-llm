@@ -83,9 +83,9 @@ bool BlockTreeTaskPool::submit(BlockTreeTaskClass               task_class,
     auto& queue = task_class == BlockTreeTaskClass::LOAD ? load_queue_ : background_queue_;
     queue.push_back(QueuedTask{std::move(task), std::move(on_timeout), std::move(deadline)});
     taskStarted();
-    // Completion-only workers share this CV but cannot consume normal work.
-    // Wake the business workers as well; notify_one could strand this task.
-    queue_cv_.notify_all();
+    // A completion-only worker cannot consume normal work.
+    if (completion_threads_) queue_cv_.notify_all();
+    else queue_cv_.notify_one();
     return true;
 }
 

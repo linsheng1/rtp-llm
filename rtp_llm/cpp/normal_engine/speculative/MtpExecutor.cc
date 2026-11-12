@@ -1792,7 +1792,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& schedul
     GptModelInputs  model_input;
     GptModelOutputs model_output;
     GptModelOutputs draft_prefill_model_output;
-    GptModelInputs publication_target;
+    std::optional<GptModelInputs> publication_target;
 
     SamplerOutput                         draft_sampler_output;
     speculative::SpeculativeSamplerOutput speculative_sampler_output;
@@ -2073,10 +2073,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& schedul
                 model_input.combo_tokens.numel(),
                 model_input.is_packed_target_verify,
                 model_input.is_fake_stream);
-            if (remoteCacheDecodePublicationEnabled()) publication_target = model_input;
+            if (publication_frame) publication_target.emplace(model_input);
             model_output = runTargetVerifyForward(model_input, stream_groups);
         } else {
-            if (remoteCacheDecodePublicationEnabled()) publication_target = model_input;
+            if (publication_frame) publication_target.emplace(model_input);
             model_output = runTargetVerifyForward(model_input, stream_groups);
         }
         maybeOverrideLastHiddenWithMtpBuffer(model_output, *model_, model_input.combo_tokens.numel());
@@ -2289,7 +2289,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& schedul
         // round's proposal is produced at the next round head, from this
         // freshly committed ring.
         draft_prefill_model_output = runDraftPrefillForward(model_input);
-        retainDecodePublicationPages(stream_groups, publication_target, model_input, speculative_sampler_output);
+        if (publication_target)
+            retainDecodePublicationPages(stream_groups, *publication_target, model_input, speculative_sampler_output);
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 

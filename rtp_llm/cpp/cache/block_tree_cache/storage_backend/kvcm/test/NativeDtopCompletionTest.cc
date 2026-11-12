@@ -1,5 +1,7 @@
 #include <cuda_runtime_api.h>
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PayloadDispatchProof.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PublicationSettlement.h"
 #include <algorithm>
 #include <atomic>
 #include <condition_variable>
@@ -15,6 +17,36 @@
 
 namespace rtp_llm {
 namespace {
+TEST(DecodePublicationSessionTest, ConfirmedUnusedAttemptsBeyondCapacityDoNotExhaustSlots) {
+    const auto limits = remoteCacheMetadataSessionLimits();
+    ASSERT_TRUE(limits);
+    const auto before = kvcm::Session::usage(*limits);
+    ASSERT_LT(before.occupied, before.capacity);
+    for (size_t i = 0; i <= before.capacity; ++i) {
+        auto session = kvcm::Session::reserve(*limits);
+        ASSERT_TRUE(session);
+        session->startInvoked();
+        ASSERT_TRUE(session->observeStart(kvcm::MetadataCallDisposition::ACKNOWLEDGED, true, "unused"));
+        kvcm::PayloadDispatchProof proof;
+        proof.pending();
+        EXPECT_FALSE(proof.neverStarted());
+        proof.notStarted();
+        EXPECT_EQ(kvcm::failedPublicationAction(!proof.neverStarted(), false),
+                  kvcm::FailedPublicationAction::ABORT_UNCOMMITTED);
+        ASSERT_TRUE(session->finishInvoked(true));
+        session->observeFinish(kvcm::MetadataCallDisposition::ACKNOWLEDGED, true);
+        EXPECT_FALSE(static_cast<bool>(*session));
+    }
+    EXPECT_EQ(kvcm::Session::usage(*limits).occupied, before.occupied);
+    EXPECT_EQ(kvcm::Session::usage(*limits).unknown, before.unknown);
+    kvcm::PayloadDispatchProof possible;
+    possible.pending(); possible.started(); possible.notStarted();
+    EXPECT_FALSE(possible.neverStarted());
+    EXPECT_EQ(kvcm::failedPublicationAction(!possible.neverStarted(), false),
+              kvcm::FailedPublicationAction::RETAIN_SESSION);
+    EXPECT_EQ(kvcm::failedPublicationAction(false, true), kvcm::FailedPublicationAction::RETAIN_SESSION);
+}
+
 TEST(DecodePublicationConfigTest, MetadataLimitsUseValidatedPositiveSizeParser) {
     autil::EnvGuard slots("RTP_LLM_REMOTE_CACHE_SESSION_SLOTS", "2");
     autil::EnvGuard bytes("RTP_LLM_REMOTE_CACHE_SESSION_BYTES", "8192");
