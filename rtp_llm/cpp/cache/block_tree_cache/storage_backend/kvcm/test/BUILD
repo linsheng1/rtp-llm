@@ -259,3 +259,20 @@ cc_test(
     linkopts = ["-pthread"],
     deps = ["//rtp_llm/cpp/utils:core_utils"],
 )
+
+# Do not link kvcm_storage_backend: this test includes its current .cc once.
+cc_test_wrapper(
+    name = "kvcm_submission_boundary_test",
+    testonly = True,
+    exec_properties = {"gpu": "L20_CU13"},
+    srcs = ["KVCMSubmissionBoundaryTest.cc", "KVCMMockTestBase.h", "MockKVCMClient.h"],
+    copts = ["-fno-access-control"] + copts(),
+    target_compatible_with = select({
+        "//:using_remote_kv_cache": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    deps = [d for d in kvcm_backend_test_deps if d != "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:kvcm_storage_backend"] + [
+        "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:submission_boundary_test_source",
+    ],
+    tags = ["L20_CU13", "exclusive-if-local"],
+)
