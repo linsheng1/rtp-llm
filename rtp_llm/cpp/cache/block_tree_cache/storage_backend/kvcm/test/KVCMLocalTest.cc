@@ -949,8 +949,10 @@ TEST(KVCMLocalTest, ConfirmedLocalRejectAndExpiryCloseSessionsWithoutUnknownRete
             config.kvcm_asyncwrapper_thread_num = 1;
             config.kvcm_asyncwrapper_queue_size = 1;
             config.kvcm_task_timeout_ms = 30000;
+            config.kvcm_instance_id_salt = "local-not-started-" + std::to_string(enabled) + "-" + std::to_string(expire_queued);
             auto parallel = singleRankConfig();
             parallel.role_type = RoleType::PREFILL;
+            parallel.prefill_cp_config.prefill_cp_size = 1;
             auto backend = makeBackend(environment, parallel, client, nullptr, nullptr, true, config);
             ASSERT_TRUE(initSingleRank(*backend.backend, environment));
             const auto limits = remoteCacheMetadataSessionLimits();
@@ -964,6 +966,8 @@ TEST(KVCMLocalTest, ConfirmedLocalRejectAndExpiryCloseSessionsWithoutUnknownRete
             auto second_started = queued_start.get_future();
             block_tree_cache_detail::ScopeRollback unblock([&] { release.set_value(); });
             std::atomic<int> starts{0}, saves{0}, closes{0}, commits{0};
+            std::mutex close_mutex;
+            std::condition_variable close_cv;
             EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
                 .WillRepeatedly(Invoke([&](const auto&, const auto&, const auto&, const auto&, const auto&, auto, auto) {
                     const auto n = ++starts;
@@ -986,7 +990,11 @@ TEST(KVCMLocalTest, ConfirmedLocalRejectAndExpiryCloseSessionsWithoutUnknownRete
                 .WillRepeatedly(Invoke([&](const auto&, const auto&, const auto& id, const auto& mask, const auto& locations) {
                     const auto offset = std::get<kv_cache_manager::BlockMaskOffset>(mask);
                     if (offset == 0) {
-                        ++closes;
+                        {
+                            std::lock_guard<std::mutex> lock(close_mutex);
+                            ++closes;
+                        }
+                        close_cv.notify_all();
                         EXPECT_TRUE(locations.empty());
                         EXPECT_NE(id, "local-1");
                     } else {
@@ -1024,11 +1032,19 @@ TEST(KVCMLocalTest, ConfirmedLocalRejectAndExpiryCloseSessionsWithoutUnknownRete
             const auto held_refs = environment.device_pool->refCount(environment.block_id);
             for (int i = 0; i < 3; ++i) {
                 ASSERT_TRUE(backend.backend->write(backend.backend->prepareWrite(makeStorageRequest(environment))));
-                std::unique_lock<std::mutex> lock(backend.backend->lifecycle_mutex_);
-                ASSERT_TRUE(backend.backend->lifecycle_cv_.wait_for(lock, std::chrono::seconds(5), [&] {
-                    return backend.backend->in_flight_ == held;
-                }));
-                lock.unlock();
+                {
+                    std::unique_lock<std::mutex> lock(close_mutex);
+                    ASSERT_TRUE(close_cv.wait_for(lock, std::chrono::seconds(5), [&] { return closes.load() == i + 1; }));
+                }
+                // Queue rejection settles on this sole business worker. Its barrier follows close ACK and pin release.
+                auto settled = std::make_shared<std::promise<void>>();
+                auto settled_barrier = settled->get_future();
+                ASSERT_TRUE(backend.backend->executor_->submit([settled] { settled->set_value(); }, BlockTreeTaskClass::BACKGROUND));
+                ASSERT_EQ(settled_barrier.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+                {
+                    std::lock_guard<std::mutex> lock(backend.backend->lifecycle_mutex_);
+                    EXPECT_EQ(backend.backend->in_flight_, held);
+                }
                 const auto usage = kvcm::Session::usage(*limits);
                 EXPECT_EQ(usage.occupied, usage_before.occupied + 2);
                 EXPECT_EQ(usage.unknown, usage_before.unknown);
@@ -1073,11 +1089,13 @@ TEST(KVCMLocalTest, BroadcastWithoutAnyRankSubmissionClosesUnusedSession) {
         auto parallel = singleRankConfig();
         parallel.tp_size = 2;
         parallel.role_type = RoleType::PREFILL;
+        parallel.prefill_cp_config.prefill_cp_size = 2;
         KVCacheConfig config;
         config.kvcm_model_sdk_config = R"([{"type":"pace"}])";
         // No init(), hence no RPC pool/CQ and no rank can be submitted.
         auto broadcast = std::make_shared<BroadcastManager>(std::vector<std::string>{"unused-0", "unused-1"});
         config.kvcm_server_address = "unused-test-address";
+        config.kvcm_instance_id_salt = "broadcast-not-submitted-" + std::to_string(enabled);
         RuntimeConfig runtime;
         runtime.model_name = "kvcm_test_model";
         BackendHandle backend(std::make_unique<MockQuiescentKVCMBackend>(environment.cache_config,
