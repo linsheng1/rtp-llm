@@ -30,7 +30,7 @@ public:
         if (batch_size != batch_resource.size()) {
             decode_completion_submitted_ = false;
             decode_completion_lifecycle_.reset();
-            decode_endpoint.reset(); decode_round_endpoints.clear(); raw_prefix_keys.clear();
+            decode_endpoint.reset(); decode_round_endpoints.clear();
         }
         batch_resource.resize(batch_size);
         cache_keys_initialized_ = false;
@@ -192,8 +192,6 @@ public:
     }
 
     void swap(BatchKVCacheResource& other) noexcept {
-        std::swap(cache_key_lookahead, other.cache_key_lookahead);
-        raw_prefix_keys.swap(other.raw_prefix_keys);
         decode_endpoint.swap(other.decode_endpoint);
         decode_round_endpoints.swap(other.decode_round_endpoints);
         std::swap(decode_completion_submitted_, other.decode_completion_submitted_);
@@ -263,8 +261,6 @@ public:
         cacheResource(batch_id).swapBlocks(group_tag, rhs, lhs);
     }
 
-    bool cache_key_lookahead{false};
-    std::vector<CacheKeysType> raw_prefix_keys;
     std::shared_ptr<const DecodeEndpoint> decode_endpoint;
     // Candidates belong only to the current verify packet, not token history.
     std::vector<std::shared_ptr<const DecodeEndpoint>> decode_round_endpoints;

@@ -838,7 +838,7 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
         // Queue a stream wait, then do pinned D2H on the worker stream while
         // the main thread continues to the next gather.
         if (sampler_event) {
-            if (remoteCacheDecodePublicationEnabled()) {
+            if (retirement->protect) {
                 try { sampler_event->synchronize(); retirement->writer_ready.store(true); }
                 catch (...) {
                     for (const auto& stream : worker_streams) stream->retainUnknownDecodePublication(stream);

@@ -67,7 +67,7 @@ void lazyStorageFailureLeavesQuotaFreeAndUnknownSurvivesReconfigure() {
     CHECK(S::usage(l).storage_bytes == Peer::bytes(2));
     const auto before_start = allocations.load();
     a->startInvoked(); CHECK(a->observeStart(D::ACKNOWLEDGED, true, "lost-ack"));
-    a->payloadMayHaveStarted(); CHECK(a->finishInvoked(false));
+    CHECK(a->finishInvoked(false));
     a->observeFinish(D::UNKNOWN, false); a.reset();
     S::configure(l);
     CHECK(allocations.load() == before_start);
@@ -112,9 +112,26 @@ void finishOnceAndLostUnusedAck() {
       CHECK(a->finishInvoked(true)); CHECK(!a->finishInvoked(false)); a->observeFinish(D::UNKNOWN, false);
       CHECK(Peer::record(*a).reason == S::Reason::UNUSED_CLOSE_UNKNOWN); }
     { auto b = S::reserve(l); b->startInvoked(); CHECK(b->observeStart(D::ACKNOWLEDGED, true, "write"));
-      b->payloadMayHaveStarted(); CHECK(b->finishInvoked(false)); b->observeFinish(D::UNKNOWN, false);
+      CHECK(b->finishInvoked(false)); b->observeFinish(D::UNKNOWN, false);
       CHECK(Peer::record(*b).reason == S::Reason::FINISH_UNKNOWN); }
     CHECK(S::usage(l).occupied == 2 && S::usage(l).unknown == 2);
+}
+void unsentFinishKeepsSlotUntilAckAndUnknownNeverReopens() {
+    const auto l = limits(1);
+    for (const bool unused : {false, true}) {
+        auto a = S::reserve(l); CHECK(a); a->startInvoked();
+        CHECK(a->observeStart(D::ACKNOWLEDGED, true, "same-session"));
+        CHECK(a->finishInvoked(unused)); a->observeFinish(D::NOT_SENT, false);
+        CHECK(Peer::record(*a).phase == S::Phase::OPEN);
+        CHECK(S::usage(l).occupied == 1 && S::usage(l).unknown == 0 && !S::reserve(l));
+        CHECK(a->finishInvoked(unused)); a->observeFinish(D::ACKNOWLEDGED, true);
+        CHECK(!*a && S::usage(l).occupied == 0);
+    }
+    auto a = S::reserve(l); a->startInvoked(); CHECK(a->observeStart(D::ACKNOWLEDGED, true, "unknown"));
+    CHECK(a->finishInvoked(true)); a->observeFinish(D::UNKNOWN, false);
+    a->observeFinish(D::NOT_SENT, false); a->observeFinish(D::ACKNOWLEDGED, true);
+    CHECK(Peer::record(*a).phase == S::Phase::UNKNOWN && !a->finishInvoked(true));
+    CHECK(S::usage(l).occupied == 1 && S::usage(l).unknown == 1 && !S::reserve(l));
 }
 void actualIdsDoNotCoalesceAndStaleCannotTouchNewSession() {
     const auto l = limits(2); auto a = S::reserve(l), b = S::reserve(l); CHECK(a && b);
@@ -133,7 +150,7 @@ void noAllocationAfterReservationAndNoSourceOwner() {
     const auto l = limits(2); S::configure(l); auto a = S::reserve(l); CHECK(a);
     auto source = std::make_shared<int>(1); const std::weak_ptr<int> weak = source;
     const auto before = allocations.load(); a->startInvoked(); CHECK(a->observeStart(D::ACKNOWLEDGED, true, "owned"));
-    a->payloadMayHaveStarted(); a->retain(S::Reason::PAYLOAD_UNPROVEN); CHECK(!a->finishInvoked(false));
+    a->retain(S::Reason::PAYLOAD_UNPROVEN); CHECK(!a->finishInvoked(false));
     CHECK(allocations.load() == before); a.reset(); source.reset(); CHECK(weak.expired());
     CHECK(S::usage(l).unknown == 1);
 }
@@ -150,12 +167,12 @@ int main() {
     // child process, just like the existing backend process regression tests.
     const std::vector<void(*)()> cases{limitsAndFrozenConfiguration, lazyStorageFailureLeavesQuotaFreeAndUnknownSurvivesReconfigure, moveAbandonAndQuota, noSendAndDuplicateStart,
         emptyAndErrorStartNeverAuthorizeFinish, exactAndOversizedId, finishOnceAndLostUnusedAck,
-        actualIdsDoNotCoalesceAndStaleCannotTouchNewSession, fixedBytesAndCounterExhaustion,
+        unsentFinishKeepsSlotUntilAckAndUnknownNeverReopens, actualIdsDoNotCoalesceAndStaleCannotTouchNewSession, fixedBytesAndCounterExhaustion,
         noAllocationAfterReservationAndNoSourceOwner, parallelSessions};
     for (auto run : cases) {
         const auto pid = fork(); CHECK(pid >= 0);
         if (!pid) { run(); _exit(0); }
         int status = 0; CHECK(waitpid(pid, &status, 0) == pid); CHECK(WIFEXITED(status) && WEXITSTATUS(status) == 0);
     }
-    std::puts("11 Session scenarios completed");
+    std::puts("12 Session scenarios completed");
 }

@@ -19,8 +19,8 @@ public:
     // reentrant capture, not a cross-thread lock. No I/O callback owns this state.
     // Admission is permanent even if that task later fails or becomes UNKNOWN.
     template<typename Submit>
-    Admission tryAdmit(Submit&& submit, Clock::time_point now = Clock::now()) const {
-        if (submitted_)
+    Admission tryAdmit(bool& submitted, Submit&& submit, Clock::time_point now = Clock::now()) const {
+        if (submitted)
             return Admission::ALREADY_ADMITTED;
         if (preparing_)
             return Admission::IN_PROGRESS;
@@ -30,16 +30,13 @@ public:
         preparing_ = true;
         try {
             const bool admitted = std::forward<Submit>(submit)();
-            submitted_ = admitted;
+            submitted = admitted;
             preparing_ = false;
             return admitted ? Admission::ADMITTED : Admission::DECLINED;
         } catch (...) {
             preparing_ = false;
             throw;
         }
-    }
-    bool submitted() const {
-        return submitted_;
     }
     size_t admissionAttempts() const {
         return admission_attempts_;
@@ -79,7 +76,6 @@ public:
         eos_at_.reset();
         prefill_computed_end_.reset();
         budget_skip_reported_ = false;
-        submitted_ = false;
         preparing_ = false;
         admission_attempts_ = 0;
         admission_deadline_.reset();
@@ -91,7 +87,6 @@ private:
     mutable bool                             budget_skip_reported_{false};
     // At most the primary update attempt and one release-time fallback.
     static constexpr size_t                  max_admission_attempts_{2};
-    mutable bool                             submitted_{false};
     mutable bool                             preparing_{false};
     mutable size_t                           admission_attempts_{0};
     mutable std::optional<Clock::time_point>  admission_deadline_;

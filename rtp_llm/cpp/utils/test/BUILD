@@ -49,6 +49,13 @@ cc_test(
 )
 
 cc_test(
+    name = "decode_publication_lifecycle_test",
+    srcs = ["DecodePublicationLifecycleTest.cc"],
+    copts = copts(),
+    deps = google_test_deps + ["//rtp_llm/cpp/utils:core_utils"],
+)
+
+cc_test(
     name = "remote_restore_lifecycle_test",
     srcs = ["RemoteRestoreLifecycleTest.cc"],
     copts = copts(),

@@ -39,9 +39,10 @@ bool configureDecodePublication(const CacheTopology&                            
     const auto& tags = cache_config_.groupTags();
     // Cache tags come from configure_v41_kv_cache; the L prefix belongs only
     // to remote location-spec names, not to the target/draft pool topology.
-    const bool dsv41 = std::find(tags.begin(), tags.end(), "csa_state") != tags.end()
+    const bool dsv41 = runtime_config_.model_name == "DeepSeekV41"
+        && std::find(tags.begin(), tags.end(), "csa_state") != tags.end()
         && std::find(tags.begin(), tags.end(), "swa_kv") != tags.end();
-    const bool supported_speculation = dsv41 && (sp_config_.type == SP_TYPE_MTP || sp_config_.type == SP_TYPE_DSPARK)
+    const bool supported_speculation = dsv41 && sp_config_.type == SP_TYPE_DSPARK
         && cache_config_.mtp_sub_configs.size() == 1 && cache_config_.mtp_sub_configs.front()
         && cache_config_.mtp_sub_configs.front()->layer_num > 0;
     if (!pace_backend_ || (!is_decode_role_ && !prefill) || target_prefill_cp_ < 1

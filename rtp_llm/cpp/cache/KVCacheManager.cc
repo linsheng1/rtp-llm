@@ -428,7 +428,6 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     // resetAndReturnOldResources(), so a batch reshape between attempts correctly forces a recompute
     // even though the surviving batch rows still hold keys. Only the attempt that actually
     // initialises the keys owns the metric.
-    malloc_info.batch_kv_cache_resource->cache_key_lookahead = config_.mtp_cache_lookahead;
     const bool keys_already_initialized = malloc_info.batch_kv_cache_resource->cacheKeysInitialized();
     bool       keys_initialized_now     = false;
     if (is_first_malloc) {
@@ -542,8 +541,7 @@ std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
     const torch::Tensor& physical_ids, const std::vector<std::string>& tags, size_t row, size_t end) const {
     // Decode owns the native pages locally; the existing D->P projection
     // performs the actual target-CP slicing at publication time.
-    static std::atomic<bool> capture_stopped{false};
-    if (capture_stopped.load() || !isAllocatorOwner() || !coordinator_manager_ || !end) return {};
+    if (decode_capture_stopped_.load() || !isAllocatorOwner() || !coordinator_manager_ || !end) return {};
     const auto unit = decodePublicationUnit();
     if (!unit || end % unit || physical_ids.dim() != 3 || physical_ids.is_cuda()
         || physical_ids.scalar_type() != torch::kInt32 || row >= static_cast<size_t>(physical_ids.size(1))
@@ -598,7 +596,7 @@ std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
         if (cudaDeviceSynchronize() != cudaSuccess) {
             // No release without last-use proof. Stop optional capture and
             // retain this preallocated owner; pool capacity bounds the hold.
-            capture_stopped.store(true);
+            decode_capture_stopped_.store(true);
             endpoint->unknown_owner = endpoint;
         }
 #endif

@@ -30,17 +30,6 @@ GroupBase makeResourceGroup(std::string tag, CacheGroupType type) {
 
 }  // namespace
 
-TEST(BatchKVCacheResourceTest, UnusedLookaheadDoesNotAllocateRowsOnBatchReset) {
-    BatchKVCacheResource resource;
-    ASSERT_FALSE(resource.cache_key_lookahead); // Ordinary Decode and DSpark.
-    for (const auto batch : {size_t{1}, size_t{4}, size_t{1}}) {
-        resource.resetBatchSize(batch);
-        EXPECT_EQ(resource.batchSize(), batch);
-        EXPECT_TRUE(resource.raw_prefix_keys.empty());
-        EXPECT_EQ(resource.raw_prefix_keys.capacity(), 0u);
-    }
-}
-
 TEST(GroupBlockIdsTest, CopyOwnsIdentityAndSharesHolders) {
     GroupBlockIds copy;
     {

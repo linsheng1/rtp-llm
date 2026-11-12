@@ -539,7 +539,7 @@ TEST(KVCMLocalTest, DsparkAdmitsNativeCacheTagsAndRejectsIncompleteDraftConfigur
     for (const auto role : {RoleType::PREFILL, RoleType::DECODE}) {
         // Native bounded-replay layout: target encoder STATE/SWA, plus an
         // independent non-reusable decoder SWA segment for all three draft layers.
-        for (int invalid = 0; invalid < 8; ++invalid) {
+        for (int invalid = 0; invalid < 10; ++invalid) {
             SCOPED_TRACE(::testing::PrintToString(std::make_tuple(static_cast<int>(role), invalid)));
             BackendEnvironment environment;
             auto& target = environment.cache_config;
@@ -582,7 +582,7 @@ TEST(KVCMLocalTest, DsparkAdmitsNativeCacheTagsAndRejectsIncompleteDraftConfigur
             if (invalid == 5) target.mtp_sub_configs.front().reset();
             if (invalid == 6) target.mtp_sub_configs.front()->layer_num = 0;
             SpeculativeExecutionConfig speculation;
-            speculation.type = invalid == 7 ? SP_TYPE_EAGLE : SP_TYPE_DSPARK;
+            speculation.type = invalid == 7 ? SP_TYPE_EAGLE : (invalid == 8 ? SP_TYPE_MTP : SP_TYPE_DSPARK);
             speculation.gen_num_per_cycle = 5; // Proposal width is not the draft layer/module count.
             auto client = std::make_shared<MockClientWrapper>();
             EXPECT_CALL(*client, initForPools(_, _, _, _)).Times(invalid == 0 ? 1 : 0).WillRepeatedly(Return(true));
@@ -596,7 +596,7 @@ TEST(KVCMLocalTest, DsparkAdmitsNativeCacheTagsAndRejectsIncompleteDraftConfigur
             parallel.role_type = role;
             parallel.prefill_cp_config.prefill_cp_size = 1;
             RuntimeConfig runtime;
-            runtime.model_name = "DeepSeekV41";
+            runtime.model_name = invalid == 9 ? "DeepSeekV4" : "DeepSeekV41";
             BackendHandle backend(std::make_unique<KVCMStorageBackend>(target, config, runtime, parallel,
                 speculation, nullptr, true, nullptr, client));
             EXPECT_EQ(initSingleRank(*backend.backend, environment), invalid == 0);
@@ -932,6 +932,93 @@ TEST(KVCMLocalTest, CommitAckFailureIsUnknownPublicationWithoutUnknownDma) {
         EXPECT_EQ(accounting->snapshot().jobs, 0u);
         std::lock_guard<std::mutex> lock(events_mutex);
         EXPECT_EQ(outcomes, std::vector<std::string>{"completion_unknown"});
+    }
+}
+
+TEST(KVCMLocalTest, FinishRetriesOnlyProvenUnsentWithinOriginalDeadline) {
+    using D = kvcm::MetadataCallDisposition;
+    for (const bool enabled : {false, true}) {
+        for (const bool unused : {false, true}) {
+            // Recover, stop on UNKNOWN, exhaust NOT_SENT, expire, recover from NOT_SENT throw.
+            for (int mode = 0; mode < 5; ++mode) {
+                SCOPED_TRACE(::testing::Message() << "enabled=" << enabled << " unused=" << unused << " mode=" << mode);
+                autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+                auto environment = makeBackendEnvironment("finish_not_sent");
+                auto client = std::make_shared<MockClientWrapper>();
+                EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+                EXPECT_CALL(*client, shutdown()).Times(1);
+                KVCacheConfig config;
+                config.kvcm_model_sdk_config = R"([{"type":"pace"}])";
+                config.kvcm_instance_id_salt = "finish-not-sent-" + std::to_string(enabled)
+                    + "-" + std::to_string(unused) + "-" + std::to_string(mode);
+                config.kvcm_task_timeout_ms = 30000;
+                auto parallel = singleRankConfig();
+                parallel.role_type = RoleType::PREFILL;
+                parallel.prefill_cp_config.prefill_cp_size = 1;
+                auto request = makeStorageRequest(environment);
+                request.transfer_task.emplace(std::vector<TransferDescriptor>{}, std::chrono::seconds(30));
+                const auto deadline = request.transfer_task->deadline();
+                const auto limits = remoteCacheMetadataSessionLimits();
+                ASSERT_TRUE(limits);
+                const auto before = kvcm::Session::usage(*limits);
+                const auto refs = environment.device_pool->refCount(environment.block_id);
+                std::atomic<int> finishes{0};
+                std::string first_trace;
+                KVCMStorageBackend* backend_ptr = nullptr;
+                EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
+                    .WillOnce(Invoke([&](const auto&, const auto&, const auto&, const auto&, const auto&, auto, auto) {
+                        kv_cache_manager::WriteLocation location;
+                        location.write_session_id = "finish-same-id";
+                        location.block_mask = kv_cache_manager::BlockMaskOffset{0};
+                        location.locations = {{{"tp0_Fdefault", "pace://allocated"}}};
+                        // Known pre-payload control rejection exercises closeUnusedWrite.
+                        if (unused) backend_ptr->setRemoteCacheEnabled(false);
+                        return std::make_pair(true, location);
+                    }));
+                EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(unused ? 0 : 1)
+                    .WillRepeatedly(Return(std::make_pair(true, kv_cache_manager::UriStrVec{"pace://actual"})));
+                EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).Times(0);
+                EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
+                client->finish_override = [&](const auto& id, const auto& trace, const auto& session,
+                                               const auto& mask, const auto& locations, D* disposition) {
+                    const auto attempt = ++finishes;
+                    EXPECT_TRUE(id.empty()); EXPECT_EQ(session, "finish-same-id");
+                    if (attempt == 1) first_trace = trace; else EXPECT_EQ(trace, first_trace);
+                    EXPECT_EQ(std::get<kv_cache_manager::BlockMaskOffset>(mask), unused ? 0u : 1u);
+                    if (unused) EXPECT_TRUE(locations.empty());
+                    else EXPECT_EQ(locations, (kv_cache_manager::Locations{{{"tp0_Fdefault", "pace://actual"}}}));
+                    *disposition = D::NOT_SENT;
+                    if (mode == 3) {
+                        std::promise<void> never;
+                        EXPECT_EQ(never.get_future().wait_until(deadline), std::future_status::timeout);
+                        return false;
+                    }
+                    if (mode == 4 && attempt == 1) throw std::runtime_error("proven before SDK");
+                    if (attempt == 1 || mode == 2) return false;
+                    *disposition = mode == 1 ? D::UNKNOWN : D::ACKNOWLEDGED;
+                    return mode != 1;
+                };
+                auto backend = makeBackend(environment, parallel, client, nullptr, nullptr, true, config);
+                backend_ptr = backend.backend.get();
+                ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+                block_tree_cache_detail::ScopeRollback drain([&] { backend.backend->shutdown(); });
+                ASSERT_TRUE(backend.backend->write(backend.backend->prepareWrite(request)));
+                // Deadline case is deliberately bounded by this request's original timeout.
+                {
+                    std::unique_lock<std::mutex> lock(backend.backend->lifecycle_mutex_);
+                    ASSERT_TRUE(backend.backend->lifecycle_cv_.wait_for(lock, std::chrono::seconds(40),
+                        [&] { return backend.backend->in_flight_ == 0; }));
+                }
+                drain.run(); // No callback still owns the captured test state below.
+                EXPECT_EQ(finishes.load(), mode == 2 ? 3 : (mode == 3 ? 1 : 2));
+                const bool unresolved = mode == 1 || mode == 2 || mode == 3;
+                const auto after = kvcm::Session::usage(*limits);
+                EXPECT_EQ(after.occupied, before.occupied + (unresolved ? 1u : 0u));
+                EXPECT_EQ(after.unknown, before.unknown + (unresolved ? 1u : 0u));
+                EXPECT_EQ(environment.device_pool->refCount(environment.block_id), refs);
+                EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+            }
+        }
     }
 }
 

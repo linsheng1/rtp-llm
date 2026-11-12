@@ -436,7 +436,6 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
             config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num));
         }
         if (model_config.model_type == "deepseek_v41") {
-            config.mtp_cache_lookahead = sp_config->type == SP_TYPE_MTP;
             // Same model/cache identity for P and D, independent of publication
             // switches. Separate actual draft bytes from target-only caches.
             const int32_t identity[] = {0x44535634, 1, static_cast<int32_t>(sp_config->type),

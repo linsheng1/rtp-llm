@@ -95,7 +95,7 @@ void queueRejectThrowAndEmptyAreTerminalWithoutLaunch() {
     for (int mode = 0; mode < 3; ++mode) {
         int done = 0, launched = 0;
         auto parent = Fanout::createPayloadWindow(mode == 2 ? 0 : 3, 2, future(),
-            [&](size_t, const auto&) -> Fanout::LaunchResult {
+            [&](size_t, const auto&) -> bool {
                 ++launched; if (mode == 1) throw std::bad_alloc(); return false;
             }, [] {}, [&] { ++done; });
         parent->start();
@@ -129,23 +129,25 @@ void parallelDuplicateCallbacksSettleEachChildOnce() {
     CHECK(done == 1 && parent->snapshot().remaining == 0);
 }
 
-void workerOneDefersWithoutHoldingAnotherResourceAndPrebuiltChildrenRemainAlive() {
-    int done = 0, worker = 0, launched = 0;
+void resourceRejectionDrainsAcceptedChildWithoutRetry() {
+    int done = 0, launched = 0;
     std::shared_ptr<Fanout> accepted;
-    auto parent = Fanout::createPayloadWindow(3, 2, future(), [&](size_t child, const auto& self) -> Fanout::LaunchResult {
-        if (worker) return Fanout::LaunchResult::deferred();
-        ++worker; ++launched; accepted = self;
+    auto parent = Fanout::createPayloadWindow(3, 2, future(), [&](size_t child, const auto& self) {
+        ++launched;
+        if (child != 0) return false;
+        accepted = self;
         CHECK(self->tryStart(child)); CHECK(self->markMayTouch(child)); return true;
     }, [] {}, [&] { ++done; });
+    std::weak_ptr<Fanout> weak = parent;
     parent->start();
-    CHECK(launched == 1 && worker == 1 && done == 0);
-    CHECK(parent->snapshot().active == 1);
-    for (size_t child = 0; child < 3; ++child) {
-        --worker; // Actual safe Operation.release before notifying the pump.
-        accepted->complete(child, Fanout::Outcome::success());
-    }
-    accepted.reset(); CHECK(done == 1 && worker == 0 && launched == 3);
-    CHECK(parent->snapshot().remaining == 0);
+    CHECK(launched == 2 && done == 0 && parent->snapshot().active == 1);
+    CHECK(parent->snapshot().submissions_closed && parent->snapshot().remaining == 1);
+    CHECK(parent->outcome(1).proof == Fanout::Proof::NOT_STARTED);
+    CHECK(parent->outcome(2).proof == Fanout::Proof::NOT_STARTED);
+    parent.reset(); CHECK(!weak.expired());
+    CHECK(accepted->complete(0, Fanout::Outcome::success()));
+    CHECK(!accepted->complete(0, Fanout::Outcome::unknown()));
+    CHECK(done == 1 && launched == 2); accepted.reset(); CHECK(weak.expired());
 }
 
 void unknownKeepsAcceptedSiblingAndCancelsEveryUnsubmittedSlot() {
@@ -192,10 +194,10 @@ void originalWaitAndCallbacksObserveFinalizedResponses() {
     parent->onDone([&] { CHECK(normalized); ++notified; }); CHECK(notified == 3);
 }
 
-void cancellationDuringDeferredLaunchCannotReopenTail() {
+void cancellationDuringRejectedLaunchCannotReopenTail() {
     int launches = 0, done = 0;
-    auto parent = Fanout::createPayloadWindow(3, 1, future(), [&](size_t, const auto& self) -> Fanout::LaunchResult {
-        ++launches; self->cancel(); return Fanout::LaunchResult::deferred();
+    auto parent = Fanout::createPayloadWindow(3, 1, future(), [&](size_t, const auto& self) -> bool {
+        ++launches; self->cancel(); return false;
     }, [] {}, [&] { ++done; });
     parent->start();
     CHECK(done == 1 && launches == 1 && parent->snapshot().remaining == 0);
@@ -214,10 +216,10 @@ int main() {
     queueRejectThrowAndEmptyAreTerminalWithoutLaunch();
     absoluteExpiredDeadlineNeverStartsAndLateSafeProofStaysSafe();
     parallelDuplicateCallbacksSettleEachChildOnce();
-    workerOneDefersWithoutHoldingAnotherResourceAndPrebuiltChildrenRemainAlive();
+    resourceRejectionDrainsAcceptedChildWithoutRetry();
     unknownKeepsAcceptedSiblingAndCancelsEveryUnsubmittedSlot();
     laterDriverRejectionWaitsExistingChildAndReportsControlFailure();
     originalWaitAndCallbacksObserveFinalizedResponses();
-    cancellationDuringDeferredLaunchCannotReopenTail();
+    cancellationDuringRejectedLaunchCannotReopenTail();
     std::printf("BoundedFanoutHostTest: 13 original BroadcastResult window scenarios, %zu checks PASS\n", checks.load());
 }

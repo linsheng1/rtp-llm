@@ -81,14 +81,8 @@ public:
         static Outcome notStarted(Result why = Result::FAILED) noexcept { return {why, Proof::NOT_STARTED}; }
         static Outcome unknown() noexcept { return {Result::UNKNOWN, Proof::UNKNOWN}; }
     };
-    struct LaunchResult {
-        enum Value { REJECTED, ACCEPTED, DEFERRED };
-        LaunchResult(bool accepted): value(accepted ? ACCEPTED : REJECTED) {}
-        static LaunchResult deferred() noexcept { LaunchResult result(false); result.value = DEFERRED; return result; }
-        Value value;
-    };
     struct Snapshot { size_t children, remaining, active, peak, submitting; bool submissions_closed, finished, canceled; };
-    using Launch = std::function<LaunchResult(size_t, const std::shared_ptr<BroadcastResult>&)>;
+    using Launch = std::function<bool(size_t, const std::shared_ptr<BroadcastResult>&)>;
     static std::shared_ptr<BroadcastResult> createPayloadWindow(size_t count, size_t window, Clock::time_point deadline,
                                                               Launch launch, Task finalize, Task notify) {
         if (!window || !launch || !finalize || !notify) throw std::invalid_argument("invalid payload window");
@@ -360,9 +354,8 @@ private:
             if (!payload_started_ || already_done_.load() || payload_driving_ || payload_finalizing_) return;
             payload_driving_ = true;
         }
-        bool resource_retry = false;
         for (;;) {
-            size_t rank = 0, completed_before = 0;
+            size_t rank = 0;
             bool launch = false;
             {
                 std::lock_guard<std::mutex> lock(wait_done_mutex_);
@@ -370,7 +363,7 @@ private:
                 if (!payload_closed_ && payload_next_ < payload_slots_.size() && payload_active_ < payload_window_) {
                     rank = payload_next_++; payload_slots_[rank].submitted = true;
                     ++payload_active_; ++payload_submitting_; payload_peak_ = std::max(payload_peak_, payload_active_);
-                    completed_before = finished_count_; launch = true;
+                    launch = true;
                     if (payload_next_ == payload_slots_.size()) payload_closed_ = true;
                 } else {
                     if (payload_next_ == payload_slots_.size()) payload_closed_ = true;
@@ -378,35 +371,13 @@ private:
                 }
             }
             if (!launch) { finishPayload(); return; }
-            LaunchResult result(false);
-            try { result = payload_launch_(rank, self); } catch (...) {}
-            bool park = false;
-            if (result.value == LaunchResult::DEFERRED) {
-                std::lock_guard<std::mutex> lock(wait_done_mutex_);
-                auto& slot = payload_slots_[rank];
-                if (!finished_[rank] && !slot.claimed && !slot.may_touch) {
-                    slot.submitted = false; --payload_active_; payload_next_ = rank;
-                    payload_closed_ = false;
-                    if (payload_canceled_) { closePayloadTail(Result::CANCELED); }
-                    const bool progressed = static_cast<size_t>(finished_count_) != completed_before;
-                    if (payload_canceled_) { /* Tail already canceled; drain accepted siblings. */ }
-                    else if (!payload_active_ && !progressed && resource_retry) {
-                        payload_canceled_ = true; closePayloadTail(Result::FAILED);
-                    } else if (payload_active_ && !progressed) park = true;
-                    else resource_retry = true;
-                } else result = false;
-            }
-            if (result.value == LaunchResult::REJECTED) complete(rank, Outcome::notStarted());
+            bool accepted = false;
+            try { accepted = payload_launch_(rank, self); } catch (...) {}
+            if (!accepted) complete(rank, Outcome::notStarted());
             {
                 std::lock_guard<std::mutex> lock(wait_done_mutex_);
                 --payload_submitting_;
-                // Recheck peer completion under the same lock before parking:
-                // a callback arriving during submit must not lose the next drive.
-                if (park && static_cast<size_t>(finished_count_) != completed_before) park = false;
-                if (park) payload_driving_ = false;
             }
-            if (park) { finishPayload(); return; }
-            if (result.value != LaunchResult::DEFERRED) resource_retry = false;
         }
     }
     std::vector<PayloadSlot> payload_slots_;

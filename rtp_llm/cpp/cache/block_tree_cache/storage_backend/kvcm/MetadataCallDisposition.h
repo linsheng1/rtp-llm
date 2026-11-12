@@ -20,7 +20,7 @@ enum class MetadataCallDisposition { NOT_SENT, UNKNOWN, ACKNOWLEDGED };
 class Session {
 public:
     static constexpr size_t kIdBytes = 1024;
-    enum class Phase : uint8_t { FREE, RESERVED, START_INVOKED, OPEN, PAYLOAD_POSSIBLE, FINISH_INVOKED, UNKNOWN };
+    enum class Phase : uint8_t { FREE, RESERVED, START_INVOKED, OPEN, FINISH_INVOKED, UNKNOWN };
     enum class Reason : uint8_t { NONE, ABANDONED, START_UNKNOWN, EMPTY_ID_CONTRACT, ID_TOO_LONG,
         FINISH_UNKNOWN, UNUSED_CLOSE_UNKNOWN, PAYLOAD_UNPROVEN, NON_BUSINESS_SETTLEMENT };
     struct Usage { size_t capacity, occupied, unknown, storage_bytes, slot_bytes;
@@ -64,7 +64,6 @@ public:
         return Session(&p, index, generation);
     }
     void startInvoked() noexcept { phase(Phase::RESERVED, Phase::START_INVOKED); }
-    void payloadMayHaveStarted() noexcept { phase(Phase::OPEN, Phase::PAYLOAD_POSSIBLE); }
     bool observeStart(MetadataCallDisposition disposition, bool success, std::string_view id) noexcept {
         if (!pool_) return false;
         std::lock_guard<std::mutex> lock(pool_->mutex);
@@ -83,13 +82,16 @@ public:
     bool finishInvoked(bool unused_close) noexcept {
         if (!pool_) return false;
         std::lock_guard<std::mutex> lock(pool_->mutex); auto* e = entry();
-        if (!e || (e->phase != Phase::OPEN && e->phase != Phase::PAYLOAD_POSSIBLE)) return false;
+        if (!e || e->phase != Phase::OPEN) return false;
         e->unused_close = unused_close; e->phase = Phase::FINISH_INVOKED; return true;
     }
     void observeFinish(MetadataCallDisposition disposition, bool success) noexcept {
         if (!pool_) return;
         std::lock_guard<std::mutex> lock(pool_->mutex); auto* e = entry(); if (!e) return;
-        if (e->phase == Phase::FINISH_INVOKED && disposition == MetadataCallDisposition::ACKNOWLEDGED && success) release(*e);
+        if (e->phase != Phase::FINISH_INVOKED) return; // A late observation cannot resolve UNKNOWN.
+        if (disposition == MetadataCallDisposition::NOT_SENT && !success) {
+            e->phase = Phase::OPEN; // Same obligation, still occupied; only an ACK releases it.
+        } else if (disposition == MetadataCallDisposition::ACKNOWLEDGED && success) release(*e);
         else retain(*e, e->unused_close ? Reason::UNUSED_CLOSE_UNKNOWN : Reason::FINISH_UNKNOWN);
     }
     void retain(Reason reason) noexcept {

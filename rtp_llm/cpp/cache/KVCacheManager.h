@@ -163,6 +163,7 @@ private:
     // 成员变量
     CacheConfig                config_;
     CoordinatorCacheManagerPtr coordinator_manager_;
+    mutable std::atomic<bool>  decode_capture_stopped_{false};
 
     const kmonitor::MetricsReporterPtr metrics_reporter_;
     const KVCacheConfig                kv_cache_config_;

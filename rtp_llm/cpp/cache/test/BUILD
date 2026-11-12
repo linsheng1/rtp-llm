@@ -484,8 +484,8 @@ cc_test(
 )
 
 cc_test(
-    name = "mtp_cache_lookahead_test",
-    srcs = ["MtpCacheLookaheadTest.cc"],
+    name = "cache_prefix_hash_test",
+    srcs = ["CachePrefixHashTest.cc"],
     copts = test_copts,
     deps = test_deps + ["//rtp_llm/cpp/cache:cache_core", "//rtp_llm/cpp/utils:hash_util"],
 )

@@ -137,6 +137,7 @@ public:
     bool finishWriteWithDisposition(const std::string& id, const std::string& trace, const std::string& session,
         const kv_cache_manager::BlockMask& mask, const kv_cache_manager::Locations& locations,
         kvcm::MetadataCallDisposition* disposition) override {
+        if (finish_override) return finish_override(id, trace, session, mask, locations, disposition);
         if (disposition) *disposition = kvcm::MetadataCallDisposition::UNKNOWN;
         const auto result = finishWrite(id, trace, session, mask, locations);
         if (disposition && result) *disposition = kvcm::MetadataCallDisposition::ACKNOWLEDGED;
@@ -151,6 +152,11 @@ public:
     }
 
     MOCK_METHOD(bool, abortWrite, (const std::string&, const std::string&, const std::string&), (override));
+
+    // Test-only injection at the actual metadata dispatch boundary.
+    std::function<bool(const std::string&, const std::string&, const std::string&,
+        const kv_cache_manager::BlockMask&, const kv_cache_manager::Locations&,
+        kvcm::MetadataCallDisposition*)> finish_override;
 
     std::optional<kv_cache_manager::ClientErrorCode> load_status;
     std::optional<kv_cache_manager::ClientErrorCode> save_status;

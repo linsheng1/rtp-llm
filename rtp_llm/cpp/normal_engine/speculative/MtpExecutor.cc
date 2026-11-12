@@ -4100,7 +4100,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
             rejection_event->block(cuda_graph::graphGetCurrentStream());
         }
         if (draft_event) {
-            if (remoteCacheDecodePublicationEnabled()) {
+            if (retirement->protect) {
                 try { draft_event->synchronize(); retirement->writer_ready.store(true); }
                 catch (...) {
                     for (const auto& stream : worker_streams) stream->retainUnknownDecodePublication(stream);

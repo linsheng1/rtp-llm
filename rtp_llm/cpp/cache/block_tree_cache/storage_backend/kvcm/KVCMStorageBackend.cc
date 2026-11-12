@@ -841,8 +841,6 @@ public:
         std::vector<size_t>                     key_indices;
         RtpLLMRemoteCacheWriteMetricsCollector collector;
         bool                                   finish_attempted{false};
-        bool                                   transfer_attempted{false};
-        bool                                   source_may_be_touched{false};
         bool                                   settlement_started{false};
         bool                                   start_acknowledged{false};
         std::mutex                             settlement_mutex;
@@ -965,7 +963,6 @@ public:
         write_location = std::move(allocation);
         const std::string& write_session_id = publication.sessionId();
         static const kv_cache_manager::Locations empty_locations;
-        auto&                                    transfer_attempted = publication.transfer_attempted;
         const auto check_write_admission = [&] {
             if (!backend_.remoteCacheEnabled()) {
                 reportRemoteCacheSkipped("write");
@@ -1000,7 +997,7 @@ public:
                         collector.remote_finish_write_time_us += elapsedTimeUs(stage_start);
                     });
                     try {
-                        if (!finishSession(publication, kv_cache_manager::BlockMaskOffset{0}, empty_locations, true)) {
+                        if (!finishSession(request, publication, kv_cache_manager::BlockMaskOffset{0}, empty_locations, true)) {
                             RTP_LLM_LOG_WARNING("KVCM failed to close empty write session [%s]",
                                                 write_session_id.c_str());
                         }
@@ -1056,8 +1053,6 @@ public:
             if (defer) {
                 // From this point a payload may be accepted before the submitter
                 // returns. Only completion can prove source safety afterwards.
-                publication.transfer_attempted = true;
-                publication.source_may_be_touched = true;
                 auto prepare_completion = [&](auto collect) {
                     WriteResult finish = [this, async_write, collect = std::move(collect), &request, start](
                                              bool on_worker) {
@@ -1075,13 +1070,11 @@ public:
                         bool touched = true;
                         try {
                             auto responses = collect(touched, sdk_failed);
-                            write.source_may_be_touched = touched;
                             // Only the business worker may publish or abort the write.
                             if (!on_worker)
                                 std::rethrow_exception(buffer_safe_failure_);
                             publishWrite(request, write, write.sessionId(), responses, write.key_indices);
                         } catch (...) {
-                            write.source_may_be_touched = touched;
                             if (on_worker)
                                 settleWriteFailure(request, write, touched);
                             else
@@ -1103,10 +1096,9 @@ public:
 
             const auto responses = [&] {
                 if (request.decode_completion) {
-                    return dispatchProjectedSync(requests, request, transfer_attempted,
+                    return dispatchProjectedSync(requests, request,
                         source_may_be_touched, sdk_failed, *publication.dispatch_proof);
                 }
-                transfer_attempted = true;
                 auto responses = dispatchRequests(requests, request, source_may_be_touched, sdk_failed,
                                                     publication.dispatch_proof.get());
                 source_may_be_touched = false;
@@ -1134,7 +1126,6 @@ public:
         } catch (...) {
             std::lock_guard<std::mutex> settlement_lock(publication.settlement_mutex);
             if (!publication.settlement_started) {
-                publication.source_may_be_touched = source_may_be_touched;
                 settleWriteFailure(request, publication, source_may_be_touched);
             }
             throw;
@@ -1162,7 +1153,7 @@ public:
                 reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(result);
             }
         } else if (action == kvcm::FailedPublicationAction::ABORT_UNCOMMITTED) {
-            closeUnusedWrite(write);
+            closeUnusedWrite(request, write);
         }
     }
 
@@ -1216,7 +1207,7 @@ public:
             block_tree_cache_detail::ScopeRollback timer(
                 [&] { collector.remote_finish_write_time_us += elapsedTimeUs(stage_start); });
             RTP_LLM_CHECK_WITH_INFO(
-                finishSession(write, write_location.locations.size(), actual_locations, false),
+                finishSession(request, write, write_location.locations.size(), actual_locations, false),
                 "KVCM FinishWrite failed");
         }
         collector.remote_write_cache_block_num = static_cast<int64_t>(write_location.locations.size());
@@ -1231,24 +1222,34 @@ public:
         }
     }
 
-    bool finishSession(WritePublication& write, const kv_cache_manager::BlockMask& mask,
+    bool finishSession(const StorageRequest& request, WritePublication& write,
+                       const kv_cache_manager::BlockMask& mask,
                        const kv_cache_manager::Locations& locations, bool unused_close) {
         const auto trace = nextTraceId(unused_close ? "close_write" : "finish_write", finish_write_trace_sequence_);
-        RTP_LLM_CHECK_WITH_INFO(write.session->finishInvoked(unused_close), "KVCM metadata action already settled");
-        write.finish_attempted = true;
-        auto disposition = kvcm::MetadataCallDisposition::UNKNOWN;
-        try {
-            const bool success = client_wrapper_->finishWriteWithDisposition(
-                "", trace, write.sessionId(), mask, locations, &disposition);
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            // Keep the original cleanup attempt after expiry. Only retries need
+            // remaining task time; never grant a new deadline or replay UNKNOWN.
+            if (attempt) (void)remainingTimeout(request, "before FinishWrite retry");
+            RTP_LLM_CHECK_WITH_INFO(write.session->finishInvoked(unused_close), "KVCM metadata action already settled");
+            write.finish_attempted = true;
+            auto disposition = kvcm::MetadataCallDisposition::UNKNOWN;
+            bool success = false;
+            std::exception_ptr error;
+            try {
+                success = client_wrapper_->finishWriteWithDisposition(
+                    "", trace, write.sessionId(), mask, locations, &disposition);
+            } catch (...) { error = std::current_exception(); }
             write.session->observeFinish(disposition, success);
-            return success;
-        } catch (...) {
-            write.session->observeFinish(disposition, false);
-            throw;
+            if (success) return true;
+            if (disposition != kvcm::MetadataCallDisposition::NOT_SENT || attempt == 2) {
+                if (error) std::rethrow_exception(error);
+                return false;
+            }
         }
+        return false;
     }
 
-    void closeUnusedWrite(WritePublication& write) {
+    void closeUnusedWrite(const StorageRequest& request, WritePublication& write) {
         if (!write.start_acknowledged || !write.dispatch_proof->neverStarted() || write.finish_attempted) {
             write.session->retain(CompletionResources::Session::Reason::PAYLOAD_UNPROVEN);
             return;
@@ -1257,7 +1258,7 @@ public:
         block_tree_cache_detail::ScopeRollback timer(
             [&] { write.collector.remote_finish_write_time_us += elapsedTimeUs(stage_start); });
         try {
-            const bool aborted = finishSession(write, kv_cache_manager::BlockMaskOffset{0}, {}, true);
+            const bool aborted = finishSession(request, write, kv_cache_manager::BlockMaskOffset{0}, {}, true);
             if (!aborted) {
                 RTP_LLM_LOG_WARNING("KVCM failed to abort write session [%s]",
                                     write.sessionId().c_str());
@@ -2394,7 +2395,7 @@ private:
     }
 
     std::vector<FunctionResponsePB> dispatchProjectedSync(const std::vector<FunctionRequestPB>& requests,
-        const StorageRequest& request, bool& attempted, bool& touched, bool& sdk_failed,
+        const StorageRequest& request, bool& touched, bool& sdk_failed,
         kvcm::PayloadDispatchProof& proof) {
         auto completed = std::make_shared<std::promise<std::vector<FunctionResponsePB>>>();
         auto ready = completed->get_future();
@@ -2406,7 +2407,6 @@ private:
         };
         auto held_proof = std::shared_ptr<kvcm::PayloadDispatchProof>(&proof, [](auto*) {});
         dispatchProjectedAsync(requests, request, touched, prepare, std::move(held_proof));
-        block_tree_cache_detail::ScopeRollback record([&] { attempted = !proof.neverStarted(); });
         return ready.get();
     }
 
@@ -2835,7 +2835,7 @@ bool KVCMStorageBackend::captureCompletedDecode(const BatchKVCacheResource& reso
     }
     try {
         const auto& lifecycle = resource.decodeCompletionLifecycle();
-        lifecycle.tryAdmit([&] {
+        lifecycle.tryAdmit(resource.decodeCompletionSubmitted(), [&] {
             auto request = impl_->planCompletedDecode(resource, end);
             if (request.empty()) return false;
             const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2845,7 +2845,7 @@ bool KVCMStorageBackend::captureCompletedDecode(const BatchKVCacheResource& reso
             auto task = prepareWrite(std::move(request));
             if (!task) return false;
             const bool admitted = write(std::move(task));
-            if (admitted) resource.decodeCompletionSubmitted() = true;
+            if (admitted) resource.decodeCompletionSubmitted() = true; // Before fallible logging after admission.
             RTP_LLM_LOG_INFO("DTOP_GPU EOS_queued=%d computed_end=%zu", static_cast<int>(admitted), end);
             return admitted;
         });

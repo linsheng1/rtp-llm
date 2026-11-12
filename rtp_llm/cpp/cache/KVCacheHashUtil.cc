@@ -6,28 +6,6 @@
 
 namespace rtp_llm {
 
-namespace {
-void bindMtpLookahead(const BatchKVCacheResourcePtr& resource, const CompleteTokenIdsPtr& tokens, int unit) {
-    if (!resource->cache_key_lookahead) return;
-    resource->raw_prefix_keys.resize(resource->batchSize());
-    for (int row = 0; row < resource->batchSize(); ++row) {
-        auto keys = resource->cacheKeys(row);
-        resource->raw_prefix_keys[row] = keys;
-        const auto* ids = tokens->data(row);
-        for (size_t key = 0; key < keys.size(); ++key) {
-            const size_t h = (key + 1) * unit;
-            if (h < static_cast<size_t>(tokens->seqLength())) {
-                keys[key] = hashInt64Array(keys[key], ids + h, ids + h + 1);
-                const auto media = tokens->multimodalCacheIdentity(h, 1);
-                if (!media.empty()) keys[key] = hashInt64Array(keys[key], media.data(), media.data() + media.size());
-            }
-        }
-        resource->setBatchCacheKeys(row, keys);
-        resource->cacheResource(row).ensureLinearBlockDependencies();
-    }
-}
-}
-
 void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
                    CompleteTokenIdsPtr     complete_token_ids,
                    int                     seq_size_per_block,
@@ -60,7 +38,6 @@ void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
         batch_kv_cache_resource->cacheResource(i).ensureLinearBlockDependencies();
     }
     batch_kv_cache_resource->markCacheKeysInitialized();
-    bindMtpLookahead(batch_kv_cache_resource, complete_token_ids, seq_size_per_block);
 }
 
 void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
@@ -69,15 +46,6 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
                      int64_t                 initial_hash) {
     const int batch_size = batch_kv_cache_resource->batchSize();
     const int seq_len    = complete_token_ids->seqLength();
-    if (batch_kv_cache_resource->cache_key_lookahead) {
-        if (batch_kv_cache_resource->raw_prefix_keys.size() != static_cast<size_t>(batch_size)) {
-            initCacheKeys(batch_kv_cache_resource, complete_token_ids, seq_size_per_block, initial_hash);
-            return;
-        }
-        for (int row = 0; row < batch_size; ++row)
-            batch_kv_cache_resource->setBatchCacheKeys(row, batch_kv_cache_resource->raw_prefix_keys[row]);
-    }
-
 
     for (int i = 0; i < batch_size; ++i) {
         const auto& keys         = batch_kv_cache_resource->cacheKeys(i);
@@ -110,7 +78,6 @@ void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
         batch_kv_cache_resource->cacheResource(i).ensureLinearBlockDependencies();
     }
     batch_kv_cache_resource->markCacheKeysInitialized();
-    bindMtpLookahead(batch_kv_cache_resource, complete_token_ids, seq_size_per_block);
 }
 
 void dropLastPartialBlock(BatchKVCacheResourcePtr batch_kv_cache_resource) {
