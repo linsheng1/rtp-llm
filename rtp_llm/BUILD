@@ -403,6 +403,11 @@ py_library(
 )
 
 py_library(
+    name = "oss_download_config",
+    srcs = ["config/oss_download.py"],
+)
+
+py_library(
     name = "config",
     srcs = glob([
         "config/*.py",
