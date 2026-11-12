@@ -111,6 +111,10 @@ using BoundaryClock = std::chrono::steady_clock;
 
 class KVCMSubmissionBoundaryTest: public ::testing::Test {
 protected:
+    static constexpr auto kSetupWait = std::chrono::seconds(5);
+    static constexpr auto kOperationTimeout = 2 * kSetupWait;
+    static constexpr auto kSettlementWait = kOperationTimeout + kSetupWait;
+
     autil::EnvGuard quarantine_abort{"RTP_LLM_REMOTE_CACHE_QUARANTINE_ABORT_RATIO", "0"};
     autil::EnvGuard async{"RTP_LLM_STREAM_ASYNC", "0"};
     autil::EnvGuard pending_bytes{"RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB", "1"};
@@ -190,7 +194,11 @@ protected:
         }
         void expectSettled(bool retained, bool source_unknown, const kvcm::Session::Usage& before,
                            const MetadataSessionLimits& limits) {
-            ASSERT_TRUE(waitForBackendOperationsForTest(*backend));
+            {
+                std::unique_lock<std::mutex> lock(backend->lifecycle_mutex_);
+                ASSERT_TRUE(backend->lifecycle_cv_.wait_for(
+                    lock, kSettlementWait, [this] { return backend->in_flight_ == 0; }));
+            }
             const auto after = kvcm::Session::usage(limits);
             EXPECT_EQ(after.occupied, before.occupied + (retained ? 1u : 0u));
             EXPECT_EQ(after.unknown, before.unknown + (retained ? 1u : 0u));
@@ -228,17 +236,17 @@ protected:
             const auto limits = remoteCacheMetadataSessionLimits(); ASSERT_TRUE(limits);
             const auto before = kvcm::Session::usage(*limits);
             auto request = s.request(false);
-            request.transfer_task.emplace(std::vector<TransferDescriptor>{}, std::chrono::seconds(2));
+            request.transfer_task.emplace(std::vector<TransferDescriptor>{}, kOperationTimeout);
             const auto deadline = request.transfer_task->deadline();
             auto gates = std::make_shared<std::atomic<int>>(0);
             broadcast->before_rank = [partial, deadline, arrival, gates](size_t rank) {
                 ++*gates;
                 if (rank != (partial ? 1u : 0u)) return;
-                if (partial) EXPECT_EQ(arrival.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+                if (partial) EXPECT_EQ(arrival.wait_for(kSetupWait), std::future_status::ready);
                 std::this_thread::sleep_until(deadline + std::chrono::milliseconds(1));
             };
             ASSERT_TRUE(s.submit(std::move(request)));
-            s.expectSettled(partial, partial, before, *limits);
+            ASSERT_NO_FATAL_FAILURE(s.expectSettled(partial, partial, before, *limits));
             ASSERT_NE(broadcast->observed, nullptr);
             EXPECT_TRUE(broadcast->observed->done());
             EXPECT_FALSE(broadcast->observed->success());
@@ -274,13 +282,13 @@ protected:
                         std::this_thread::sleep_until(*deadline + std::chrono::milliseconds(1));
                 };
                 entered->set_value();
-                EXPECT_EQ(released.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+                EXPECT_EQ(released.wait_for(kSettlementWait), std::future_status::ready);
             }));
         block_tree_cache_detail::ScopeRollback unblock([release] { release->set_value(); });
-        ASSERT_EQ(entered_future.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+        ASSERT_EQ(entered_future.wait_for(kSetupWait), std::future_status::ready);
         // Start the operation clock only after the worker gate is installed.
         // Promise release synchronizes this value with the worker's first query.
-        request.transfer_task.emplace(std::vector<TransferDescriptor>{}, std::chrono::seconds(2));
+        request.transfer_task.emplace(std::vector<TransferDescriptor>{}, kOperationTimeout);
         *deadline = request.transfer_task->deadline();
         ASSERT_TRUE(s.submit(std::move(request)));
         // One worker + FIFO BACKGROUND barrier proves projected dispatch has
@@ -288,12 +296,12 @@ protected:
         auto barrier = std::make_shared<std::promise<void>>();
         auto queued = barrier->get_future();
         ASSERT_TRUE(s.backend->executor_->submit([barrier] { barrier->set_value(); }, BlockTreeTaskClass::BACKGROUND));
-        ASSERT_EQ(queued.wait_for(std::chrono::seconds(1)), std::future_status::ready);
+        ASSERT_EQ(queued.wait_for(kSetupWait), std::future_status::ready);
         EXPECT_EQ(s.backend->impl_->local_payload_pool_->queueSizes().background, 1u);
         unblock.run();
         // SDK success of peer0 proves source BUFFER_SAFE in the mixed case; it
         // must NOT be misused as permission to abort an incomplete destination.
-        s.expectSettled(mixed, false, before, *limits);
+        ASSERT_NO_FATAL_FAILURE(s.expectSettled(mixed, false, before, *limits));
         EXPECT_EQ(checks->load(), mixed ? 2 : 1);
         EXPECT_EQ(s.saves.load(), mixed ? 1 : 0);
         EXPECT_EQ(s.backend->impl_->completion_resources_->unresolved.load(), 0u);
