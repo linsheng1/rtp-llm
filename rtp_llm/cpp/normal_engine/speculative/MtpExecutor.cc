@@ -954,7 +954,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     RTP_LLM_CHECK_WITH_INFO(params.sp_config.sp_dspark_verify_mode == "dense"
                                 || params.sp_config.sp_dspark_verify_mode == "packed",
                             "DSpARK verify mode must be dense or packed");
-    dspark_packed_verify_ = params.sp_config.sp_dspark_verify_mode == "packed";
+    const bool packed_verify_requested = params.sp_config.sp_dspark_verify_mode == "packed";
+    // P seeds draft features but never verifies proposals. Keep the declared
+    // P/D configuration (and remote cache identity) while disabling that work.
+    dspark_packed_verify_ = packed_verify_requested && !dspark_prefill_commit_only_;
     RTP_LLM_CHECK_WITH_INFO(dspark_confidence_mode_ == "off" || dspark_confidence_mode_ == "observe"
                                 || dspark_confidence_mode_ == "bounded",
                             "Invalid DSpARK confidence mode");
@@ -969,23 +972,28 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                             "DSpARK verify budget must be -1 or between 0 and gamma");
     RTP_LLM_CHECK_WITH_INFO(dspark_confidence_mode_ == "bounded" || dspark_verify_budget_ == -1,
                             "DSpARK verify budget requires bounded confidence mode");
-    RTP_LLM_CHECK_WITH_INFO(!dspark_packed_verify_
+    RTP_LLM_CHECK_WITH_INFO(!packed_verify_requested
                                 || (is_dspark_ && params.model_config_.model_type == "deepseek_v41"
-                                    && role_type_ == RoleType::DECODE && params.parallelism_config.tp_size == 1
+                                    && (dspark_prefill_commit_only_
+                                        || (role_type_ == RoleType::DECODE && params.parallelism_config.tp_size == 1))
                                     && dspark_confidence_mode_ == "bounded" && dspark_verify_budget_ >= 0),
-                            "Packed DSpARK verification requires DeepSeek V4.1 bounded decode, TP=1, "
+                            "Packed DSpARK configuration requires DeepSeek V4.1 bounded confidence, "
+                            "a commit-only Prefill or TP=1 Decode role, "
                             "and an explicit nonnegative verification budget");
     RTP_LLM_CHECK_WITH_INFO(params.sp_config.sp_dspark_verify_budget_mode == "fixed"
                                 || params.sp_config.sp_dspark_verify_budget_mode == "adaptive",
                             "DSpARK verification budget mode must be fixed or adaptive");
     if (params.sp_config.sp_dspark_verify_budget_mode == "adaptive") {
-        RTP_LLM_CHECK_WITH_INFO(dspark_packed_verify_ && dspark_confidence_mode_ == "bounded"
+        RTP_LLM_CHECK_WITH_INFO(packed_verify_requested && dspark_confidence_mode_ == "bounded"
                                     && dspark_verify_budget_ >= 0,
                                 "Adaptive DSpARK budgets require bounded packed verification and a nonnegative "
                                 "cold-start budget");
-        dspark_adaptive_budget_ =
-            std::make_unique<speculative::DSparkAdaptiveBudget>(static_cast<int>(propose_step_), dspark_verify_budget_);
+        if (!dspark_prefill_commit_only_)
+            dspark_adaptive_budget_ =
+                std::make_unique<speculative::DSparkAdaptiveBudget>(static_cast<int>(propose_step_), dspark_verify_budget_);
     }
+    if (packed_verify_requested && dspark_prefill_commit_only_)
+        RTP_LLM_LOG_INFO("DSpARK PREFILL keeps declared packed cache identity; proposal verification is inactive");
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
 
