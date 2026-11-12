@@ -25,6 +25,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DecodePublicationAccounting.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/MetadataCallDisposition.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 
@@ -856,17 +857,22 @@ TEST(KVCMLocalTest, CallerBufferSafetyDoesNotProveRemoteAllocationQuiescence) {
             EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
                 .WillOnce(Return(std::make_pair(true, allocation)));
             const bool unknown = !safe;
-            if (enabled) {
-                EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).Times(0);
-            } else {
-                EXPECT_CALL(*client, finishWrite(_, _, "pending-session", _, _)).WillOnce(Return(true));
-            }
+            // A submitted destination remains unproven even when the caller's
+            // buffer is safe, independently of the Decode feature switch.
+            EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).Times(0);
+            EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
+            const auto limits = remoteCacheMetadataSessionLimits();
+            ASSERT_TRUE(limits);
+            const auto sessions_before = kvcm::Session::usage(*limits);
             const auto ref_count_before = environment.device_pool->refCount(environment.block_id);
             client->save_status = ec;
             auto task           = backend.backend->prepareWrite(makeStorageRequest(environment));
             ASSERT_TRUE(static_cast<bool>(task));
             ASSERT_TRUE(backend.backend->write(std::move(task)));
             ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+            const auto sessions_after = kvcm::Session::usage(*limits);
+            EXPECT_EQ(sessions_after.occupied, sessions_before.occupied + 1);
+            EXPECT_EQ(sessions_after.unknown, sessions_before.unknown + 1);
             EXPECT_EQ(static_cast<bool>(backend.backend->protected_quarantine_), enabled && unknown);
             EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), !enabled && unknown);
             EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + (unknown ? 1u : 0u));
@@ -1393,6 +1399,9 @@ TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement
             std::make_shared<BackendHandle>(makeBackend(*environment, parallel, client, broadcast, nullptr, false, config));
         block_tree_cache_detail::ScopeRollback unblock([release] { release->set_value(); });
         ASSERT_TRUE(initSingleRank(*backend->backend, *environment));
+        const auto session_limits = remoteCacheMetadataSessionLimits();
+        ASSERT_TRUE(session_limits);
+        const auto sessions_before = kvcm::Session::usage(*session_limits);
         auto profile = AsyncProfileSession::start(128);
         ASSERT_TRUE(profile);
         block_tree_cache_detail::ScopeRollback stop_profile([&] { profile->finish(); });
@@ -1425,7 +1434,7 @@ TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement
             auto acknowledge = ::testing::InvokeWithoutArgs([completed] { completed->set_value(); return true; });
             if (late) {
                 EXPECT_CALL(*client, finishWrite(_, _, "deferred-write", _, _)).Times(0);
-                EXPECT_CALL(*client, abortWrite(_, _, "deferred-write")).WillOnce(acknowledge);
+                EXPECT_CALL(*client, abortWrite(_, _, "deferred-write")).Times(0);
             } else {
                 EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
                 EXPECT_CALL(*client, finishWrite(_, _, "deferred-write", all_written, _))
@@ -1485,8 +1494,16 @@ TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement
         }
         ASSERT_EQ(stopping.waitFor(std::chrono::seconds(5)), std::future_status::ready);
         stopping.get();
-        ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-        result.get();
+        // Writes have no public completion callback. Shutdown must drain the
+        // actual business settlement, not manufacture an abort ACK to signal it.
+        ASSERT_TRUE(waitForBackendOperationsForTest(*backend->backend));
+        if (!write || !late) {
+            ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+            result.get();
+        }
+        const auto sessions_after = kvcm::Session::usage(*session_limits);
+        EXPECT_EQ(sessions_after.occupied, sessions_before.occupied + (write && late ? 1u : 0u));
+        EXPECT_EQ(sessions_after.unknown, sessions_before.unknown + (write && late ? 1u : 0u));
         EXPECT_FALSE(environment->device_pool->isFrozen(environment->block_id));
         EXPECT_EQ(environment->device_pool->refCount(environment->block_id), refs);
         const auto events = profile->finish();
