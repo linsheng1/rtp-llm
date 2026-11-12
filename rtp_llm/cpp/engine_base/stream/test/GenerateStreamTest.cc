@@ -1959,4 +1959,45 @@ TEST_F(GenerateStreamTest, logprobsAcceptDefaultSingleSequenceSentinel) {
     }
 }
 
+TEST(DecodePublicationSubmission, SourceGateDoesNotPretendBookkeepingIsPending) {
+    auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3});
+    ASSERT_TRUE(stream->beginDecodePublicationSubmission());
+    EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+    stream->incPendingAsyncBookkeeping();
+    stream->markDeferredRelease();
+    stream->endDecodePublicationSubmission();
+    EXPECT_TRUE(stream->hasPendingAsyncBookkeeping());
+    EXPECT_TRUE(stream->isDeferredReleasePending());
+    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_FALSE(stream->hasPendingAsyncBookkeeping());
+    EXPECT_FALSE(stream->isDeferredReleasePending());
+}
+
+TEST(DecodePublicationSubmission, CopiedStreamRetainsOriginalSubmissionClaim) {
+    auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3});
+    ASSERT_TRUE(stream->beginDecodePublicationSubmission());
+    auto copied = std::make_shared<NormalGenerateStream>(*stream);
+    copied->releaseResource();
+    EXPECT_TRUE(stream->isDeferredReleasePending());
+    EXPECT_FALSE(copied->hasPendingAsyncBookkeeping()); // Submission is distinct from worker bookkeeping.
+    stream->endDecodePublicationSubmission();
+    EXPECT_FALSE(copied->isDeferredReleasePending());
+}
+
+TEST(DecodePublicationSubmission, ReleaseDefersInsteadOfWaitingForUnlaunchedWorker) {
+    auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3});
+    stream->incPendingAsyncBookkeeping(); // Previous worker is still running.
+    ASSERT_TRUE(stream->beginDecodePublicationSubmission()); // Next launch can be joining it.
+    auto released = std::async(std::launch::async, [stream] { stream->releaseResource(); });
+    const auto status = released.wait_for(std::chrono::seconds(1));
+    // Always unblock/collect even if the nonblocking contract regresses.
+    if (status != std::future_status::ready) stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    released.get();
+    EXPECT_EQ(status, std::future_status::ready);
+    EXPECT_TRUE(stream->isDeferredReleasePending());
+    stream->endDecodePublicationSubmission();
+    if (status == std::future_status::ready) stream->decPendingAsyncBookkeepingAndMaybeRelease();
+    EXPECT_FALSE(stream->isDeferredReleasePending());
+}
+
 }  // namespace rtp_llm

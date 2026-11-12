@@ -80,11 +80,31 @@ struct StorageTaskState {
 // Keep one copy of the settlement state across the worker and RPC callback.
 template<typename Result, typename Settle>
 auto makeIoCompletion(std::shared_ptr<StorageBackendExecutor> executor,
-                      std::shared_ptr<StorageTaskState> state, Settle settle) {
+                      std::shared_ptr<StorageTaskState> state, Settle settle,
+                      BlockTreeTaskClass task_class) {
     auto continuation = std::make_shared<Settle>(std::move(settle));
-    return [executor = std::move(executor), state = std::move(state), continuation](Result result, bool asynchronous) {
+    auto retained_result = std::make_shared<Result>();
+    std::shared_ptr<BlockTreeTaskPool::CompletionTicket> reservation;
+    if (executor->hasCompletionReservations()) {
+        reservation = executor->reserveCompletion([continuation, retained_result]() mutable {
+            (*continuation)(std::move(*retained_result), true);
+        }, task_class);
+        if (!reservation) throw StorageOperationBufferSafeFailure("storage business completion capacity rejected before I/O");
+    }
+    return [executor = std::move(executor), state = std::move(state), continuation,
+            retained_result, reservation = std::move(reservation)](Result result, bool asynchronous) mutable {
         if (state->completion_started.exchange(true))
             return;
+        if (asynchronous && reservation) {
+            *retained_result = std::move(result);
+            // This accepted obligation cannot be rejected by stopAdmission or
+            // a deque allocation at terminal CQ time. Never settle SDK/metadata
+            // business on a notifying CQ/driver lane.
+            RTP_LLM_CHECK(reservation->post());
+            reservation.reset();
+            return;
+        }
+        reservation.reset(); // Synchronous/no-I/O result abandons the unused reservation.
         if (asynchronous) {
             try {
                 if (executor->submitCompletion([continuation, result]() mutable {
@@ -675,7 +695,14 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                     total.finish(success);
                 });
             };
-            auto complete_read = storage_backend_detail::makeIoCompletion<Task>(executor_, state, std::move(settle_read));
+            std::function<void(Task, bool)> complete_read;
+            try {
+                complete_read = storage_backend_detail::makeIoCompletion<Task>(
+                    executor_, state, settle_read, BlockTreeTaskClass::LOAD);
+            } catch (...) {
+                settle_read([error = std::current_exception()] { std::rethrow_exception(error); }, false);
+                return;
+            }
             if (!error.ok()) {
                 complete_read({}, false);
                 return;
@@ -797,7 +824,14 @@ bool StorageBackend::write(StorageWriteTask task) {
             settle_write({}, true);
             return;
         }
-        auto complete = storage_backend_detail::makeIoCompletion<WriteResult>(executor_, state, std::move(settle_write));
+        std::function<void(WriteResult, bool)> complete;
+        try {
+            complete = storage_backend_detail::makeIoCompletion<WriteResult>(
+                executor_, state, settle_write, BlockTreeTaskClass::BACKGROUND);
+        } catch (...) {
+            settle_write([error = std::current_exception()](bool) { std::rethrow_exception(error); }, false);
+            return;
+        }
         try {
             std::optional<TransferStageTimer> submit;
             if (io_kind == AsyncProfileKind::Lifecycle)

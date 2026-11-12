@@ -65,6 +65,10 @@ public:
     void insertIntoCache(const InsertInfo& insert_info, size_t& resident_prefix_length);
     bool captureCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end, bool finished = true) const;
 
+    size_t decodePublicationUnit() const;
+    std::shared_ptr<const DecodeEndpoint> retainDecodeEndpoint(const torch::Tensor& physical_ids,
+        const std::vector<std::string>& tags, size_t row, size_t end) const;
+
     // Decode-side P/D admission allocates destination blocks before cache handoff.  When pools are
     // temporarily full, waiters use this generation instead of polling malloc in a tight loop.
     // Capture the generation before an allocation attempt; waitForAllocationChange() then cannot

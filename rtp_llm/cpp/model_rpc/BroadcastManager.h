@@ -21,6 +21,12 @@
 
 namespace rtp_llm {
 
+// Only a local preflight which has not entered gRPC may give this proof.
+class BroadcastRpcNotStarted: public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
 inline bool isGrpcConnectFailure(const grpc::Status& status) {
     if (status.error_code() != grpc::StatusCode::UNAVAILABLE) {
         return false;
@@ -33,7 +39,7 @@ inline bool isGrpcConnectFailure(const grpc::Status& status) {
 }
 
 template<typename RequestPB, typename ResponsePB>
-class BroadcastResult {
+class BroadcastResult: public std::enable_shared_from_this<BroadcastResult<RequestPB, ResponsePB>> {
 public:
     using DoneCallback = std::function<void()>;
 
@@ -62,6 +68,79 @@ public:
         connect_failure_reporter_(std::move(connect_failure_reporter)) {}
     ~BroadcastResult() = default;
 
+public:
+    // DSV4.1 payloads reuse this result's terminal flags, lock, wait and onDone.
+    // No driver queue/thread or second parent result owns the same operation.
+    using Clock = std::chrono::steady_clock;
+    using Task = DoneCallback;
+    enum class Proof { NOT_STARTED, BUFFER_SAFE, UNKNOWN };
+    enum class Result { SUCCESS, FAILED, TIMEOUT, CANCELED, UNKNOWN };
+    struct Outcome {
+        Result result{Result::FAILED}; Proof proof{Proof::NOT_STARTED};
+        static Outcome success() noexcept { return {Result::SUCCESS, Proof::BUFFER_SAFE}; }
+        static Outcome notStarted(Result why = Result::FAILED) noexcept { return {why, Proof::NOT_STARTED}; }
+        static Outcome unknown() noexcept { return {Result::UNKNOWN, Proof::UNKNOWN}; }
+    };
+    struct LaunchResult {
+        enum Value { REJECTED, ACCEPTED, DEFERRED };
+        LaunchResult(bool accepted): value(accepted ? ACCEPTED : REJECTED) {}
+        static LaunchResult deferred() noexcept { LaunchResult result(false); result.value = DEFERRED; return result; }
+        Value value;
+    };
+    struct Snapshot { size_t children, remaining, active, peak, submitting; bool submissions_closed, finished, canceled; };
+    using Launch = std::function<LaunchResult(size_t, const std::shared_ptr<BroadcastResult>&)>;
+    static std::shared_ptr<BroadcastResult> createPayloadWindow(size_t count, size_t window, Clock::time_point deadline,
+                                                              Launch launch, Task finalize, Task notify) {
+        if (!window || !launch || !finalize || !notify) throw std::invalid_argument("invalid payload window");
+        // All result/callback storage is prepared before any RPC/SDK handoff.
+        std::vector<std::shared_ptr<WorkerRpcContext>> contexts(count);
+        auto result = std::make_shared<BroadcastResult>(contexts);
+        result->payload_enabled_ = true; result->payload_slots_.resize(count); result->payload_window_ = window; result->payload_deadline_ = deadline;
+        result->payload_launch_ = std::move(launch); result->payload_finalize_ = std::move(finalize);
+        result->onDone(std::move(notify));
+        return result;
+    }
+    void start() noexcept {
+        { std::lock_guard<std::mutex> lock(wait_done_mutex_); if (!payload_enabled_ || payload_started_) return; payload_started_ = true; }
+        drivePayload();
+    }
+    void cancel() noexcept {
+        { std::lock_guard<std::mutex> lock(wait_done_mutex_); payload_canceled_ = true; closePayloadTail(Result::CANCELED); }
+        finishPayload();
+    }
+    bool tryStart(size_t rank) noexcept {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        if (rank >= payload_slots_.size() || finished_[rank] || payload_slots_[rank].claimed
+            || payload_canceled_ || Clock::now() >= payload_deadline_) return false;
+        payload_slots_[rank].claimed = true; return true;
+    }
+    bool markMayTouch(size_t rank) noexcept {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        if (rank >= payload_slots_.size() || finished_[rank] || !payload_slots_[rank].claimed) return false;
+        payload_slots_[rank].may_touch = true; return true;
+    }
+    bool complete(size_t rank, Outcome outcome) noexcept {
+        {
+            std::lock_guard<std::mutex> lock(wait_done_mutex_);
+            if (rank >= payload_slots_.size() || finished_[rank] || !payload_slots_[rank].submitted) return false;
+            if (outcome.proof == Proof::NOT_STARTED && payload_slots_[rank].may_touch) outcome = Outcome::unknown();
+            payload_slots_[rank].outcome = outcome; finished_[rank] = true;
+            ++finished_count_; --payload_active_;
+            if (outcome.result != Result::SUCCESS) { payload_canceled_ = true; closePayloadTail(outcome.result == Result::TIMEOUT ? Result::TIMEOUT : Result::CANCELED); }
+        }
+        drivePayload(); finishPayload(); return true;
+    }
+    Outcome outcome(size_t rank) const {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        if (rank >= payload_slots_.size() || !finished_[rank]) throw std::logic_error("payload rank not terminal");
+        return payload_slots_[rank].outcome;
+    }
+    Snapshot snapshot() const noexcept {
+        std::lock_guard<std::mutex> lock(wait_done_mutex_);
+        return {payload_slots_.size(), payload_slots_.size() - static_cast<size_t>(finished_count_), payload_active_,
+                payload_peak_, payload_submitting_, payload_closed_, already_done_.load(), payload_canceled_};
+    }
+    Clock::time_point deadline() const noexcept { return payload_deadline_; }
 public:
     bool done() const {
         return already_done_.load(std::memory_order_acquire);
@@ -223,8 +302,119 @@ public:
         }
     }
 
+    // CQ is terminal even if allocating a diagnostic string failed. Preserve
+    // the original callback obligation with a conservative aggregate failure.
+    void finishRankWithoutSummary(size_t rank) noexcept {
+        std::vector<DoneCallback> callbacks;
+        {
+            std::lock_guard<std::mutex> lock(wait_done_mutex_);
+            if (already_done_.load() || payload_enabled_) return;
+            grpc_status_failure_seen_ = true;
+            if (rank < finished_.size() && !finished_[rank]) { finished_[rank] = true; ++finished_count_; }
+            if (rank < rpc_succeeded_.size()) rpc_succeeded_[rank] = false;
+            if (finished_count_ == static_cast<int>(finished_.size())) finishLocked(callbacks);
+        }
+        wait_done_cv_.notify_all();
+        for (auto& callback : callbacks) { try { callback(); } catch (...) {} }
+    }
+
 private:
     friend class BroadcastManager;
+
+    struct PayloadSlot { bool submitted{false}, claimed{false}, may_touch{false}; Outcome outcome; };
+    void closePayloadTail(Result reason) noexcept {
+        for (size_t rank = payload_next_; rank < payload_slots_.size(); ++rank) {
+            if (!payload_slots_[rank].submitted && !finished_[rank]) {
+                finished_[rank] = true; ++finished_count_; payload_slots_[rank].outcome = Outcome::notStarted(reason);
+            }
+        }
+        payload_next_ = payload_slots_.size(); payload_closed_ = true;
+    }
+    void finishPayload() noexcept {
+        Task finalize;
+        {
+            std::lock_guard<std::mutex> lock(wait_done_mutex_);
+            if (already_done_.load() || payload_finalizing_ || !payload_started_ || !payload_closed_
+                || payload_active_ || payload_submitting_ || payload_driving_) return;
+            payload_finalizing_ = true; finalize = std::move(payload_finalize_);
+        }
+        // Normalize NOT_STARTED/UNKNOWN wire responses BEFORE done/waiters.
+        // Production finalization catches errors and marks aggregate UNKNOWN.
+        try { finalize(); } catch (...) { std::terminate(); }
+        std::vector<DoneCallback> callbacks;
+        Launch retired_launch;
+        {
+            std::lock_guard<std::mutex> lock(wait_done_mutex_);
+            grpc_status_failure_seen_ = std::any_of(payload_slots_.begin(), payload_slots_.end(),
+                [](const auto& slot) { return slot.outcome.result != Result::SUCCESS || slot.outcome.proof != Proof::BUFFER_SAFE; });
+            retired_launch = std::move(payload_launch_);
+            finishLocked(callbacks);
+        }
+        wait_done_cv_.notify_all();
+        for (auto& callback : callbacks) { try { callback(); } catch (...) {} }
+    }
+    void drivePayload() noexcept {
+        const auto self = this->shared_from_this();
+        {
+            std::lock_guard<std::mutex> lock(wait_done_mutex_);
+            if (!payload_started_ || already_done_.load() || payload_driving_ || payload_finalizing_) return;
+            payload_driving_ = true;
+        }
+        bool resource_retry = false;
+        for (;;) {
+            size_t rank = 0, completed_before = 0;
+            bool launch = false;
+            {
+                std::lock_guard<std::mutex> lock(wait_done_mutex_);
+                if (Clock::now() >= payload_deadline_) { payload_canceled_ = true; closePayloadTail(Result::TIMEOUT); }
+                if (!payload_closed_ && payload_next_ < payload_slots_.size() && payload_active_ < payload_window_) {
+                    rank = payload_next_++; payload_slots_[rank].submitted = true;
+                    ++payload_active_; ++payload_submitting_; payload_peak_ = std::max(payload_peak_, payload_active_);
+                    completed_before = finished_count_; launch = true;
+                    if (payload_next_ == payload_slots_.size()) payload_closed_ = true;
+                } else {
+                    if (payload_next_ == payload_slots_.size()) payload_closed_ = true;
+                    payload_driving_ = false;
+                }
+            }
+            if (!launch) { finishPayload(); return; }
+            LaunchResult result(false);
+            try { result = payload_launch_(rank, self); } catch (...) {}
+            bool park = false;
+            if (result.value == LaunchResult::DEFERRED) {
+                std::lock_guard<std::mutex> lock(wait_done_mutex_);
+                auto& slot = payload_slots_[rank];
+                if (!finished_[rank] && !slot.claimed && !slot.may_touch) {
+                    slot.submitted = false; --payload_active_; payload_next_ = rank;
+                    payload_closed_ = false;
+                    if (payload_canceled_) { closePayloadTail(Result::CANCELED); }
+                    const bool progressed = static_cast<size_t>(finished_count_) != completed_before;
+                    if (payload_canceled_) { /* Tail already canceled; drain accepted siblings. */ }
+                    else if (!payload_active_ && !progressed && resource_retry) {
+                        payload_canceled_ = true; closePayloadTail(Result::FAILED);
+                    } else if (payload_active_ && !progressed) park = true;
+                    else resource_retry = true;
+                } else result = false;
+            }
+            if (result.value == LaunchResult::REJECTED) complete(rank, Outcome::notStarted());
+            {
+                std::lock_guard<std::mutex> lock(wait_done_mutex_);
+                --payload_submitting_;
+                // Recheck peer completion under the same lock before parking:
+                // a callback arriving during submit must not lose the next drive.
+                if (park && static_cast<size_t>(finished_count_) != completed_before) park = false;
+                if (park) payload_driving_ = false;
+            }
+            if (park) { finishPayload(); return; }
+            if (result.value != LaunchResult::DEFERRED) resource_retry = false;
+        }
+    }
+    std::vector<PayloadSlot> payload_slots_;
+    Launch payload_launch_;
+    Task payload_finalize_;
+    Clock::time_point payload_deadline_{};
+    size_t payload_window_{0}, payload_next_{0}, payload_active_{0}, payload_peak_{0}, payload_submitting_{0};
+    bool payload_enabled_{false}, payload_started_{false}, payload_closed_{false}, payload_canceled_{false}, payload_driving_{false}, payload_finalizing_{false};
 
     std::string failureSummaryNoLock() const {
         const auto& rpc_error = connect_failure_summary_.empty() ? rpc_failure_summary_ : connect_failure_summary_;
@@ -335,22 +525,33 @@ public:
         }
 
         auto result = std::make_shared<ResultT>(contexts, request_id, std::move(direction), connect_failure_reporter_);
+        std::vector<std::shared_ptr<CompletionTag<ResultT>>> tags;
+        tags.reserve(worker_size);
+        for (size_t rank = 0; rank < worker_size; ++rank) tags.push_back(std::make_shared<CompletionTag<ResultT>>(result, rank));
         for (int rank = 0; rank < worker_size; ++rank) {
             auto& ctx = result->worker_contexts_.at(rank);
             try {
-                auto reader = rpc_call(ctx->stub, ctx->client_context, ctx->request, completion_queue_.get());
+                // Prepared ownership exists before gRPC may retain a raw tag/context.
+                // Ambiguous throws keep this anchor until a real CQ completion.
+                tags[rank]->anchor = tags[rank];
+                auto reader = [&] {
+                    try { return rpc_call(ctx->stub, ctx->client_context, ctx->request, completion_queue_.get()); }
+                    catch (const BroadcastRpcNotStarted&) {
+                        tags[rank]->anchor.reset(); // No Finish/raw tag handoff and no CQ can arrive.
+                        throw;
+                    }
+                }();
                 if (!reader) {
                     throw std::runtime_error("broadcast rpc call returned null reader");
                 }
-                auto tag = std::make_unique<CompletionTag<ResultT>>(result, static_cast<size_t>(rank));
-                reader->Finish(&ctx->response, &ctx->status, tag.get());
-                (void)tag.release();
+                reader->Finish(&ctx->response, &ctx->status, tags[rank].get());
             } catch (const std::exception& error) {
                 if (fatal_on_error) {
                     RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d err=%s %s", rank, error.what(), rpc_tag.c_str());
                 }
                 for (size_t pending = rank; pending < worker_size; ++pending) {
-                    result->finishRank(pending, false);
+                    try { result->finishRank(pending, false); }
+                    catch (...) { result->finishRankWithoutSummary(pending); }
                 }
                 break;
             } catch (...) {
@@ -358,7 +559,8 @@ public:
                     RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d unknown error %s", rank, rpc_tag.c_str());
                 }
                 for (size_t pending = rank; pending < worker_size; ++pending) {
-                    result->finishRank(pending, false);
+                    try { result->finishRank(pending, false); }
+                    catch (...) { result->finishRankWithoutSummary(pending); }
                 }
                 break;
             }
@@ -375,6 +577,7 @@ private:
     struct CompletionTagBase {
         virtual ~CompletionTagBase() = default;
         virtual void complete(bool ok) = 0;
+        virtual void releaseFromCq() noexcept { delete this; }
     };
 
     template<typename ResultT>
@@ -382,8 +585,11 @@ private:
         CompletionTag(std::shared_ptr<ResultT> result, size_t rank): result(std::move(result)), rank(rank) {}
 
         void complete(bool ok) override {
-            result->finishRank(rank, ok);
+            try { result->finishRank(rank, ok); }
+            catch (...) { result->finishRankWithoutSummary(rank); }
         }
+        void releaseFromCq() noexcept override { auto keep_alive = std::move(anchor); }
+        std::shared_ptr<CompletionTag> anchor;
 
         std::shared_ptr<ResultT> result;
         size_t                   rank;
@@ -393,7 +599,8 @@ private:
         void* raw_tag = nullptr;
         bool  ok      = false;
         while (completion_queue_->Next(&raw_tag, &ok)) {
-            std::unique_ptr<CompletionTagBase> tag(static_cast<CompletionTagBase*>(raw_tag));
+            std::unique_ptr<CompletionTagBase, void (*)(CompletionTagBase*)> tag(
+                static_cast<CompletionTagBase*>(raw_tag), [](CompletionTagBase* value) { value->releaseFromCq(); });
             try {
                 tag->complete(ok);
             } catch (const std::exception& error) {

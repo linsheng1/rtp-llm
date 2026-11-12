@@ -947,6 +947,9 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
         return;
     }
 
+    const bool native_decode = remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE;
+    const auto endpoint = native_decode ? kv_cache_resource->decode_endpoint : nullptr;
+    if (native_decode && !config_.mtp_sub_configs.empty() && !endpoint) return;
     const auto& cp_mapper = cp_slot_mapper_;
     const bool  cp_active = cp_mapper && cp_mapper->isSharded();
     // Preserve the single-group publication contract: only batch zero becomes
@@ -960,6 +963,10 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
             continue;
         }
         CacheKeysType insert_keys = cp_active ? cpCanonicalCacheKeys(cp_mapper, full_keys) : full_keys;
+        if (endpoint) {
+            const size_t key_unit = cp_active ? cp_mapper->reuseBlockTokens(config_) : config_.seq_size_per_block;
+            insert_keys.resize(std::min(insert_keys.size(), endpoint->end / key_unit));
+        }
         if (insert_keys.empty()) {
             continue;
         }
@@ -991,6 +998,15 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
                 const auto& blocks = kv_cache_resource->blocks(batch_id, tag);
                 for (size_t i = 0; i < insert_keys.size(); ++i) {
                     const size_t position = sparse_logical ? (i + 1) * static_cast<size_t>(cp_mapper->cpSize()) - 1 : i;
+                    if (endpoint) {
+                        const size_t key_unit = cp_active ? cp_mapper->reuseBlockTokens(config_) : config_.seq_size_per_block;
+                        const size_t tokens = (i + 1) * key_unit;
+                        const size_t span = config_.group(tag).seqSizePerBlock();
+                        const auto& native = endpoint->blocks.at(tag);
+                        if (tokens % span == 0 && tokens / span - 1 < native.size())
+                            resources[i][group_set_id].device_blocks[member_group_id] = native[tokens / span - 1];
+                        continue; // Original tree acquires CACHE refs before this endpoint owner is released.
+                    }
                     if (position >= blocks.size() || isNullBlockIdx(blocks[position])) {
                         continue;
                     }

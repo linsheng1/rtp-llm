@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 
 #include <algorithm>
+#include "rtp_llm/cpp/utils/HashUtil.h"
 #include <cmath>
 #include <limits>
 #include <map>
@@ -428,11 +429,22 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     auto      config = createBasicConfig(model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
     if (draft_model_config != nullptr) {
         auto draft = createBasicConfig(*draft_model_config, parallelism_config, kv_cache_config, gen_num_per_cycle);
-        int  num_mtp_modules = is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK ? gen_num_per_cycle : 1;
+        int num_mtp_modules = model_config.model_type == "deepseek_v41" ? 1 :
+            (is_mtp && !is_eagle && sp_config->type != SP_TYPE_DSPARK ? gen_num_per_cycle : 1);
         RTP_LLM_CHECK_WITH_INFO(num_mtp_modules > 0, "draft cache configuration requires at least one module");
         config.mtp_sub_configs.reserve(static_cast<size_t>(num_mtp_modules));
         for (int module = 0; module < num_mtp_modules; ++module) {
             config.mtp_sub_configs.push_back(config.mergeMTPModule(draft, module, config.layer_num));
+        }
+        if (model_config.model_type == "deepseek_v41") {
+            config.mtp_cache_lookahead = sp_config->type == SP_TYPE_MTP;
+            // Same model/cache identity for P and D, independent of publication
+            // switches. Separate actual draft bytes from target-only caches.
+            const int32_t identity[] = {0x44535634, 1, static_cast<int32_t>(sp_config->type),
+                static_cast<int32_t>(draft.layer_num), static_cast<int32_t>(draft.cache_key_hash_seed),
+                static_cast<int32_t>(static_cast<uint64_t>(draft.cache_key_hash_seed) >> 32),
+                static_cast<int32_t>(sp_config->gen_num_per_cycle)};
+            config.cache_key_hash_seed = hashInt64Array(config.cache_key_hash_seed, identity, identity + 7);
         }
     }
 

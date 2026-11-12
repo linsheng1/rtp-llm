@@ -244,3 +244,18 @@ cc_test_wrapper(
     }),
     deps = kvcm_backend_test_deps,
 )
+
+cc_test(
+    name = "decode_payload_window_test",
+    srcs = ["BoundedFanoutHostTest.cc"],
+    copts = ["-std=c++17", "-UNDEBUG", "-pthread"],
+    linkopts = ["-pthread"],
+    deps = ["//rtp_llm/cpp/model_rpc:broadcast_manager", "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto"],
+)
+cc_test(
+    name = "decode_metadata_session_test",
+    srcs = ["MetadataSessionJournalHostTest.cc", "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:MetadataCallDisposition.h"],
+    copts = ["-std=c++17", "-UNDEBUG", "-pthread"],
+    linkopts = ["-pthread"],
+    deps = ["//rtp_llm/cpp/utils:core_utils"],
+)

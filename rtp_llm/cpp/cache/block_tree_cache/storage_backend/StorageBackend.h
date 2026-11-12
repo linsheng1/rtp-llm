@@ -112,6 +112,7 @@ struct StorageRequest {
     size_t computed_tokens{0};
     size_t published_tokens{0};
     std::optional<int64_t> prefill_computed_tokens;
+    std::shared_ptr<const void> source_owner;
     std::shared_ptr<void> completion_budget_lease;
     std::shared_ptr<StorageCompletionAdmission> completion_admission;
 
@@ -212,6 +213,7 @@ public:
 
 protected:
     using Task = StorageBackendExecutor::Task;
+    std::chrono::milliseconds operationTimeout() const noexcept { return timeout_; }
     // The completion callable only checks results and updates local state; it
     // must not start blocking I/O on the RPC completion/settlement thread.
     using ReadCompletion = std::function<void(Task)>;

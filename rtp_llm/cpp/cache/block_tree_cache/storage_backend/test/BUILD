@@ -16,3 +16,5 @@ cc_test_wrapper(
     ] + torch_deps(),
     tags = ["L20_CU13"],
 )
+
+exports_files(["ReservedCompletionLaneHostTest.cc"])

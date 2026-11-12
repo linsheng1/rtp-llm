@@ -1,4 +1,5 @@
 #pragma once
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/MetadataCallDisposition.h"
 
 #include <vector>
 #include <unordered_map>
@@ -73,6 +74,12 @@ public:
                      int64_t                         write_timeout_seconds,
                      int32_t                         min_replica_count = 0);
 
+    virtual std::pair<bool, kv_cache_manager::WriteLocation>
+    getWriteLocationWithDisposition(const std::string& unique_id, const std::string& trace_id,
+        const std::vector<int64_t>& keys, const std::vector<int64_t>& tokens,
+        const std::vector<std::string>& location_spec_group_names, int64_t write_timeout_seconds,
+        int32_t min_replica_count, MetadataCallDisposition* disposition);
+
     virtual bool removeCache(const std::string& unique_id, const std::string& trace_id,
                              const std::vector<int64_t>& keys, const std::vector<int64_t>& tokens,
                              const kv_cache_manager::BlockMask& block_mask);
@@ -92,6 +99,9 @@ public:
                              const std::string&                 write_session_id,
                              const kv_cache_manager::BlockMask& block_mask,
                              const kv_cache_manager::Locations& locations);
+    virtual bool finishWriteWithDisposition(const std::string& unique_id, const std::string& trace_id,
+        const std::string& write_session_id, const kv_cache_manager::BlockMask& block_mask,
+        const kv_cache_manager::Locations& locations, MetadataCallDisposition* disposition);
     virtual bool abortWrite(const std::string& unique_id, const std::string& trace_id,
                             const std::string& write_session_id);
 

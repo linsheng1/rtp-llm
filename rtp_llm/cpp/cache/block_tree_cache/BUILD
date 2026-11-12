@@ -283,3 +283,11 @@ cc_library(
         "//conditions:default": [],
     }),
 )
+
+cc_test(
+    name = "decode_completion_reservation_test",
+    srcs = ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/test:ReservedCompletionLaneHostTest.cc"],
+    copts = ["-std=c++17", "-UNDEBUG", "-pthread"],
+    linkopts = ["-pthread"],
+    deps = [":block_tree_task_pool"],
+)

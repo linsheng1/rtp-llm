@@ -96,6 +96,9 @@ cc_library(
         "PackedSsdTransferClient.h",
         "SdkTransferObserver.h",
         "ClientWrapper.h",
+        "MetadataCallDisposition.h",
+        "PayloadDispatchProof.h",
+        "PublicationSettlement.h",
         "KVCMConfig.h",
     ],
     copts = copts(),
@@ -145,3 +148,5 @@ exports_files(
     ["VIPServerSubscriber.cc", "VIPServerSubscriber.h", "Subscriber.h"],
     visibility = ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test:__pkg__"],
 )
+
+exports_files(["MetadataCallDisposition.h"], visibility = ["//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test:__pkg__"])

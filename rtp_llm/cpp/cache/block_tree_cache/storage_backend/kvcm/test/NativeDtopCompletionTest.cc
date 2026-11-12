@@ -15,6 +15,19 @@
 
 namespace rtp_llm {
 namespace {
+TEST(DecodePublicationConfigTest, MetadataLimitsUseValidatedPositiveSizeParser) {
+    autil::EnvGuard slots("RTP_LLM_REMOTE_CACHE_SESSION_SLOTS", "2");
+    autil::EnvGuard bytes("RTP_LLM_REMOTE_CACHE_SESSION_BYTES", "8192");
+    const auto limits = remoteCacheMetadataSessionLimits();
+    ASSERT_TRUE(limits); EXPECT_EQ(limits->sessions, 2u); EXPECT_EQ(limits->bytes, 8192u);
+    for (const auto* invalid : {"", "0", "-1", "1x", "65537", "18446744073709551616"}) {
+        autil::EnvGuard invalid_slots("RTP_LLM_REMOTE_CACHE_SESSION_SLOTS", invalid);
+        EXPECT_FALSE(remoteCacheMetadataSessionLimits()) << invalid;
+    }
+    autil::EnvGuard invalid_bytes("RTP_LLM_REMOTE_CACHE_SESSION_BYTES", "134217729");
+    EXPECT_FALSE(remoteCacheMetadataSessionLimits());
+}
+
 TEST(ClientFactoryFeatureBoundaryTest, DisabledAndUnsetDelegateConfigurationErrorsToTheSdk) {
     using namespace kv_cache_manager;
     // Invalid JSON cannot initiate network I/O. Compare against the SDK itself,
