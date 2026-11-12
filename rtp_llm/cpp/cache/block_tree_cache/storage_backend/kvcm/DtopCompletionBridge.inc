@@ -37,10 +37,13 @@ bool configureDecodePublication(const CacheTopology&                            
     // CP is the target layout, DP is execution parallelism. They are independent.
     // Geometry checks remain in CPSlotMapper / group projection, never a CP2/4 whitelist.
     const auto& tags = cache_config_.groupTags();
-    const bool dsv41 = std::find(tags.begin(), tags.end(), "Lcsa_state") != tags.end()
-        && std::find(tags.begin(), tags.end(), "Lswa_kv") != tags.end();
+    // Cache tags come from configure_v41_kv_cache; the L prefix belongs only
+    // to remote location-spec names, not to the target/draft pool topology.
+    const bool dsv41 = std::find(tags.begin(), tags.end(), "csa_state") != tags.end()
+        && std::find(tags.begin(), tags.end(), "swa_kv") != tags.end();
     const bool supported_speculation = dsv41 && (sp_config_.type == SP_TYPE_MTP || sp_config_.type == SP_TYPE_DSPARK)
-        && cache_config_.mtp_sub_configs.size() == 1;
+        && cache_config_.mtp_sub_configs.size() == 1 && cache_config_.mtp_sub_configs.front()
+        && cache_config_.mtp_sub_configs.front()->layer_num > 0;
     if (!pace_backend_ || (!is_decode_role_ && !prefill) || target_prefill_cp_ < 1
         || cache_config_.seq_size_per_block < 1
         || static_cast<size_t>(target_prefill_cp_)
@@ -51,7 +54,12 @@ bool configureDecodePublication(const CacheTopology&                            
         || (is_decode_role_ && (parallelism_config_.tp_size != 1 || parallelism_config_.dp_size < 1))
         || (prefill && (parallelism_config_.tp_size != target_prefill_cp_ || parallelism_config_.dp_size != 1))) {
         RTP_LLM_LOG_ERROR(
-            "Decode publication requires matching target P CP layout, positive D DP, DSV4.1 complete target/draft endpoints, and native PACE");
+            "Decode publication requires matching target P CP layout, positive D DP, DSV4.1 complete target/draft endpoints, and native PACE: "
+            "dsv41_tags=%d supported_speculation=%d sp_type=%d draft_modules=%zu role=%d tp=%ld dp=%ld target_cp=%d base=%zu pace=%d custom_client=%d salt_empty=%d",
+            dsv41, supported_speculation, static_cast<int>(sp_config_.type), cache_config_.mtp_sub_configs.size(),
+            static_cast<int>(parallelism_config_.role_type), parallelism_config_.tp_size, parallelism_config_.dp_size,
+            target_prefill_cp_, cache_config_.seq_size_per_block, pace_backend_,
+            !kv_cache_config_.kvcm_client_config.empty(), kv_cache_config_.kvcm_instance_id_salt.empty());
         return false;
     }
     if (!gdr_enabled_) {

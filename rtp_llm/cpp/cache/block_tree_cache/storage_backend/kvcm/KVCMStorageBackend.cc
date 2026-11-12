@@ -712,11 +712,82 @@ public:
             read_outcome = "disabled";
             throw StorageOperationBufferSafeFailure("remote cache disabled by KVCM before read submission");
         }
+        // Both completion paths publish the same validated origin bindings.
+        // The business completion retains destination pins until this returns.
+        auto bind_origins = [this, meta, origin_bindings = std::move(origin_bindings), track_origins,
+                             collect_bindings, validated_source_keys, remote_blocks,
+                             handle_count = request.handles.size()] {
+            // StorageBackend's task still owns the destination pins here. Publish
+            // provenance only after every required rank has completed its actual
+            // GPU read. A stale bind can never clear a newer allocation's source.
+            size_t                              bound_regions = 0;
+            std::shared_ptr<DecodeReuseSources> restored_sources;
+            if (track_origins && collect_bindings) {
+                try {
+                    restored_sources = std::make_shared<DecodeReuseSources>();
+                    restored_sources->reserve(remote_blocks);
+                } catch (const std::bad_alloc&) {
+                    restored_sources.reset();
+                }
+            }
+            for (size_t begin = 0; begin < origin_bindings.size();) {
+                size_t end = begin + 1;
+                while (end < origin_bindings.size() && origin_bindings[end].key == origin_bindings[begin].key)
+                    ++end;
+                bool bound = true;
+                for (size_t i = begin; i < end; ++i) {
+                    const auto& value = origin_bindings[i];
+                    bound = value.pool->bindDecodeOrigin(value.block, value.incarnation, value.tag, value.origin) && bound;
+                }
+                if (!bound) {
+                    for (size_t i = begin; i < end; ++i) {
+                        const auto& value = origin_bindings[i];
+                        value.pool->bindDecodeOrigin(value.block, value.incarnation, value.tag, nullptr);
+                    }
+                } else {
+                    bound_regions += end - begin;
+                    if (restored_sources)
+                        restored_sources->push_back({origin_bindings[begin].origin, Tier::REMOTE});
+                }
+                begin = end;
+            }
+            meta->decode_sources =
+                restored_sources && !restored_sources->empty() ? std::move(restored_sources) : DecodeReuseSourcesPtr{};
+            if (meta->decode_sources) {
+                try {
+                    const auto unit = topology_->groups().front().cacheKeyTokenStride();
+                    const auto adopted_end =
+                        unit != 0
+                                && handle_count
+                                       <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / unit ?
+                            static_cast<int64_t>(handle_count * unit) :
+                            int64_t{0};
+                    const auto counts = countDecodeReuse(*meta->decode_sources, adopted_end);
+                    if (counts.total() > 0) {
+                        RtpLLMDecodeCacheTokenMetricsCollector restored;
+                        restored.stage          = "restored";
+                        restored.logical_tokens = counts.total();
+                        reportRemoteMetrics<RtpLLMDecodeCacheTokenMetrics>(restored);
+                    }
+                } catch (const std::bad_alloc&) {
+                    // Attribution does not change the completed payload result.
+                }
+            }
+            if (track_origins) {
+                RtpLLMRemoteCacheOutcomeMetricsCollector source_result;
+                source_result.stage = "read_source";
+                source_result.outcome =
+                    collect_bindings && validated_source_keys == remote_blocks ? "validated" : "unknown_or_invalid";
+                reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(source_result);
+                RTP_LLM_LOG_INFO("DTOP_GPU read_source_bound_regions=%zu source_counts=awaiting_allocator_adoption",
+                                 bound_regions);
+            }
+        };
         if (done) {
             auto prepare_completion = [&](auto collect) {
                 Task finish = [this,
                                collect = std::move(collect),
-                               meta,
+                               bind_origins = std::move(bind_origins),
                                deadline = request.transfer_task->deadline(),
                                collector,
                                start,
@@ -733,7 +804,7 @@ public:
                         if (Clock::now() >= deadline) {
                             throw StorageOperationBufferSafeFailure("KVCM task deadline exceeded: after read");
                         }
-                        meta->decode_sources.reset();
+                        bind_origins();
                         collector.remote_read_token_num = static_cast<int64_t>(tokens);
                         collector.remote_read_fail_qps  = false;
                     } catch (const StorageOperationBufferSafeFailure&) {
@@ -753,71 +824,7 @@ public:
         (void)dispatchRequests(requests, request, source_may_be_touched, sdk_failed);
         source_may_be_touched = false;
         (void)remainingTimeout(request, "after read");
-        // StorageBackend's task still owns the destination pins here. Publish
-        // provenance only after every required rank has completed its actual
-        // GPU read. A stale bind can never clear a newer allocation's source.
-        size_t                              bound_regions = 0;
-        std::shared_ptr<DecodeReuseSources> restored_sources;
-        if (track_origins && collect_bindings) {
-            try {
-                restored_sources = std::make_shared<DecodeReuseSources>();
-                restored_sources->reserve(remote_blocks);
-            } catch (const std::bad_alloc&) {
-                restored_sources.reset();
-            }
-        }
-        for (size_t begin = 0; begin < origin_bindings.size();) {
-            size_t end = begin + 1;
-            while (end < origin_bindings.size() && origin_bindings[end].key == origin_bindings[begin].key)
-                ++end;
-            bool bound = true;
-            for (size_t i = begin; i < end; ++i) {
-                const auto& value = origin_bindings[i];
-                bound = value.pool->bindDecodeOrigin(value.block, value.incarnation, value.tag, value.origin) && bound;
-            }
-            if (!bound) {
-                for (size_t i = begin; i < end; ++i) {
-                    const auto& value = origin_bindings[i];
-                    value.pool->bindDecodeOrigin(value.block, value.incarnation, value.tag, nullptr);
-                }
-            } else {
-                bound_regions += end - begin;
-                if (restored_sources)
-                    restored_sources->push_back({origin_bindings[begin].origin, Tier::REMOTE});
-            }
-            begin = end;
-        }
-        meta->decode_sources =
-            restored_sources && !restored_sources->empty() ? std::move(restored_sources) : DecodeReuseSourcesPtr{};
-        if (meta->decode_sources) {
-            try {
-                const auto unit = topology_->groups().front().cacheKeyTokenStride();
-                const auto adopted_end =
-                    unit != 0
-                            && request.handles.size()
-                                   <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / unit ?
-                        static_cast<int64_t>(request.handles.size() * unit) :
-                        int64_t{0};
-                const auto counts = countDecodeReuse(*meta->decode_sources, adopted_end);
-                if (counts.total() > 0) {
-                    RtpLLMDecodeCacheTokenMetricsCollector restored;
-                    restored.stage          = "restored";
-                    restored.logical_tokens = counts.total();
-                    reportRemoteMetrics<RtpLLMDecodeCacheTokenMetrics>(restored);
-                }
-            } catch (const std::bad_alloc&) {
-                // Attribution does not change the completed payload result.
-            }
-        }
-        if (track_origins) {
-            RtpLLMRemoteCacheOutcomeMetricsCollector source_result;
-            source_result.stage = "read_source";
-            source_result.outcome =
-                collect_bindings && validated_source_keys == remote_blocks ? "validated" : "unknown_or_invalid";
-            reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(source_result);
-            RTP_LLM_LOG_INFO("DTOP_GPU read_source_bound_regions=%zu source_counts=awaiting_allocator_adoption",
-                             bound_regions);
-        }
+        bind_origins();
         // A canonical CP key already covers every shard. Do not multiply this
         // logical token count by the number of TP ranks or payload groups.
         collector.remote_read_token_num =

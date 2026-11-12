@@ -25,6 +25,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DecodePublicationAccounting.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/MetadataCallDisposition.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 
@@ -532,6 +533,77 @@ TEST(KVCMLocalTest, PublicationSwitchPreservesLegacyHostPoolFallbackAndRequiresG
     }
 }
 
+TEST(KVCMLocalTest, DsparkAdmitsNativeCacheTagsAndRejectsIncompleteDraftConfiguration) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    createDevice();
+    for (const auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+        // Native bounded-replay layout: target encoder STATE/SWA, plus an
+        // independent non-reusable decoder SWA segment for all three draft layers.
+        for (int invalid = 0; invalid < 8; ++invalid) {
+            SCOPED_TRACE(::testing::PrintToString(std::make_tuple(static_cast<int>(role), invalid)));
+            BackendEnvironment environment;
+            auto& target = environment.cache_config;
+            target.dtype = DataType::TYPE_FP16;
+            target.layer_num = 2;
+            target.seq_size_per_block = 8;
+            const std::string state_tag = invalid == 1 ? "Lcsa_state" : "csa_state";
+            const std::string swa_tag = invalid == 2 ? "Lswa_kv" : "swa_kv";
+            auto full = test::makeMhaSpec("csa_kv", 8, DataType::TYPE_FP16, 1, 2);
+            auto state = test::makeResolvedOpaqueSpec(true, state_tag, DataType::TYPE_FP32, 32, 8);
+            auto swa = test::makeResolvedOpaqueSpec(true, swa_tag, DataType::TYPE_FP16, 32, 8);
+            auto decoder = test::makeResolvedOpaqueSpec(true, "decoder_swa_kv", DataType::TYPE_FP16, 32, 8);
+            auto full_policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+            auto swa_policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
+            auto decoder_policy = swa_policy;
+            decoder_policy.enable_prefix_reuse = false;
+            target.fromGroupedSpecs({full, state, swa, decoder}, {{0}, {0}, {0}, {1}},
+                {CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::SWA, CacheGroupType::SWA},
+                {"csa_kv", state_tag, swa_tag, "decoder_swa_kv"},
+                {full_policy, swa_policy, swa_policy, decoder_policy});
+            CacheConfig draft;
+            draft.dtype = target.dtype;
+            draft.layer_num = 3;
+            draft.seq_size_per_block = target.seq_size_per_block;
+            draft.fromGroupedSpecs({decoder}, {{0, 1, 2}}, {CacheGroupType::SWA},
+                {"decoder_swa_kv"}, {decoder_policy});
+            target.mtp_sub_configs.push_back(target.mergeMTPModule(draft, 0, target.layer_num));
+            target.finalizeBlockNums(8, RuntimeConfig{});
+            ASSERT_EQ(target.mtp_sub_configs.size(), 1u);
+            EXPECT_EQ(target.layer_all_num(), 5u);
+            EXPECT_EQ(target.mtp_sub_configs.front()->layerIdsForGroup("decoder_swa_kv"),
+                      (std::vector<int>{0, 1, 2}));
+            EXPECT_EQ(target.layerIdsForGroup("decoder_swa_kv"), (std::vector<int>{1, 2, 3, 4}));
+            for (int layer = 2; layer < 5; ++layer)
+                EXPECT_EQ(&target.physicalGroupForLayer(layer, "decoder_swa_kv"),
+                          &target.mtp_sub_configs.front()->topology().groupForLayer(layer - 2, "decoder_swa_kv"));
+            initializeEnvironmentPools(environment, "dspark_native_tags", 8);
+            if (invalid == 3) target.mtp_sub_configs.clear();
+            if (invalid == 4) target.mtp_sub_configs.push_back(target.mtp_sub_configs.front());
+            if (invalid == 5) target.mtp_sub_configs.front().reset();
+            if (invalid == 6) target.mtp_sub_configs.front()->layer_num = 0;
+            SpeculativeExecutionConfig speculation;
+            speculation.type = invalid == 7 ? SP_TYPE_EAGLE : SP_TYPE_DSPARK;
+            speculation.gen_num_per_cycle = 5; // Proposal width is not the draft layer/module count.
+            auto client = std::make_shared<MockClientWrapper>();
+            EXPECT_CALL(*client, initForPools(_, _, _, _)).Times(invalid == 0 ? 1 : 0).WillRepeatedly(Return(true));
+            EXPECT_CALL(*client, shutdown()).Times(1);
+            KVCacheConfig config;
+            config.kvcm_server_address = "unused-test-address";
+            config.kvcm_instance_id_salt = "dspark-native-tag-admission";
+            config.kvcm_model_sdk_config = R"([{"type":"pace_ssd"}])";
+            config.kvcm_read_backend_type = 9;
+            auto parallel = singleRankConfig();
+            parallel.role_type = role;
+            parallel.prefill_cp_config.prefill_cp_size = 1;
+            RuntimeConfig runtime;
+            runtime.model_name = "DeepSeekV41";
+            BackendHandle backend(std::make_unique<KVCMStorageBackend>(target, config, runtime, parallel,
+                speculation, nullptr, true, nullptr, client));
+            EXPECT_EQ(initSingleRank(*backend.backend, environment), invalid == 0);
+        }
+    }
+}
+
 TEST(KVCMLocalTest, LegacyEmptyRemoteResponsePreservesOneofPresence) {
     FunctionResponsePB response;
     response.mutable_remote_response();
@@ -785,17 +857,22 @@ TEST(KVCMLocalTest, CallerBufferSafetyDoesNotProveRemoteAllocationQuiescence) {
             EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
                 .WillOnce(Return(std::make_pair(true, allocation)));
             const bool unknown = !safe;
-            if (enabled) {
-                EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).Times(0);
-            } else {
-                EXPECT_CALL(*client, finishWrite(_, _, "pending-session", _, _)).WillOnce(Return(true));
-            }
+            // A submitted destination remains unproven even when the caller's
+            // buffer is safe, independently of the Decode feature switch.
+            EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).Times(0);
+            EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
+            const auto limits = remoteCacheMetadataSessionLimits();
+            ASSERT_TRUE(limits);
+            const auto sessions_before = kvcm::Session::usage(*limits);
             const auto ref_count_before = environment.device_pool->refCount(environment.block_id);
             client->save_status = ec;
             auto task           = backend.backend->prepareWrite(makeStorageRequest(environment));
             ASSERT_TRUE(static_cast<bool>(task));
             ASSERT_TRUE(backend.backend->write(std::move(task)));
             ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+            const auto sessions_after = kvcm::Session::usage(*limits);
+            EXPECT_EQ(sessions_after.occupied, sessions_before.occupied + 1);
+            EXPECT_EQ(sessions_after.unknown, sessions_before.unknown + 1);
             EXPECT_EQ(static_cast<bool>(backend.backend->protected_quarantine_), enabled && unknown);
             EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), !enabled && unknown);
             EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + (unknown ? 1u : 0u));
@@ -1322,6 +1399,9 @@ TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement
             std::make_shared<BackendHandle>(makeBackend(*environment, parallel, client, broadcast, nullptr, false, config));
         block_tree_cache_detail::ScopeRollback unblock([release] { release->set_value(); });
         ASSERT_TRUE(initSingleRank(*backend->backend, *environment));
+        const auto session_limits = remoteCacheMetadataSessionLimits();
+        ASSERT_TRUE(session_limits);
+        const auto sessions_before = kvcm::Session::usage(*session_limits);
         auto profile = AsyncProfileSession::start(128);
         ASSERT_TRUE(profile);
         block_tree_cache_detail::ScopeRollback stop_profile([&] { profile->finish(); });
@@ -1354,7 +1434,7 @@ TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement
             auto acknowledge = ::testing::InvokeWithoutArgs([completed] { completed->set_value(); return true; });
             if (late) {
                 EXPECT_CALL(*client, finishWrite(_, _, "deferred-write", _, _)).Times(0);
-                EXPECT_CALL(*client, abortWrite(_, _, "deferred-write")).WillOnce(acknowledge);
+                EXPECT_CALL(*client, abortWrite(_, _, "deferred-write")).Times(0);
             } else {
                 EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
                 EXPECT_CALL(*client, finishWrite(_, _, "deferred-write", all_written, _))
@@ -1414,8 +1494,16 @@ TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement
         }
         ASSERT_EQ(stopping.waitFor(std::chrono::seconds(5)), std::future_status::ready);
         stopping.get();
-        ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-        result.get();
+        // Writes have no public completion callback. Shutdown must drain the
+        // actual business settlement, not manufacture an abort ACK to signal it.
+        ASSERT_TRUE(waitForBackendOperationsForTest(*backend->backend));
+        if (!write || !late) {
+            ASSERT_EQ(result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+            result.get();
+        }
+        const auto sessions_after = kvcm::Session::usage(*session_limits);
+        EXPECT_EQ(sessions_after.occupied, sessions_before.occupied + (write && late ? 1u : 0u));
+        EXPECT_EQ(sessions_after.unknown, sessions_before.unknown + (write && late ? 1u : 0u));
         EXPECT_FALSE(environment->device_pool->isFrozen(environment->block_id));
         EXPECT_EQ(environment->device_pool->refCount(environment->block_id), refs);
         const auto events = profile->finish();
