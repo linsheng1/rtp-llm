@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <deque>
 #include <future>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -623,6 +624,19 @@ protected:
     bool quiesceUnknownOperations() noexcept override { return quiescent.load(); }
 };
 
+template<typename Failure>
+class ReportingProbeFailure: public Failure {
+public:
+    ReportingProbeFailure(StorageQuarantineReason reason, std::function<void()> probe):
+        Failure("unknown completion before allocating the detailed error report", reason), probe_(std::move(probe)) {}
+    const char* what() const noexcept override {
+        probe_(); // Observe the actual reporting boundary, not a copied settlement model.
+        return Failure::what();
+    }
+private:
+    std::function<void()> probe_;
+};
+
 class ThrowingEntryBackend: public ProtectedBackend {
 public:
     using ProtectedBackend::ProtectedBackend;
@@ -1117,6 +1131,71 @@ TEST(StorageBackendTest, CompletionPreparationFailureReleasesReadAndWriteWithout
             EXPECT_TRUE(keys.expired());
             EXPECT_EQ(budget->snapshot().jobs, 0u);
             EXPECT_EQ(executor->runAll(), 0u); // No second completion was queued.
+        }
+    }
+}
+
+TEST(StorageBackendTest, TypedUnknownIsQuarantinedOnceBeforeErrorReporting) {
+    for (const bool read : {false, true}) {
+        for (const bool protect : {false, true}) {
+            for (const bool timeout : {false, true}) {
+                auto pool = std::make_shared<TestBlockPool>();
+                const auto block = pool->malloc().value();
+                pool->incRef(block);
+                block_tree_cache_detail::ScopeRollback free_request_ref([&] { pool->decRef(block); });
+                auto executor = std::make_shared<HoldingExecutor>();
+                std::shared_ptr<QuarantineObservingBackend> backend = protect ?
+                    std::make_shared<ProtectedBackend>(true, executor) :
+                    std::make_shared<QuarantineObservingBackend>(true, executor);
+                ASSERT_TRUE(initBackend(*backend, pool));
+                block_tree_cache_detail::ScopeRollback cleanup([backend] {
+                    if (auto protected_backend = std::dynamic_pointer_cast<ProtectedBackend>(backend))
+                        protected_backend->proveQuiescence();
+                    backend->shutdown();
+                });
+                auto reports = std::make_shared<size_t>(0);
+                auto callbacks = std::make_shared<size_t>(0);
+                const std::weak_ptr<QuarantineObservingBackend> weak = backend;
+                auto probe = [pool, block, protect, reports, weak] {
+                    ++*reports;
+                    const auto owner = weak.lock();
+                    EXPECT_TRUE(owner);
+                    if (!owner) return;
+                    EXPECT_EQ(owner->quarantine_events, 1u);
+                    EXPECT_EQ(owner->quarantined_tasks, 1u);
+                    EXPECT_EQ(pool->isFrozen(block), !protect);
+                    EXPECT_EQ(pool->refCount(block), 2u);
+                };
+                const auto reason = timeout ? StorageQuarantineReason::SDK_TIMEOUT : StorageQuarantineReason::RPC_ERROR;
+                auto fail = [probe, reason, timeout] {
+                    if (timeout) throw ReportingProbeFailure<StorageOperationTimeout>(reason, probe);
+                    throw ReportingProbeFailure<StorageOperationCompletionUnknown>(reason, probe);
+                };
+                backend->read_action = fail;
+                backend->write_action = fail;
+                if (read) {
+                    backend->read(makeRequest(block), nullptr, [callbacks, timeout](ErrorInfo error) {
+                        ++*callbacks;
+                        EXPECT_EQ(error.code(), timeout ? ErrorCode::DEADLINE_EXCEEDED : ErrorCode::EXECUTION_EXCEPTION);
+                    });
+                } else {
+                    ASSERT_TRUE(backend->write(backend->prepareWrite(makeRequest(block))));
+                }
+                ASSERT_EQ(executor->runAll(), 1u);
+                EXPECT_EQ(*callbacks, read ? 1u : 0u);
+                // Reads always examine what() to construct ErrorInfo. Write logging
+                // can be disabled; any actual what() call still runs the probe.
+                if (read) EXPECT_GT(*reports, 0u);
+                EXPECT_EQ(backend->quarantine_events, 1u);
+                EXPECT_EQ(backend->quarantined_tasks, 1u);
+                EXPECT_EQ(backend->last_quarantine_reason, reason);
+                EXPECT_EQ(backend->last_quarantine_is_write, !read);
+                EXPECT_EQ(pool->isFrozen(block), !protect);
+                EXPECT_EQ(pool->refCount(block), 2u);
+                EXPECT_EQ(executor->runAll(), 0u);
+                cleanup.run();
+                EXPECT_EQ(pool->refCount(block), protect ? 1u : 2u);
+            }
         }
     }
 }

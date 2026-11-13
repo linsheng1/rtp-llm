@@ -659,42 +659,39 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                                 error = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "storage read deadline exceeded");
                             }
                         } catch (const StorageOperationTimeout& exception) {
-                            if (!before_io && state->completion_protected) {
-                                quarantineTask(state, /*is_write=*/false, exception.reason());
+                            if (!before_io) {
+                                quarantine_reason = exception.reason();
+                                quarantineTask(state, /*is_write=*/false, *quarantine_reason);
                             }
-                            error             = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, exception.what());
-                            if (!before_io) quarantine_reason = exception.reason();
+                            error = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, exception.what());
                         } catch (const StorageOperationCompletionUnknown& exception) {
-                            if (!before_io && state->completion_protected) {
-                                quarantineTask(state, /*is_write=*/false, exception.reason());
+                            if (!before_io) {
+                                quarantine_reason = exception.reason();
+                                quarantineTask(state, /*is_write=*/false, *quarantine_reason);
                             }
-                            error             = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
-                            if (!before_io) quarantine_reason = exception.reason();
+                            error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
                         } catch (const StorageOperationBufferSafeFailure& exception) {
                             error = ErrorInfo(state->request.transfer_task->expired() ? ErrorCode::DEADLINE_EXCEEDED :
                                                                                         ErrorCode::EXECUTION_EXCEPTION,
                                               exception.what());
                         } catch (const std::exception& exception) {
                             if (!before_io && state->completion_protected) {
-                                quarantineTask(state, /*is_write=*/false, StorageQuarantineReason::INVALID_RESPONSE);
                                 quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
+                                quarantineTask(state, /*is_write=*/false, *quarantine_reason);
                             }
                             error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
                         } catch (...) {
                             if (!before_io && state->completion_protected) {
-                                quarantineTask(state, /*is_write=*/false, StorageQuarantineReason::INVALID_RESPONSE);
                                 quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
+                                quarantineTask(state, /*is_write=*/false, *quarantine_reason);
                             }
                             error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown storage read failure");
                         }
                         io.finish(error.ok());
                     }
                     auto settle = stageValue("read_settle", state->request, "read", state->trace_id);
-                    if (quarantine_reason) {
-                        quarantineTask(state, /*is_write=*/false, *quarantine_reason);
-                    } else {
-                        state->finish();
-                    }
+                    // A recorded reason was already quarantined before fallible reporting.
+                    if (!quarantine_reason) state->finish();
                     settle.finish(true);
                     const bool success = error.ok();
                     if (done) {
@@ -795,14 +792,14 @@ bool StorageBackend::write(StorageWriteTask task) {
                             result(on_worker);
                         success = !state->request.transfer_task->expired();
                     } catch (const StorageOperationTimeout& error) {
-                        if (!before_io) quarantine_reason = error.reason();
-                        if (!before_io && state->completion_protected) {
+                        if (!before_io) {
+                            quarantine_reason = error.reason();
                             quarantineTask(state, /*is_write=*/true, *quarantine_reason);
                         }
                         RTP_LLM_LOG_WARNING("StorageBackend write timed out: %s", error.what());
                     } catch (const StorageOperationCompletionUnknown& error) {
-                        if (!before_io) quarantine_reason = error.reason();
-                        if (!before_io && state->completion_protected) {
+                        if (!before_io) {
+                            quarantine_reason = error.reason();
                             quarantineTask(state, /*is_write=*/true, *quarantine_reason);
                         }
                         RTP_LLM_LOG_WARNING("StorageBackend write completion is unknown: %s",
@@ -825,11 +822,8 @@ bool StorageBackend::write(StorageWriteTask task) {
                     io.finish(success);
                 }
                 auto settle = stageValue("write_settle", state->request, "write", state->trace_id);
-                if (quarantine_reason) {
-                    quarantineTask(state, /*is_write=*/true, *quarantine_reason);
-                } else {
-                    state->finish();
-                }
+                // A recorded reason was already quarantined before fallible reporting.
+                if (!quarantine_reason) state->finish();
                 settle.finish(true);
                 total.finish(success);
             });
