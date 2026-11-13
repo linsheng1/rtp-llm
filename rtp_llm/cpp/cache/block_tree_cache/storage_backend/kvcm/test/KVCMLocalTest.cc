@@ -1050,6 +1050,35 @@ TEST(KVCMLocalTest, CommitAckFailureIsUnknownPublicationWithoutUnknownDma) {
     });
 }
 
+TEST(KVCMLocalTest, SynchronousDecodeAdapterRejectsBeforeMetadataOrPayload) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        auto environment = makeBackendEnvironment("sync_decode_adapter");
+        auto client = std::make_shared<MockClientWrapper>();
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        KVCacheConfig config;
+        config.kvcm_model_sdk_config = R"([{"type":"pace"}])";
+        auto parallel = singleRankConfig();
+        parallel.role_type = RoleType::DECODE;
+        parallel.prefill_cp_config.prefill_cp_size = 1;
+        auto backend = makeBackend(environment, parallel, client, nullptr, nullptr, true, config);
+        ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+        auto request = makeStorageRequest(environment);
+        request.decode_completion = true;
+        const auto refs = environment.device_pool->refCount(environment.block_id);
+        EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, _)).Times(0);
+        EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(0);
+        EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).Times(0);
+        EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
+        EXPECT_THROW(backend.backend->writeImpl(request), StorageOperationBufferSafeFailure);
+        EXPECT_EQ(environment.device_pool->refCount(environment.block_id), refs);
+        EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+        EXPECT_FALSE(backend.backend->hasUnresolvedExternalIo());
+        backend.backend->shutdown();
+    });
+}
+
 TEST(KVCMLocalTest, FailedOrThrowingStartNeverDispatchesOrClosesPayload) {
     for (const bool enabled : {false, true}) {
         for (const bool throws : {false, true}) {

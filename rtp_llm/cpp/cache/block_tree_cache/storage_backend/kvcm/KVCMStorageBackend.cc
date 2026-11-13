@@ -895,6 +895,10 @@ public:
             return false;
         }
         const bool defer = static_cast<bool>(done);
+        // Public D publication always supplies completion. The required legacy
+        // synchronous adapter is Prefill-only; reject before opening a session.
+        if (!defer && request.decode_completion)
+            throw StorageOperationBufferSafeFailure("synchronous Decode publication requires completion");
         auto async_write = defer ? std::make_shared<WritePublication>() : nullptr;
         std::optional<WritePublication> local;
         if (!defer) local.emplace();
@@ -911,8 +915,6 @@ public:
         std::vector<std::string> location_spec_group_names;
         RTP_LLM_CHECK_WITH_INFO(group_policy_->getNeedWriteGroups(request, valid_keys_size, location_spec_group_names),
                                 "KVCM write group selection failed");
-        const auto        write_started_us  = autil::TimeUtility::currentTimeInMicroSeconds();
-        size_t            transferred_bytes = 0;
         const std::string trace_id     = nextTraceId("write", write_trace_sequence_);
         publication.resources = completion_resources_;
         (void)remainingTimeout(request, "before StartWrite");
@@ -1001,7 +1003,6 @@ public:
                                                 "KVCM write has no source handle for key=%zu tag=%s",
                                                 key_idx,
                                                 group.tag.c_str());
-                        transferred_bytes += group.block_size_bytes;
                         remote->add_group_tags(group.tag);
                         remote->add_block_ids(request.decode_completion && !handle->peer_blocks.empty() ?
                                                   handle->peer_blocks.at(rank) :
@@ -1062,35 +1063,11 @@ public:
                 return true;
             }
 
-            const auto responses = [&] {
-                if (request.decode_completion) {
-                    return dispatchProjectedSync(requests, request,
-                        source_may_be_touched, sdk_failed, *publication.dispatch_proof);
-                }
-                auto responses = dispatchRequests(requests, request, source_may_be_touched, sdk_failed,
-                                                    publication.dispatch_proof.get());
-                source_may_be_touched = false;
-                return responses;
-            }();
+            auto responses = dispatchRequests(requests, request, source_may_be_touched, sdk_failed,
+                                               publication.dispatch_proof.get());
+            source_may_be_touched = false;
             broadcast_timer.run();
             publishWrite(request, publication, write_session_id, responses, key_indices);
-            if (request.decode_completion) {
-                RTP_LLM_LOG_DEBUG(
-                    "DTOP_GPU committed computed_end=%zu canonical_keys=%zu new_locations=%zu bytes=%zu dp_rank=%ld",
-                    request.published_tokens,
-                    request.keys->size(),
-                    write_location.locations.size(),
-                    transferred_bytes,
-                    parallelism_config_.dp_rank);
-                RTP_LLM_LOG_DEBUG("DTOP_GPU commit actual_computed_end=%zu published=%zu tail=%zu CPU_snapshot_bytes=0",
-                                 request.computed_tokens,
-                                 request.published_tokens,
-                                 request.computed_tokens - request.published_tokens);
-                RTP_LLM_LOG_DEBUG("DTOP_GPU write_duration_us=%ld computed_end=%zu bytes=%zu",
-                                 autil::TimeUtility::currentTimeInMicroSeconds() - write_started_us,
-                                 request.published_tokens,
-                                 transferred_bytes);
-            }
         } catch (...) {
             std::lock_guard<std::mutex> settlement_lock(publication.settlement_mutex);
             if (!publication.settlement_started) {
@@ -2341,22 +2318,6 @@ private:
         result->start();
     }
 
-    std::vector<FunctionResponsePB> dispatchProjectedSync(const std::vector<FunctionRequestPB>& requests,
-        const StorageRequest& request, bool& touched, bool& sdk_failed,
-        kvcm::PayloadDispatchProof& proof) {
-        auto completed = std::make_shared<std::promise<std::vector<FunctionResponsePB>>>();
-        auto ready = completed->get_future();
-        auto prepare = [completed, &touched, &sdk_failed](auto collect) {
-            return [completed, &touched, &sdk_failed, collect = std::move(collect)]() mutable {
-                try { completed->set_value(collect(touched, sdk_failed)); }
-                catch (...) { completed->set_exception(std::current_exception()); }
-            };
-        };
-        auto held_proof = std::shared_ptr<kvcm::PayloadDispatchProof>(&proof, [](auto*) {});
-        dispatchProjectedAsync(requests, request, touched, prepare, std::move(held_proof));
-        return ready.get();
-    }
-
     template<typename Completion>
     static void onPayloadDone(const std::shared_ptr<PayloadResult>& result, Completion complete) {
         try {
@@ -2706,6 +2667,7 @@ bool KVCMStorageBackend::usesAsyncPayload(const StorageRequest& request, bool is
     return impl_->usesAsyncPayload(request, is_write);
 }
 
+// Legacy synchronous Prefill adapter; D uses startWriteImpl with a completion.
 void KVCMStorageBackend::writeImpl(const StorageRequest& request) {
     impl_->write(request);
 }
