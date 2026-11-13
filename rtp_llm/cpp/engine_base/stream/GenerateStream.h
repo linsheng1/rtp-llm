@@ -202,6 +202,7 @@ public:
         return GenerationPrefillCudaGraphStatus::NOT_REQUESTED;
     }
     void update(const StreamUpdateInfo& update_info);
+    std::shared_ptr<const DecodeEndpoint> latestDecodePublicationEndpoint() const;
     void setDecodePublicationPages(std::vector<std::shared_ptr<const DecodeEndpoint>> pages);
     void specUpdate(const StreamSpecUpdateInfo& update_info);
     bool updateKvCacheBlocks(const torch::Tensor& src_batch_indices);

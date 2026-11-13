@@ -328,6 +328,26 @@ TEST_F(GenerateStreamTest, PublishedVerifiedDraftCountPrecedesTerminalWindowClip
     EXPECT_EQ(output.value().generate_outputs[0].aux_info.speculative_verified_draft_tokens, 5);
 }
 
+TEST_F(GenerateStreamTest, LatestDecodeEndpointIncludesPendingCandidatesAndRetainsSnapshot) {
+    auto stream = GenerateStreamBuilder().createContextStream({1, 2, 3});
+    auto selected = std::make_shared<DecodeEndpoint>(); selected->end = 4;
+    auto pending = std::make_shared<DecodeEndpoint>(); pending->end = 12;
+    auto middle = std::make_shared<DecodeEndpoint>(); middle->end = 8;
+    auto& resource = stream->kvCacheMutable();
+    resource.decode_endpoint = selected;
+    resource.decode_round_endpoints = {nullptr, pending, middle};
+    auto snapshot = stream->latestDecodePublicationEndpoint();
+    EXPECT_EQ(snapshot, pending);
+    std::weak_ptr<const DecodeEndpoint> lifetime = pending;
+    resource.decode_endpoint.reset();
+    resource.decode_round_endpoints.clear();
+    pending.reset();
+    EXPECT_FALSE(lifetime.expired());
+    snapshot.reset();
+    EXPECT_TRUE(lifetime.expired());
+    EXPECT_FALSE(stream->latestDecodePublicationEndpoint());
+}
+
 TEST_F(GenerateStreamTest, DecodeCacheActualUseIncludesHotTiersWithoutRemoteRestore) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {

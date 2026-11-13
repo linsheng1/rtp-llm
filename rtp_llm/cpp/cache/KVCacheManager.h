@@ -67,7 +67,8 @@ public:
 
     size_t decodePublicationUnit() const;
     std::shared_ptr<const DecodeEndpoint> retainDecodeEndpoint(const torch::Tensor& physical_ids,
-        const std::vector<std::string>& tags, size_t row, size_t end) const;
+        const std::vector<std::string>& tags, size_t row, size_t end,
+        const std::shared_ptr<const DecodeEndpoint>& previous = {}) const;
 
     // Decode-side P/D admission allocates destination blocks before cache handoff.  When pools are
     // temporarily full, waiters use this generation instead of polling malloc in a tight loop.

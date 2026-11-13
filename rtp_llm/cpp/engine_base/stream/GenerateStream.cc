@@ -1408,6 +1408,16 @@ void GenerateStream::matchStopWordsList(int batch_id) {
     }
 }
 
+std::shared_ptr<const DecodeEndpoint> GenerateStream::latestDecodePublicationEndpoint() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    if (!stream_cache_resource_) return {};
+    const auto& resource = kvCache();
+    auto latest = resource.decode_endpoint;
+    for (const auto& candidate : resource.decode_round_endpoints)
+        if (candidate && (!latest || candidate->end > latest->end)) latest = candidate;
+    return latest;
+}
+
 void GenerateStream::setDecodePublicationPages(std::vector<std::shared_ptr<const DecodeEndpoint>> pages) {
     std::lock_guard<std::mutex> lock(*mutex_);
     if (!stream_cache_resource_ || hasErrorWithoutLock() || isFinished()) return;

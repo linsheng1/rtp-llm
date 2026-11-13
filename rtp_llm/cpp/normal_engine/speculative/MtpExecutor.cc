@@ -102,9 +102,13 @@ void MtpExecutor::retainDecodePublicationPages(const StreamGroups& streams, cons
             const size_t end = std::min(target_end, draft_end) / unit * unit;
             // Include all complete endpoints in this actual accept packet:
             // EOS/stop can subsequently trim it to an earlier candidate.
+            auto previous = stream->latestDecodePublicationEndpoint();
             for (size_t h = (static_cast<size_t>(prefix) / unit + 1) * unit; h <= end; h += unit) {
-                auto endpoint = cache_manager_->retainDecodeEndpoint(ids, target.kv_cache_group_tags, row, h);
-                if (endpoint) endpoints.push_back(std::move(endpoint));
+                auto endpoint = cache_manager_->retainDecodeEndpoint(ids, target.kv_cache_group_tags, row, h, previous);
+                if (endpoint) {
+                    previous = endpoint;
+                    endpoints.push_back(std::move(endpoint));
+                }
             }
         } catch (const std::exception& error) {
             RTP_LLM_LOG_WARNING("DSV4.1 optional endpoint capture failed: %s", error.what());

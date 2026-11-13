@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <functional>
 #include <unordered_map>
 #include <sstream>
 #include <string>
@@ -11,11 +12,28 @@
 #include "rtp_llm/cpp/utils/DecodePublicationLifecycle.h"
 
 namespace rtp_llm {
+class DeviceBlockPool;
 // One actual complete endpoint. No schema, per-token history or Graph inputs.
 struct DecodeEndpoint {
     size_t end{0};
     std::unordered_map<std::string, BlockIndicesType> blocks;
-    std::shared_ptr<const void> owner;
+    // The original per-page pin, shared only for matching FULL slots. Holding
+    // a pool/block prevents recycling; it is not a writer-completion proof.
+    struct PageHold {
+        std::shared_ptr<DeviceBlockPool> pool;
+        BlockIdxType block{NULL_BLOCK_IDX};
+        std::function<void()> release;
+        PageHold() = default;
+        PageHold(const PageHold&) = delete;
+        PageHold& operator=(const PageHold&) = delete;
+        PageHold(PageHold&&) = delete;
+        PageHold& operator=(PageHold&&) = delete;
+        ~PageHold() { if (release) release(); }
+    };
+    using PageHolds = std::vector<std::shared_ptr<const PageHold>>;
+    // FULL holds are slot-indexed. STATE/SWA hold only this endpoint's required
+    // tail pages and are never inherited from another endpoint.
+    std::unordered_map<std::string, PageHolds> pages;
     mutable std::shared_ptr<const DecodeEndpoint> unknown_owner;
 };
 class BatchKVCacheResource {
