@@ -36,19 +36,24 @@ bool remoteCacheGdrEnabled() {
     return enabled;
 }
 
+namespace {
+const std::optional<bool>& decodePublicationSetting() {
+    static const std::optional<bool> setting = []() -> std::optional<bool> {
+        const char* value = std::getenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH");
+        if (!value || std::string_view(value) == "0") return false;
+        if (std::string_view(value) == "1") return true;
+        return std::nullopt;
+    }();
+    return setting;
+}
+}  // namespace
+
 bool remoteCacheDecodePublicationEnabled() {
-    const char* value = std::getenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH");
-    return value != nullptr && std::string_view(value) == "1";
+    return decodePublicationSetting().value_or(false);
 }
 
-std::optional<MetadataSessionLimits> remoteCacheMetadataSessionLimits() {
-    MetadataSessionLimits limits;
-    auto sessions = readPositiveSize("RTP_LLM_REMOTE_CACHE_SESSION_SLOTS", limits.sessions, 65536);
-    auto bytes = readPositiveSize("RTP_LLM_REMOTE_CACHE_SESSION_BYTES", limits.bytes, 128ULL * 1024 * 1024);
-    if (!sessions || !bytes) return std::nullopt;
-    limits.sessions = *sessions;
-    limits.bytes = *bytes;
-    return limits;
+bool remoteCacheDecodePublicationConfigValid() {
+    return decodePublicationSetting().has_value();
 }
 
 std::optional<DecodePublicationLimits> remoteCacheDecodePublicationLimits(size_t native_pool_bytes) {

@@ -60,7 +60,7 @@ absl::Status NormalBatchStreamProcessor::dispatch(const StreamGroups& stream_gro
 absl::Status NormalBatchStreamProcessor::dispatchPrefillOnly(
     const StreamGroups&                                   stream_groups,
     GenerationPrefillCudaGraphStatus                      generation_prefill_cuda_graph_status,
-    std::optional<RemoteRestoreTiming::Clock::time_point> context_kv_all_rank_gpu_ready_at) const {
+    bool context_kv_all_rank_gpu_ready) const {
     for (const auto& stream : stream_groups.allStreams()) {
         auto empty_token_ids = torch::empty({stream->currentBatchSize(), 0}, torch::kInt32);
         StreamUpdateInfo update_info{empty_token_ids,
@@ -78,7 +78,7 @@ absl::Status NormalBatchStreamProcessor::dispatchPrefillOnly(
                                      /*prompt_logits=*/std::nullopt,
                                      /*error_info=*/std::nullopt,
                                      generation_prefill_cuda_graph_status};
-        update_info.context_kv_all_rank_gpu_ready_at = context_kv_all_rank_gpu_ready_at;
+        update_info.context_kv_all_rank_gpu_ready = context_kv_all_rank_gpu_ready;
         stream->update(update_info);
     }
     return absl::OkStatus();

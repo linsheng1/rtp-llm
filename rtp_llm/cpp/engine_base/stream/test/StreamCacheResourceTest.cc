@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 
 #include "gtest/gtest.h"
 #include "gmock/gmock.h"
@@ -1208,6 +1209,7 @@ TEST_F(StreamCacheResourceTest, StorageMatchDefersReusePublicationUntilReadCompl
 
 TEST_F(StreamCacheResourceTest, RequestFinishFiltersRemoteReuseOnlyForSingleReplicaPrefill) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION, RoleType::DECODE}) {
         SCOPED_TRACE(role);
         for (const int replicas : {0, 1, 2}) {
@@ -1232,6 +1234,7 @@ TEST_F(StreamCacheResourceTest, RequestFinishFiltersRemoteReuseOnlyForSingleRepl
             EXPECT_TRUE(resource.isResourceReleased());
         }
     }
+    });
 }
 
 TEST_F(StreamCacheResourceTest, AdoptedRemoteCountsControlRequestFinishWrites) {
@@ -1810,6 +1813,7 @@ TEST_F(StreamCacheResourceTest, HostSuccessDiskFailureUsesJointPrefixWithCpReuse
 
 TEST_F(StreamCacheResourceTest, PartialLoadFailureRetainsDecodeSourcesOnlyForReadyPrefix) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     for (const bool host_first : {false, true}) {
         for (const bool host_success : {false, true}) {
             SCOPED_TRACE(host_first);
@@ -1872,6 +1876,7 @@ TEST_F(StreamCacheResourceTest, PartialLoadFailureRetainsDecodeSourcesOnlyForRea
             EXPECT_FALSE(resource.decode_reuse_use_state_.consume(true));
         }
     }
+    });
 }
 
 TEST_F(StreamCacheResourceTest, testPrefillLoadFailureDetachShortfallRearmsAllocation) {

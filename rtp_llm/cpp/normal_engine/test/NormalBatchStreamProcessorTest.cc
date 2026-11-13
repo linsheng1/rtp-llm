@@ -171,12 +171,10 @@ TEST_P(OutputDispatchTest, RestoreGpuReadinessNeedsProducerRankDependencyAndExis
     public:
         using NormalGenerateStream::NormalGenerateStream;
         void updateOutput(const StreamUpdateInfo& update_info) override {
-            readiness.push_back(update_info.context_kv_all_rank_gpu_ready_at);
-            observations.push_back(RemoteRestoreTiming::Clock::now());
+            readiness.push_back(update_info.context_kv_all_rank_gpu_ready);
             NormalGenerateStream::updateOutput(update_info);
         }
-        std::vector<std::optional<RemoteRestoreTiming::Clock::time_point>> readiness;
-        std::vector<RemoteRestoreTiming::Clock::time_point>                observations;
+        std::vector<bool> readiness;
     };
     for (const bool rank_dependency : {false, true}) {
         for (const bool gpu_output : {false, true}) {
@@ -199,10 +197,7 @@ TEST_P(OutputDispatchTest, RestoreGpuReadinessNeedsProducerRankDependencyAndExis
             NormalOutputDispatcher dispatcher({}, GetParam());
             ASSERT_TRUE(dispatcher.dispatch(streams, outputs).ok());
             ASSERT_EQ(stream->readiness.size(), 1u);
-            EXPECT_EQ(stream->readiness.front().has_value(), rank_dependency && gpu_output);
-            if (stream->readiness.front()) {
-                EXPECT_LE(*stream->readiness.front(), stream->observations.front());
-            }
+            EXPECT_EQ(stream->readiness.front(), rank_dependency && gpu_output);
             EXPECT_EQ(stream->outputTokenLen(), 1);
         }
     }
@@ -746,7 +741,7 @@ TEST_P(NormalBatchStreamProcessorPrefillOnlyTest, prefillOnlySkipsLmHeadAndDispa
         EXPECT_EQ(update_info.new_tokens.sizes(), (torch::IntArrayRef{1, 0}));
         EXPECT_FALSE(update_info.update_remote_generate);
         EXPECT_FALSE(update_info.force_update_info);
-        EXPECT_FALSE(update_info.context_kv_all_rank_gpu_ready_at);
+        EXPECT_FALSE(update_info.context_kv_all_rank_gpu_ready);
         EXPECT_FALSE(update_info.prompt_logits.has_value());
         EXPECT_FALSE(update_info.error_info.has_value());
 

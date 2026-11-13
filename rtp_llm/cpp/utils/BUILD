@@ -46,7 +46,6 @@ cc_library(
         "RemoteCacheConfig.h",
         "DecodePublicationLifecycle.h",
         "DecodePublicationBudget.h",
-        "RemoteRestoreLifecycle.h",
         "StringUtil.h",
         "StatusUtil.h",
         "Exception.h",
@@ -294,5 +293,13 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
     ],
     copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "decode_publication_test_support",
+    testonly = True,
+    hdrs = ["DecodePublicationTest.h"],
+    deps = ["@com_google_googletest//:gtest"],
     visibility = ["//visibility:public"],
 )

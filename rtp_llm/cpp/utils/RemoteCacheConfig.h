@@ -8,15 +8,11 @@ namespace rtp_llm {
 bool remoteCacheGdrEnabled();
 
 // One feature switch for every P CP / D DP topology. No legacy or CP-specific
-// flags are read. Publication is disabled unless explicitly enabled.
+// flags are read. The value is cached on first use during startup and cannot
+// be changed at runtime. Publication is disabled unless explicitly enabled.
 bool remoteCacheDecodePublicationEnabled();
-
-// Process-wide metadata identity storage, independent of source DMA budgets.
-struct MetadataSessionLimits {
-    size_t sessions = 1024;
-    size_t bytes = 4ULL * 1024 * 1024;
-};
-std::optional<MetadataSessionLimits> remoteCacheMetadataSessionLimits();
+// Invalid startup values still reject backend initialization.
+bool remoteCacheDecodePublicationConfigValid();
 
 struct DecodePublicationLimits {
     // Configuration-only default for a 4 GiB pool. Backend initialization

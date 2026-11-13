@@ -233,12 +233,6 @@ void LoadAsyncContext::onBackendMatch(size_t                                   m
         return;
     }
     std::weak_ptr<LoadAsyncContext> weak = weak_from_this();
-    if (track_remote_restore_) {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (state_.load() == State::PENDING) {
-            remote_read_started_at_ = RemoteRestoreTiming::Clock::now();
-        }
-    }
     auto source_meta = track_remote_restore_ ? match_meta : nullptr;
     storage_backend_->read(std::move(storage_request_), std::move(match_meta), [weak, source_meta](ErrorInfo error) {
         if (auto context = weak.lock()) {
@@ -445,14 +439,6 @@ bool LoadAsyncContext::backendTimedOut() const {
     return backend_error_.code() == ErrorCode::DEADLINE_EXCEEDED;
 }
 
-std::optional<RemoteRestoreTiming> LoadAsyncContext::remoteRestoreTiming() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (state_.load() != State::SUCCEEDED || !remote_read_started_at_ || !remote_gpu_ready_at_) {
-        return std::nullopt;
-    }
-    return RemoteRestoreTiming{*remote_read_started_at_, *remote_gpu_ready_at_};
-}
-
 bool LoadAsyncContext::settle(bool success, bool host_success) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -466,9 +452,6 @@ bool LoadAsyncContext::settle(bool success, bool host_success) {
             device_ready_blocks_ = matched_device_host_blocks_;
         }
         const bool completed_successfully = local_load_succeeded_ && backend_error_.ok();
-        if (completed_successfully && remote_read_started_at_) {
-            remote_gpu_ready_at_ = RemoteRestoreTiming::Clock::now();
-        }
         if (!completed_successfully && error_info_.ok()) {
             error_info_ = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "load settlement failed");
         }
@@ -516,9 +499,6 @@ void LoadAsyncContext::finishIfReadyLocked(bool& notify, SettlementReadyCallback
         device_ready_blocks_ = local_matched_blocks_;
     } else if (!has_host_failure_) {
         device_ready_blocks_ = matched_device_host_blocks_;
-    }
-    if (local_load_succeeded_ && backend_error_.ok() && remote_read_started_at_) {
-        remote_gpu_ready_at_ = RemoteRestoreTiming::Clock::now();
     }
     state_.store(local_load_succeeded_ && backend_error_.ok() ? State::SUCCEEDED : State::FAILED);
     notify = true;

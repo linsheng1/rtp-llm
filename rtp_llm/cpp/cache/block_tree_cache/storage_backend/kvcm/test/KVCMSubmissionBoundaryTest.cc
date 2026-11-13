@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 // Isolated white-box target: compile the CURRENT backend source, not a copied
 // proof/settlement model. A test-only genrule includes its exact current bytes.
 // Other targets still link the normal backend library.
@@ -192,16 +193,12 @@ protected:
         bool submit(StorageRequest request) {
             return backend->write(backend->prepareWrite(std::move(request)));
         }
-        void expectSettled(bool retained, bool source_unknown, const kvcm::Session::Usage& before,
-                           const MetadataSessionLimits& limits) {
+        void expectSettled(bool retained, bool source_unknown) {
             {
                 std::unique_lock<std::mutex> lock(backend->lifecycle_mutex_);
                 ASSERT_TRUE(backend->lifecycle_cv_.wait_for(
                     lock, kSettlementWait, [this] { return backend->in_flight_ == 0; }));
             }
-            const auto after = kvcm::Session::usage(limits);
-            EXPECT_EQ(after.occupied, before.occupied + (retained ? 1u : 0u));
-            EXPECT_EQ(after.unknown, before.unknown + (retained ? 1u : 0u));
             EXPECT_EQ(starts.load(), 1);
             EXPECT_EQ(closes.load(), retained ? 0 : 1);
             EXPECT_FALSE(bad_close.load());
@@ -220,6 +217,7 @@ protected:
     void broadcastCase(bool partial) {
         for (const char* enabled : {"0", "1"}) {
             autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled);
+            ::rtp_llm::test::withDecodePublicationStartup([&] {
             SCOPED_TRACE(::testing::Message() << "enabled=" << enabled << " partial=" << partial);
             auto first_state = std::make_shared<KVCMBroadcastState>();
             auto second_state = std::make_shared<KVCMBroadcastState>();
@@ -233,8 +231,6 @@ protected:
             ASSERT_TRUE(broadcast->init()); // This is NOT the uninitialized-manager test.
             Fixture s(false, broadcast);
             ASSERT_TRUE(s.backend->initialized_);
-            const auto limits = remoteCacheMetadataSessionLimits(); ASSERT_TRUE(limits);
-            const auto before = kvcm::Session::usage(*limits);
             auto request = s.request(false);
             request.transfer_task.emplace(std::vector<TransferDescriptor>{}, kOperationTimeout);
             const auto deadline = request.transfer_task->deadline();
@@ -246,7 +242,7 @@ protected:
                 std::this_thread::sleep_until(deadline + std::chrono::milliseconds(1));
             };
             ASSERT_TRUE(s.submit(std::move(request)));
-            ASSERT_NO_FATAL_FAILURE(s.expectSettled(partial, partial, before, *limits));
+            ASSERT_NO_FATAL_FAILURE(s.expectSettled(partial, partial));
             ASSERT_NE(broadcast->observed, nullptr);
             EXPECT_TRUE(broadcast->observed->done());
             EXPECT_FALSE(broadcast->observed->success());
@@ -256,15 +252,15 @@ protected:
             EXPECT_EQ(snapshotRequests(first_state).size(), partial ? 1u : 0u);
             EXPECT_TRUE(snapshotRequests(second_state).empty());
             EXPECT_EQ(s.saves.load(), 0); // Real test RPC servers, no local SDK path.
+            });
         }
     }
 
     void projectedCase(bool mixed) {
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         Fixture s(true);
         ASSERT_TRUE(s.backend->initialized_);
-        const auto limits = remoteCacheMetadataSessionLimits(); ASSERT_TRUE(limits);
-        const auto before = kvcm::Session::usage(*limits);
         auto request = s.request(true);
         ASSERT_FALSE(request.empty()); ASSERT_TRUE(request.decode_completion);
         auto deadline = std::make_shared<BoundaryClock::time_point>();
@@ -301,10 +297,11 @@ protected:
         unblock.run();
         // SDK success of peer0 proves source BUFFER_SAFE in the mixed case; it
         // must NOT be misused as permission to abort an incomplete destination.
-        ASSERT_NO_FATAL_FAILURE(s.expectSettled(mixed, false, before, *limits));
+        ASSERT_NO_FATAL_FAILURE(s.expectSettled(mixed, false));
         EXPECT_EQ(checks->load(), mixed ? 2 : 1);
         EXPECT_EQ(s.saves.load(), mixed ? 1 : 0);
         EXPECT_EQ(s.backend->impl_->completion_resources_->unresolved.load(), 0u);
+        });
     }
 };
 

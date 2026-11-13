@@ -47,7 +47,7 @@ cc_test_wrapper(
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = [
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + [
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:client",
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:subscriber",
         "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
@@ -110,7 +110,7 @@ cc_test_wrapper(
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = kvcm_backend_test_deps + [
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + kvcm_backend_test_deps + [
         "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache:device_block_pool_config_helper",
@@ -157,7 +157,7 @@ cc_test_wrapper(
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = kvcm_backend_test_deps,
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + kvcm_backend_test_deps,
 )
 
 cc_test_wrapper(
@@ -242,7 +242,7 @@ cc_test_wrapper(
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = kvcm_backend_test_deps,
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + kvcm_backend_test_deps,
 )
 
 cc_test(
@@ -252,14 +252,6 @@ cc_test(
     linkopts = ["-pthread"],
     deps = ["//rtp_llm/cpp/model_rpc:broadcast_manager", "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto"],
 )
-cc_test(
-    name = "decode_metadata_session_test",
-    srcs = ["MetadataSessionJournalHostTest.cc", "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:MetadataCallDisposition.h"],
-    copts = ["-std=c++17", "-UNDEBUG", "-pthread"],
-    linkopts = ["-pthread"],
-    deps = ["//rtp_llm/cpp/utils:core_utils"],
-)
-
 # Do not link kvcm_storage_backend: this test includes its current .cc once.
 cc_test_wrapper(
     name = "kvcm_submission_boundary_test",
@@ -271,7 +263,7 @@ cc_test_wrapper(
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = [d for d in kvcm_backend_test_deps if d != "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:kvcm_storage_backend"] + [
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + [d for d in kvcm_backend_test_deps if d != "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:kvcm_storage_backend"] + [
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:submission_boundary_test_source",
     ],
     tags = ["L20_CU13", "exclusive-if-local"],

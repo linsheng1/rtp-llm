@@ -460,7 +460,7 @@ cc_test(
     name = "coordinator_cache_manager_atomic_update_test",
     srcs = ["CoordinatorCacheManagerAtomicUpdateTest.cc"],
     copts = copts(),
-    deps = [
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + [
         "@havenask//aios/autil:env_util",
         ":block_tree_cache_allocator_test_helper",
         ":cache_config_test_utils",

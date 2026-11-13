@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/LegacyTransferEngine.h"
 #include <gtest/gtest.h>
 
@@ -2396,6 +2397,7 @@ TEST_F(TransferWorkLoopCrcTest, DirectionPollScansAllDevicesWithIndependentSlots
 
 TEST_F(TransferWorkLoopCrcTest, DecodeOriginsAreVisibleAtReadyAndClearedAfterCrcFailure) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     initialize();
     ASSERT_TRUE(device->enableDecodeOriginTracking());
     const auto parsed = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".4.0.8.8.9");
@@ -2425,6 +2427,7 @@ TEST_F(TransferWorkLoopCrcTest, DecodeOriginsAreVisibleAtReadyAndClearedAfterCrc
     ASSERT_TRUE(await(disk_load));
     EXPECT_EQ(device->decodeOrigin(targets[1], tag), origin);
     engine->shutdown();
+    });
 }
 
 TEST_F(TransferWorkLoopCrcTest, UniformBatchLimitBoundsBothDirectionsAndDispatcherSplitsRequests) {

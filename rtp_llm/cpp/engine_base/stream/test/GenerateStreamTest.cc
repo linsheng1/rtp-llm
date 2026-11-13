@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 
 #include "gtest/gtest.h"
 
@@ -329,6 +330,7 @@ TEST_F(GenerateStreamTest, PublishedVerifiedDraftCountPrecedesTerminalWindowClip
 
 TEST_F(GenerateStreamTest, DecodeCacheActualUseIncludesHotTiersWithoutRemoteRestore) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     for (const auto tier : {Tier::DEVICE, Tier::HOST, Tier::DISK, Tier::REMOTE}) {
         SCOPED_TRACE(tierName(tier));
         // The same published interval can be used once by each independent
@@ -346,10 +348,9 @@ TEST_F(GenerateStreamTest, DecodeCacheActualUseIncludesHotTiersWithoutRemoteRest
                 std::make_shared<const DecodeReuseSources>(DecodeReuseSources{{std::move(origin), tier}});
             resource.adoptDecodeReuse(sources, 2);
             ASSERT_TRUE(resource.hasPendingDecodeReuse());
-            ASSERT_FALSE(resource.hasPendingRemoteRestore());
 
             StreamUpdateInfo update{torch::tensor({{42}}, torch::kInt32), 1};
-            update.context_kv_all_rank_gpu_ready_at = RemoteRestoreTiming::Clock::now();
+            update.context_kv_all_rank_gpu_ready = true;
             stream->update(update);
 
             EXPECT_TRUE(resource.decode_reuse_use_state_.consumed_);
@@ -360,10 +361,12 @@ TEST_F(GenerateStreamTest, DecodeCacheActualUseIncludesHotTiersWithoutRemoteRest
             EXPECT_FALSE(resource.hasPendingDecodeReuse());
         }
     }
+    });
 }
 
 TEST_F(GenerateStreamTest, DecodeCacheActualUseRejectsUnprovenForcedAndFailedContextUpdates) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     enum class Case {
         CPU_OBSERVATION,
         FORCED,
@@ -392,7 +395,7 @@ TEST_F(GenerateStreamTest, DecodeCacheActualUseRejectsUnprovenForcedAndFailedCon
 
         StreamUpdateInfo update{torch::tensor({{scenario == Case::INVALID_TOKEN ? 2048 : 42}}, torch::kInt32), 1};
         if (scenario != Case::CPU_OBSERVATION)
-            update.context_kv_all_rank_gpu_ready_at = RemoteRestoreTiming::Clock::now();
+            update.context_kv_all_rank_gpu_ready = true;
         update.force_update_info = scenario == Case::FORCED;
         if (scenario == Case::WORKER_ERROR)
             update.error_info = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "worker failed");
@@ -403,20 +406,22 @@ TEST_F(GenerateStreamTest, DecodeCacheActualUseRejectsUnprovenForcedAndFailedCon
         stream->update(update);
         EXPECT_FALSE(resource.decode_reuse_use_state_.consumed_);
 
-        // A later decode update carrying a GPU timestamp must not turn a CPU
+        // A later decode update carrying a GPU-ready proof must not turn a CPU
         // observation or forced P-to-D token into a successful context use.
         if (scenario == Case::CPU_OBSERVATION || scenario == Case::FORCED) {
             StreamUpdateInfo later{torch::tensor({{43}}, torch::kInt32), 1};
-            later.context_kv_all_rank_gpu_ready_at = RemoteRestoreTiming::Clock::now();
+            later.context_kv_all_rank_gpu_ready = true;
             stream->update(later);
             EXPECT_FALSE(resource.decode_reuse_use_state_.consumed_);
         }
     }
+    });
 }
 
 TEST_F(GenerateStreamTest, DecodeCacheActualUseIsNotAdoptedWhenFeatureOffOrRoleIsDecode) {
     for (const bool enabled : {false, true}) {
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         auto            stream               = GenerateStreamBuilder().createContextStream({1, 2, 3});
         auto&           resource             = stream->streamCacheResource();
         resource.resource_context_.role_type = enabled ? RoleType::DECODE : RoleType::PREFILL;
@@ -427,6 +432,7 @@ TEST_F(GenerateStreamTest, DecodeCacheActualUseIsNotAdoptedWhenFeatureOffOrRoleI
             std::make_shared<const DecodeReuseSources>(DecodeReuseSources{{std::move(origin), Tier::DEVICE}}), 2);
         EXPECT_FALSE(resource.hasPendingDecodeReuse());
         EXPECT_FALSE(resource.decode_reuse_use_state_.sources_);
+        });
     }
 }
 

@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 #include <gtest/gtest.h>
 
 #include <chrono>
@@ -204,15 +205,12 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
     const auto* generate_request = GenerateRequestPB::descriptor();
     ASSERT_NE(generate_request, nullptr);
     EXPECT_EQ(generate_request->FindFieldByName("multimodal_cache_spans")->number(), 12);
-    EXPECT_EQ(generate_request->FindFieldByName("prefill_kv_handoff")->number(), 13);
-    GenerateRequestPB legacy;
+    EXPECT_EQ(generate_request->FindFieldByName("prefill_kv_handoff"), nullptr);
+    EXPECT_EQ(generate_request->FindFieldByNumber(13), nullptr);
+    EXPECT_TRUE(generate_request->IsReservedNumber(13));
     GenerateRequestPB parsed;
-    ASSERT_TRUE(parsed.ParseFromString(legacy.SerializeAsString()));
-    EXPECT_FALSE(parsed.has_prefill_kv_handoff());
-    legacy.mutable_prefill_kv_handoff()->set_computed_kv_end(0);
-    ASSERT_TRUE(parsed.ParseFromString(legacy.SerializeAsString()));
-    ASSERT_TRUE(parsed.has_prefill_kv_handoff());
-    EXPECT_EQ(parsed.prefill_kv_handoff().computed_kv_end(), 0);
+    // A legacy producer's removed field is accepted as an unknown wire field.
+    ASSERT_TRUE(parsed.ParseFromString(std::string("\x6a\x02\x08\x00", 4)));
     const auto* cache_span = MultimodalCacheSpanPB::descriptor();
     ASSERT_NE(cache_span, nullptr);
     EXPECT_EQ(cache_span->FindFieldByName("offset")->number(), 1);
@@ -644,7 +642,7 @@ TEST(DecodeRpcServerTest, NonCancelledGenerateRequestReadPreservesFailure) {
 
 class PrefillCompletionRpcTest: public DeviceTestBase {};
 
-TEST_F(PrefillCompletionRpcTest, HandoffOriginRequiresMatchingIdentityAndSuccessfulAllRankLoad) {
+TEST_F(PrefillCompletionRpcTest, PublicationBoundaryComesFromSuccessfulLocalLoad) {
     class HandoffEngine final: public EngineBase {
     public:
         HandoffEngine(): EngineBase(EngineInitParams{}) {}
@@ -686,18 +684,10 @@ TEST_F(PrefillCompletionRpcTest, HandoffOriginRequiresMatchingIdentityAndSuccess
         GenerateStreamPtr stream;
     };
 
-    for (const std::string mode : {"valid",
-                                   "legacy",
-                                   "disabled",
-                                   "negative",
-                                   "short",
-                                   "sampled_included",
-                                   "wrong_request",
-                                   "wrong_client",
-                                   "load_failed",
-                                   "conflicting"}) {
+    for (const std::string mode : {"valid", "legacy", "disabled", "no_loaded_boundary", "conflicting"}) {
         SCOPED_TRACE(mode);
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", mode == "disabled" ? "0" : "1");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         HandoffService  service;
         auto            input  = std::make_shared<GenerateInput>();
         input->request_id      = 42;
@@ -711,7 +701,7 @@ TEST_F(PrefillCompletionRpcTest, HandoffOriginRequiresMatchingIdentityAndSuccess
             std::make_shared<NormalGenerateStream>(input, config, RuntimeConfig{}, ResourceContext{}, nullptr);
         service.handler.engine_ = std::make_shared<HandoffEngine>();
         service.handler.meta_   = std::make_shared<RpcServerRuntimeMeta>();
-        service.loaded          = mode != "load_failed";
+        service.loaded          = mode != "no_loaded_boundary";
         if (mode == "conflicting") {
             ASSERT_TRUE(service.stream->kvCache().decodeCompletionLifecycle().recordPrefillComputedEnd(2));
         }
@@ -728,17 +718,12 @@ TEST_F(PrefillCompletionRpcTest, HandoffOriginRequiresMatchingIdentityAndSuccess
         auto              rpc = stub->RemoteGenerate(&context);
         GenerateRequestPB request;
         request.set_stage(RemoteStage::GENERATE);
-        request.set_request_id(mode == "wrong_request" ? 43 : 42);
-        request.set_client_id(mode == "wrong_client" ? "another" : "prefill");
+        request.set_request_id(42);
+        request.set_client_id("prefill");
         request.set_first_generate_token_id(7);
-        if (mode != "legacy") {
-            // Disabled mode deliberately carries invalid metadata: the switch
-            // must leave the upstream generation path and attribution untouched.
-            const auto end = mode == "negative" || mode == "disabled" ? -1 :
-                             mode == "short"                          ? 2 :
-                             mode == "sampled_included"               ? 4 :
-                                                                        3;
-            request.mutable_prefill_kv_handoff()->set_computed_kv_end(end);
+        if (mode == "legacy") {
+            const auto wire = request.SerializeAsString() + std::string("\x6a\x02\x08\x00", 4);
+            ASSERT_TRUE(request.ParseFromString(wire));
         }
         EXPECT_TRUE(rpc->Write(request));
         rpc->WritesDone();
@@ -747,11 +732,11 @@ TEST_F(PrefillCompletionRpcTest, HandoffOriginRequiresMatchingIdentityAndSuccess
         const auto status = rpc->Finish();
         server->Shutdown();
         server->Wait();
-        const bool accepted = mode == "valid" || mode == "legacy" || mode == "disabled";
+        const bool accepted = mode != "conflicting";
         EXPECT_EQ(status.ok(), accepted) << status.error_message();
         EXPECT_EQ(service.stream->outputTokenLen(), accepted ? 1 : 0);
         const auto& boundary = service.stream->kvCache().decodeCompletionLifecycle().prefillComputedEnd();
-        if (mode == "valid") {
+        if (mode == "valid" || mode == "legacy") {
             EXPECT_EQ(boundary, 3);
         } else if (mode == "conflicting") {
             EXPECT_EQ(boundary, 2);
@@ -761,6 +746,7 @@ TEST_F(PrefillCompletionRpcTest, HandoffOriginRequiresMatchingIdentityAndSuccess
         if (!accepted) {
             EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
         }
+        });
     }
 }
 
@@ -975,8 +961,8 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
                               mode == "prefill_only_generate" || mode == "bare_zero_generate" ?
                                                       RemoteStage::GENERATE :
                                                       RemoteStage::PREFILL_COMPLETE);
-            request.set_request_id(mode == "wrong_request" ? 43 : 42);
-            request.set_client_id(mode == "wrong_client" ? "other" : "prefill");
+            request.set_request_id(42);
+            request.set_client_id("prefill");
             EXPECT_TRUE(rpc->Write(request));
         }
         rpc->WritesDone();

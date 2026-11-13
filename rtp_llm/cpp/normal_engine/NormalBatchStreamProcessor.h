@@ -30,7 +30,7 @@ public:
         const StreamGroups&              stream_groups,
         GenerationPrefillCudaGraphStatus generation_prefill_cuda_graph_status =
             GenerationPrefillCudaGraphStatus::NOT_REQUESTED,
-        std::optional<RemoteRestoreTiming::Clock::time_point> context_kv_all_rank_gpu_ready_at = std::nullopt) const;
+        bool context_kv_all_rank_gpu_ready = false) const;
     virtual absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups,
                                                             TensorHolder&       host_holder) const;
     virtual absl::StatusOr<SamplerInputs>  gatherSamplerInput(const StreamGroups&    stream_groups,

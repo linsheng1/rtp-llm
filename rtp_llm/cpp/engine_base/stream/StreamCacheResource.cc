@@ -221,14 +221,6 @@ absl::Status StreamCacheResource::initKVBlock() {
     malloc_info.enable_remove_skipped_blocks = false;
     malloc_info.enable_storage_backend       = !skip_remote_cache_;
 
-    // The allocator performs lookup and page preparation before backend.read.
-    // Keep an attempt-local steady timestamp; report only after a real remote
-    // read succeeds and the resulting GPU pages are adopted below.
-    remote_restore_attempt_started_at_.reset();
-    if (resource_context_.role_type == RoleType::PREFILL && remoteCacheDecodePublicationEnabled()
-        && malloc_info.enable_storage_backend && malloc_info.enable_cache_lookup) {
-        remote_restore_attempt_started_at_ = RemoteRestoreTiming::Clock::now();
-    }
     MallocResult result = resource_context_.cache_manager->malloc(malloc_info);
     recordCacheReuseMallocResult(result);
     if (!result.success) {
@@ -260,8 +252,6 @@ absl::Status StreamCacheResource::initKVBlock() {
 
 void StreamCacheResource::clearCacheReuseState() {
     decode_reuse_use_state_.adopt({}, 0);  // Never reset a consumed logical request on retry.
-    remote_restore_lifecycle_.reset();
-    remote_restore_attempt_started_at_.reset();
     stream_->setReuseLength(0);
     stream_->setMtpTokenIndex(0);
     stream_->setInitialReuseLength(0);
@@ -277,8 +267,8 @@ void StreamCacheResource::adoptDecodeReuse(DecodeReuseSourcesPtr sources, int64_
         decode_reuse_use_state_.adopt(std::move(sources), adopted_end);
 }
 
-void StreamCacheResource::reportDecodeCacheUse(std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at) {
-    if (resource_context_.role_type != RoleType::PREFILL || !stream_->metrics_reporter_ || !gpu_ready_at)
+void StreamCacheResource::reportDecodeCacheUse(bool gpu_ready) {
+    if (resource_context_.role_type != RoleType::PREFILL || !stream_->metrics_reporter_ || !gpu_ready)
         return;
     try {
         const auto counts = decode_reuse_use_state_.consume(true);
@@ -293,10 +283,6 @@ void StreamCacheResource::reportDecodeCacheUse(std::optional<RemoteRestoreTiming
             collector.logical_tokens = counts->by_tier[tier];
             stream_->metrics_reporter_->report<RtpLLMDecodeCacheTokenMetrics>(nullptr, &collector);
         }
-        RtpLLMRemoteCacheOutcomeMetricsCollector outcome;
-        outcome.stage   = "use";
-        outcome.outcome = counts->total() > 0 ? "used" : "no_decode_interval";
-        stream_->metrics_reporter_->report<RtpLLMRemoteCacheOutcomeMetrics>(nullptr, &outcome);
     } catch (const std::bad_alloc&) {
         decode_reuse_use_state_.adopt({}, 0);
         RTP_LLM_LOG_WARNING("optional Decode cache use attribution unavailable");
@@ -305,7 +291,6 @@ void StreamCacheResource::reportDecodeCacheUse(std::optional<RemoteRestoreTiming
 
 void StreamCacheResource::recordCacheReuseMallocResult(const MallocResult& result) {
     decode_reuse_use_state_.adopt({}, 0);
-    remote_restore_lifecycle_.reset();
     cache_reuse_metrics_.device_input_length    = result.device_input_length;
     cache_reuse_metrics_.match_cost_time_us     = result.match_cost_time_us;
     cache_reuse_metrics_.report_match_cost_time = result.match_end_time_us > 0;
@@ -383,16 +368,6 @@ absl::Status StreamCacheResource::finalizeAllocatorLoad() {
             adoptDecodeReuse(load_context->decodeSources(), stream_->reuseLength());
         } catch (const std::bad_alloc&) {
             decode_reuse_use_state_.adopt({}, 0);
-        }
-        if (resource_context_.role_type == RoleType::PREFILL && stream_->metrics_reporter_
-            && stream_->remoteReuseLength() > 0) {
-            const auto timing = load_context->remoteRestoreTiming();
-            if (timing && remote_restore_attempt_started_at_
-                && remote_restore_lifecycle_.adopt(*timing, remote_restore_attempt_started_at_)) {
-                reportRemoteRestoreLatency("checkpoint_gpu_ready", *remote_restore_lifecycle_.checkpointReadyUs());
-                reportRemoteRestoreLatency("read_to_checkpoint_gpu_ready",
-                                           *remote_restore_lifecycle_.readToCheckpointUs());
-            }
         }
     } else if (!timed_out && resource_context_.role_type == RoleType::PREFILL && malloc_status == MallocStatus::NONE) {
         const bool backend_timeout = load_context && load_context->backendTimedOut();
@@ -487,34 +462,6 @@ void StreamCacheResource::reportCacheReuseMetrics() {
         &tags, &cache_reuse_metrics_);
 }
 
-void StreamCacheResource::reportRemoteContextReady(std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at) {
-    const auto latency =
-        remote_restore_lifecycle_.completeContextForward(gpu_ready_at.value_or(RemoteRestoreTiming::Clock::now()));
-    if (!latency || !stream_->metrics_reporter_) {
-        return;
-    }
-    // The existing context forward can fuse historical tail with new prompt or
-    // tool tokens. No source/tail identity is available here yet, so do not call
-    // this tail-only restore, actual D-token use or TTFT. The GPU-ready mode
-    // requires the explicit producer collective + existing output-stream fence;
-    // arbitrary CPU updates remain observations without that qualification.
-    reportRemoteRestoreLatency(gpu_ready_at ? "fused_context_gpu_ready" : "root_context_update_observed", *latency);
-}
-
-void StreamCacheResource::reportRemoteRestoreLatency(const char* mode, int64_t latency_us) {
-    if (!stream_->metrics_reporter_)
-        return;
-    try {
-        RtpLLMRemoteRestoreLatencyMetricsCollector collector;
-        collector.mode       = mode;
-        collector.latency_us = latency_us;
-        stream_->metrics_reporter_
-            ->report<RtpLLMRemoteRestoreLatencyMetrics, RtpLLMRemoteRestoreLatencyMetricsCollector>(nullptr,
-                                                                                                    &collector);
-    } catch (...) {
-        RTP_LLM_LOG_WARNING("remote restore telemetry failed; inference result is retained");
-    }
-}
 
 std::optional<absl::Status> StreamCacheResource::pollAllocatorLoad() {
     if (!allocator_load_context_) {

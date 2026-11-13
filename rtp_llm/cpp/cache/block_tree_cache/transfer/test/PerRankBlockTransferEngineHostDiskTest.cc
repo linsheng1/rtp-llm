@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/LegacyTransferEngine.h"
 #include <gtest/gtest.h>
 
@@ -207,6 +208,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, PhysicalOriginsFollowHostDiskRoundTripAndClearUnknownOverwrite) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     auto            engine     = makeEngine({group_set_});
     const auto      host_block = poolMalloc(*host_pool_);
     const auto      disk_block = poolMalloc(*disk_pool_);
@@ -229,6 +231,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, PhysicalOriginsFollowHostDiskRoun
     EXPECT_FALSE(disk_pool_->decodeOrigin(disk_block, tag));
     releasePoolBlock(*host_pool_, host_block);
     releasePoolBlock(*disk_pool_, disk_block);
+    });
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, ReportsSuccessfulQueueWaitThroughMetricsReporter) {

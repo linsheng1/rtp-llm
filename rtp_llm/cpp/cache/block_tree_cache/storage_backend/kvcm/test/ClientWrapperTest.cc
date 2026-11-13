@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 #include "autil/EnvUtil.h"
@@ -31,6 +32,7 @@ using ::testing::SetArgReferee;
 
 TEST(ClientFactoryGdrTest, SsdAutomaticallyRequiresGpuRegistrations) {
     autil::EnvGuard              enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     ClientFactory                factory;
     kv_cache_manager::InitParams params{};
     const std::string            ssd = R"({"sdk_config":{"sdk_backend_configs":[{"type":"pace_ssd"}]}})";
@@ -39,6 +41,7 @@ TEST(ClientFactoryGdrTest, SsdAutomaticallyRequiresGpuRegistrations) {
     kv_cache_manager::ClientMemoryRegistrations registrations;
     EXPECT_THROW(factory.createTransferClientWithMemory(mixed, params, registrations), std::invalid_argument);
     EXPECT_THROW(factory.createTransferClientWithMemory(ssd, params, registrations), std::invalid_argument);
+    });
 }
 
 struct InitObservation {
@@ -324,6 +327,7 @@ TEST(ClientWrapperTest, HostStatePreservesP2pSelectionAndSdkFailureWithPublicati
     for (const std::string enabled : {"0", "1"}) {
         SCOPED_TRACE(enabled);
         autil::EnvGuard      feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled);
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         std::array<char, 32> data{};
         RegistSpan           span{data.data(), data.size()};
         InitObservation      observation;
@@ -367,6 +371,7 @@ TEST(ClientWrapperTest, HostStatePreservesP2pSelectionAndSdkFailureWithPublicati
         EXPECT_TRUE(ignored.empty());
         wrapper->shutdown();
         EXPECT_EQ(*destroyed, 1);
+        });
     }
 }
 
@@ -374,6 +379,7 @@ TEST(ClientWrapperTest, HostStatePreservesP2pSelectionAndSdkFailureWithPublicati
 // Every result remains indexed by the original key, including masks and misses.
 TEST(ClientWrapperTest, BackendMasksPreserveOriginalKeyPositions) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     using namespace kv_cache_manager;
     const auto             type = StorageType::ST_TAIRMEMPOOL;
     const BackendLocations all{
@@ -430,10 +436,12 @@ TEST(ClientWrapperTest, BackendMasksPreserveOriginalKeyPositions) {
         wrapper->shutdown();
         EXPECT_EQ(*destroyed, 1);
     }
+    });
 }
 
 TEST(ClientWrapperTest, BackendRejectsMalformedShapeAndPropagatesSdkFailure) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     using namespace kv_cache_manager;
     const auto                                                type = StorageType::ST_TAIRMEMPOOL;
     const BackendLocations                                    all(3, {{type, 16, {{"full", "uri"}}}});
@@ -463,10 +471,12 @@ TEST(ClientWrapperTest, BackendRejectsMalformedShapeAndPropagatesSdkFailure) {
     EXPECT_FALSE(ok);
     EXPECT_TRUE(result.empty());
     wrapper->shutdown();
+    });
 }
 
 TEST(ClientWrapperTest, FeatureOffPreservesBackendResponseAndSdkError) {
     autil::EnvGuard disabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     using namespace kv_cache_manager;
     const auto type = StorageType::ST_TAIRMEMPOOL;
     const BackendLocations all{
@@ -505,6 +515,7 @@ TEST(ClientWrapperTest, FeatureOffPreservesBackendResponseAndSdkError) {
     EXPECT_TRUE(result.empty());
     wrapper->shutdown();
     EXPECT_EQ(*destroyed, 1);
+    });
 }
 
 TEST(ClientWrapperTest, RejectsInvalidTagsBeforeCreatingClients) {
@@ -1272,6 +1283,7 @@ TEST(ClientWrapperTest, AbortRetriesOnlyTransientFailuresAndRequiresAnOkReply) {
 
 TEST(ClientWrapperTest, DisabledPublicationPreservesSdkCallAndTraceIdentity) {
     autil::EnvGuard disabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     using namespace kv_cache_manager;
     unsigned char       byte = 7;
     RegistSpan          span{&byte, 1};
@@ -1317,10 +1329,12 @@ TEST(ClientWrapperTest, DisabledPublicationPreservesSdkCallAndTraceIdentity) {
     EXPECT_TRUE(failed.second.empty());
     EXPECT_EQ(observations, 0u);
     client->shutdown();
+    });
 }
 
 TEST(ClientWrapperTest, BoundedSdkChunksPreserveUrisAndDestinationBytes) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     using namespace kv_cache_manager;
     std::vector<unsigned char> data(250 * 19), destination(data.size(), 0);
     for (size_t i = 0; i < data.size(); ++i)
@@ -1396,9 +1410,11 @@ TEST(ClientWrapperTest, BoundedSdkChunksPreserveUrisAndDestinationBytes) {
     EXPECT_EQ(written_bytes, data.size());
     EXPECT_EQ(unknown_calls, 0u);
     client->shutdown();
+    });
 }
 TEST(ClientWrapperTest, BoundedSdkDoesNotStartAnotherChunkAfterDeadline) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     using namespace kv_cache_manager;
     for (const bool is_read : {true, false}) {
         unsigned char byte = 7;
@@ -1444,10 +1460,12 @@ TEST(ClientWrapperTest, BoundedSdkDoesNotStartAnotherChunkAfterDeadline) {
         EXPECT_EQ(completion, ClientWrapper::TransferCompletion::BUFFER_SAFE);
         client->shutdown();
     }
+    });
 }
 
 TEST(ClientWrapperTest, BoundedSdkStopsOnFailureAndRejectsUnsafeGeometry) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     using namespace kv_cache_manager;
     unsigned char       byte = 7;
     RegistSpan          span{&byte, 1};
@@ -1500,6 +1518,7 @@ TEST(ClientWrapperTest, BoundedSdkStopsOnFailureAndRejectsUnsafeGeometry) {
     EXPECT_EQ(completion, ClientWrapper::TransferCompletion::NOT_STARTED);
     EXPECT_EQ(unknown_calls, 1u);  // Rejected geometry never attempted SDK I/O.
     client->shutdown();
+    });
 }
 
 class ObservedTransferClient: public kv_cache_manager::MockTransferClient, public SdkTransferObservable {
@@ -1515,6 +1534,7 @@ public:
 
 TEST(ClientWrapperTest, InnerSdkObserverOwnsPartialBytesAndSuppressesOuterFailureOrException) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     using namespace kv_cache_manager;
     unsigned char   byte = 7;
     RegistSpan      span{&byte, 1};
@@ -1554,10 +1574,12 @@ TEST(ClientWrapperTest, InnerSdkObserverOwnsPartialBytesAndSuppressesOuterFailur
     EXPECT_EQ(events, 3u);  // No outer exception duplicates the inner event.
     client->shutdown();
     EXPECT_EQ(*destruction_count, 1);
+    });
 }
 
 TEST(ClientWrapperTest, InnerSdkPreIoFailureProducesNoEventAndClearingOrShutdownReleasesCallback) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     using namespace kv_cache_manager;
     unsigned char   byte = 7;
     RegistSpan      span{&byte, 1};
@@ -1585,10 +1607,12 @@ TEST(ClientWrapperTest, InnerSdkPreIoFailureProducesNoEventAndClearingOrShutdown
     EXPECT_FALSE(static_cast<bool>(observed->observer));
     EXPECT_TRUE(lifetime.expired());
     client->shutdown();
+    });
 }
 
 TEST(ClientWrapperTest, FeatureOffDoesNotInstallAnInnerSdkObserver) {
     autil::EnvGuard disabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     using namespace kv_cache_manager;
     unsigned char   byte = 7;
     RegistSpan      span{&byte, 1};
@@ -1603,6 +1627,7 @@ TEST(ClientWrapperTest, FeatureOffDoesNotInstallAnInnerSdkObserver) {
     EXPECT_EQ(observed->setter_calls, 0u);
     EXPECT_FALSE(static_cast<bool>(observed->observer));
     client->shutdown();
+    });
 }
 
 template<typename Code>
@@ -1620,6 +1645,7 @@ std::vector<std::pair<Code, bool>> completionProofCases() {
 
 TEST(ClientWrapperTest, CompletionProofDistinguishesLocalRejectionFromActualSdkError) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     using namespace kv_cache_manager;
     using Completion         = ClientWrapper::TransferCompletion;
     unsigned char       byte = 7;
@@ -1655,10 +1681,12 @@ TEST(ClientWrapperTest, CompletionProofDistinguishesLocalRejectionFromActualSdkE
                  std::runtime_error);
     EXPECT_EQ(completion, Completion::UNKNOWN);
     client->shutdown();
+    });
 }
 
 TEST(ClientWrapperTest, ThrowingSdkMarksUnknownAndShutdownReleasesObserver) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     using namespace kv_cache_manager;
     unsigned char       byte = 7;
     RegistSpan          span{&byte, 1};
@@ -1689,6 +1717,7 @@ TEST(ClientWrapperTest, ThrowingSdkMarksUnknownAndShutdownReleasesObserver) {
     EXPECT_FALSE(alive.expired());
     client->shutdown();
     EXPECT_TRUE(alive.expired());
+    });
 }
 
 }  // namespace

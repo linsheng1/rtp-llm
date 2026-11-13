@@ -1603,7 +1603,6 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_LOG_DEBUG("stream [%s] update", streamLogTag().c_str());
     const bool is_context_update        = isContextStream();
-    const bool completes_remote_context = is_context_update && stream_cache_resource_->hasPendingRemoteRestore();
     // A hot DEVICE/HOST/DISK hit can reuse Decode KV without a remote read in
     // this request. Keep its actual-use boundary independent of restore timing.
     const bool consumes_decode_reuse = is_context_update && stream_cache_resource_->hasPendingDecodeReuse();
@@ -1686,16 +1685,11 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                   update_info.top_logprobs,
                   old_seq_length,
                   update_info.logprobs_offset,
-                  update_info.context_kv_all_rank_gpu_ready_at});
+                  update_info.context_kv_all_rank_gpu_ready});
 
-    if ((completes_remote_context || consumes_decode_reuse) && !update_info.force_update_info && !hasErrorWithoutLock()
+    if (consumes_decode_reuse && !update_info.force_update_info && !hasErrorWithoutLock()
         && !hasEventWithoutLock(StreamEvents::Error)) {
-        if (completes_remote_context) {
-            stream_cache_resource_->reportRemoteContextReady(update_info.context_kv_all_rank_gpu_ready_at);
-        }
-        if (consumes_decode_reuse) {
-            stream_cache_resource_->reportDecodeCacheUse(update_info.context_kv_all_rank_gpu_ready_at);
-        }
+        stream_cache_resource_->reportDecodeCacheUse(update_info.context_kv_all_rank_gpu_ready);
     }
 
     // needFinish(), called by updateOutput(), can trim this packet at EOS/stop

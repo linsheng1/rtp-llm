@@ -58,7 +58,7 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps + [
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + test_deps + [
         "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
         "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
     ],
@@ -76,7 +76,7 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps,
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + test_deps,
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },
@@ -91,7 +91,7 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = test_deps,
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + test_deps,
     # Count the otherwise non-virtual pending-abort seam without changing the
     # production API. This is the Itanium ABI symbol for
     # rtp_llm::KVCacheManager::abortPendingLoad(shared_ptr<AsyncContext> const&).

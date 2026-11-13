@@ -12,7 +12,6 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
-#include "rtp_llm/cpp/utils/RemoteRestoreLifecycle.h"
 #include "rtp_llm/cpp/cache/DecodeReuseSources.h"
 
 namespace rtp_llm {
@@ -120,14 +119,10 @@ public:
     bool enableCacheLookup() const;
     Tier storeTarget() const;
     void reportCacheReuseMetrics();
-    bool hasPendingRemoteRestore() const {
-        return remote_restore_lifecycle_.pendingForward();
-    }
-    void reportRemoteContextReady(std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at = std::nullopt);
     bool hasPendingDecodeReuse() const {
         return decode_reuse_use_state_.pending();
     }
-    void reportDecodeCacheUse(std::optional<RemoteRestoreTiming::Clock::time_point> gpu_ready_at);
+    void reportDecodeCacheUse(bool gpu_ready);
 
     void holdKVCacheForPDSep();
     void releaseKVCacheForPDSep();
@@ -150,7 +145,6 @@ private:
     absl::Status finalizeAllocatorLoad();
     bool         deferAllocatorLoadRelease();
     void         publishAllocatorReuse(const LoadAsyncContext& context, bool local_only);
-    void         reportRemoteRestoreLatency(const char* mode, int64_t latency_us);
     void         adoptDecodeReuse(DecodeReuseSourcesPtr sources, int64_t adopted_end);
 
     GenerateStream*                stream_;
@@ -168,9 +162,7 @@ private:
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
     int64_t                          malloc_begin_time_us_    = 0;
     int64_t                          load_wait_begin_time_us_ = 0;
-    RemoteRestoreLifecycle                                remote_restore_lifecycle_;
     DecodeReuseUseState                                   decode_reuse_use_state_;
-    std::optional<RemoteRestoreTiming::Clock::time_point> remote_restore_attempt_started_at_;
 
     // Physical block pins held for PD separation.
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;

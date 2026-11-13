@@ -277,10 +277,8 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     syncPinnedCpuCopies(need_d2h_sync);
     // No new fence: this is evidence from the output copy's existing stream
     // synchronization, combined with the producer's post-model rank dependency.
-    const auto context_kv_all_rank_gpu_ready_at =
-        need_d2h_sync && model_output.context_kv_has_rank_completion_dependency ?
-            std::optional<RemoteRestoreTiming::Clock::time_point>(RemoteRestoreTiming::Clock::now()) :
-            std::nullopt;
+    const bool context_kv_all_rank_gpu_ready =
+        need_d2h_sync && model_output.context_kv_has_rank_completion_dependency;
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
 
     int  batch_idx_in       = 0;
@@ -348,7 +346,7 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                                  compact_token_logprobs,
                                  compact_top_logprob_token_ids,
                                  compact_top_logprobs,
-                                 context_kv_all_rank_gpu_ready_at);
+                                 context_kv_all_rank_gpu_ready);
         };
 
         if (thread_pool_) {
@@ -398,7 +396,7 @@ void NormalOutputDispatcher::dispatchSingleStream(
     const torch::Tensor&                                  token_logprobs_cpu,
     const torch::Tensor&                                  top_logprob_token_ids_cpu,
     const torch::Tensor&                                  top_logprobs_cpu,
-    std::optional<RemoteRestoreTiming::Clock::time_point> context_kv_all_rank_gpu_ready_at) const {
+    bool context_kv_all_rank_gpu_ready) const {
 
     const auto&  model_output      = merge_outputs.model_output;
     const auto&  sampler_output    = merge_outputs.sampler_output;
@@ -680,7 +678,7 @@ void NormalOutputDispatcher::dispatchSingleStream(
                                  top_logprobs,
                                  -1,
                                  logprobs_offset,
-                                 context_kv_all_rank_gpu_ready_at};
+                                 context_kv_all_rank_gpu_ready};
     stream->update(update_info);
 }
 

@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 #include <gtest/gtest.h>
 
 #include <array>
@@ -45,6 +46,7 @@ protected:
 TEST_F(CoordinatorCacheManagerAtomicUpdateTest, RecomputeInvalidatesOnlyItsWritablePhysicalSuffixWhenEnabled) {
     for (const bool enabled : {false, true}) {
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         auto            config = createSingleTypeTestConfig(1, 6, 4);
         allocator_             = std::make_shared<TestAllocator>(config, AllocationType::HOST);
         ASSERT_TRUE(allocator_->init());
@@ -64,12 +66,14 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, RecomputeInvalidatesOnlyItsWrita
         for (size_t i = 0; i < blocks.size(); ++i)
             EXPECT_EQ(static_cast<bool>(pool->decodeOrigin(blocks[i], "default")), !enabled || i == 0);
         allocator_->free({resource, nullptr});
+        });
     }
 }
 
 TEST_F(CoordinatorCacheManagerAtomicUpdateTest, CopySubmissionDoesNotPreserveTheDestinationsOldOrigin) {
     for (const bool enabled : {false, true}) {
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         auto            config = createSingleTypeTestConfig(1, 5, 4);
         allocator_             = std::make_shared<TestAllocator>(config, AllocationType::HOST);
         ASSERT_TRUE(allocator_->init());
@@ -86,6 +90,7 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, CopySubmissionDoesNotPreserveThe
         allocator_->blockBatchCopyByGroup({{"default", blocks[0], blocks[0]}});
         EXPECT_EQ(pool->decodeOrigin(blocks[0], "default"), origin);
         pool->decRef(blocks);
+        });
     }
 }
 

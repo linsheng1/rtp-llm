@@ -4,8 +4,7 @@
 bool configureDecodePublication(const CacheTopology&                                                topology,
                                 const StorageBackend::BufferResolver&                               resolver,
                                 const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver) {
-    const char* feature = std::getenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH");
-    if (feature && std::string_view(feature) != "0" && std::string_view(feature) != "1") {
+    if (!remoteCacheDecodePublicationConfigValid()) {
         RTP_LLM_LOG_ERROR("ENABLE_DECODE_PUBLISH must be 0 or 1");
         return false;
     }

@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 
 #include "gtest/gtest.h"
 #include "gmock/gmock.h"
@@ -124,6 +125,7 @@ protected:
 
 TEST_F(GenerateStreamStateTest, DecodePublicationClockComesFromFirstGenerateDoneEvent) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     auto            stream = createStream({1, 2, 3, 4}, true, RoleType::DECODE);
     const auto      before = DecodePublicationLifecycle::Clock::now();
     EXPECT_FALSE(stream->kvCache().decodeCompletionLifecycle().eosAt());
@@ -135,13 +137,16 @@ TEST_F(GenerateStreamStateTest, DecodePublicationClockComesFromFirstGenerateDone
     EXPECT_LE(*eos, after);
     stream->reportEvent(StreamEvents::GenerateDone);
     EXPECT_EQ(stream->kvCache().decodeCompletionLifecycle().eosAt(), eos);
+    });
 }
 
 TEST_F(GenerateStreamStateTest, DisabledPublicationDoesNotRecordDecodeEosClock) {
     autil::EnvGuard disabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     auto            stream = createStream({1, 2, 3, 4}, true, RoleType::DECODE);
     stream->reportEvent(StreamEvents::GenerateDone);
     EXPECT_FALSE(stream->kvCache().decodeCompletionLifecycle().eosAt());
+    });
 }
 
 TEST_F(GenerateStreamStateTest, testInitialStateIsWaiting) {

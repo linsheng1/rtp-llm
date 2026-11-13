@@ -15,7 +15,6 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
-#include "rtp_llm/cpp/utils/RemoteRestoreLifecycle.h"
 
 namespace rtp_llm {
 
@@ -102,7 +101,6 @@ public:
     bool deadlineExceeded() const {
         return backend_deadline_state_.load() == State::FAILED;
     }
-    std::optional<RemoteRestoreTiming> remoteRestoreTiming() const;
     void                               setLocalDecodeSources(DecodeReuseSourcesPtr sources,
                                                              DecodeReuseSourcesPtr device_sources      = {},
                                                              DecodeReuseSourcesPtr device_host_sources = {});
@@ -172,8 +170,6 @@ private:
     ErrorInfo                                             error_info_{ErrorInfo::OkStatus()};
     bool                                                  settlement_ready_{false};
     const bool                                            track_remote_restore_{false};
-    std::optional<RemoteRestoreTiming::Clock::time_point> remote_read_started_at_;
-    std::optional<RemoteRestoreTiming::Clock::time_point> remote_gpu_ready_at_;
     DecodeReuseSourcesPtr                                 local_decode_sources_;
     DecodeReuseSourcesPtr                                 device_decode_sources_;
     DecodeReuseSourcesPtr                                 device_host_decode_sources_;

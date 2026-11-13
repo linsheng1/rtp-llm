@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 #include <cuda_runtime_api.h>
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PayloadDispatchProof.h"
@@ -17,47 +18,28 @@
 
 namespace rtp_llm {
 namespace {
-TEST(DecodePublicationSessionTest, ConfirmedUnusedAttemptsBeyondCapacityDoNotExhaustSlots) {
-    const auto limits = remoteCacheMetadataSessionLimits();
-    ASSERT_TRUE(limits);
-    const auto before = kvcm::Session::usage(*limits);
-    ASSERT_LT(before.occupied, before.capacity);
-    for (size_t i = 0; i <= before.capacity; ++i) {
-        auto session = kvcm::Session::reserve(*limits);
-        ASSERT_TRUE(session);
-        session->startInvoked();
-        ASSERT_TRUE(session->observeStart(kvcm::MetadataCallDisposition::ACKNOWLEDGED, true, "unused"));
-        kvcm::PayloadDispatchProof proof;
-        proof.pending();
-        EXPECT_FALSE(proof.neverStarted());
-        proof.notStarted();
-        EXPECT_EQ(kvcm::failedPublicationAction(!proof.neverStarted(), false),
-                  kvcm::FailedPublicationAction::ABORT_UNCOMMITTED);
-        ASSERT_TRUE(session->finishInvoked(true));
-        session->observeFinish(kvcm::MetadataCallDisposition::ACKNOWLEDGED, true);
-        EXPECT_FALSE(static_cast<bool>(*session));
-    }
-    EXPECT_EQ(kvcm::Session::usage(*limits).occupied, before.occupied);
-    EXPECT_EQ(kvcm::Session::usage(*limits).unknown, before.unknown);
-    kvcm::PayloadDispatchProof possible;
-    possible.pending(); possible.started(); possible.notStarted();
+TEST(DecodePublicationProofTest, AbortRequiresProvenNoPayloadAndNoFinishAttempt) {
+    using Proof = kvcm::PayloadDispatchProof;
+    using Action = kvcm::FailedPublicationAction;
+    Proof proof;
+    EXPECT_EQ(proof.state(), Proof::State::NOT_HANDED_OFF);
+    EXPECT_EQ(kvcm::failedPublicationAction(!proof.neverStarted(), false), Action::ABORT_UNCOMMITTED);
+    proof.pending();
+    EXPECT_EQ(proof.state(), Proof::State::HANDOFF_PENDING);
+    EXPECT_EQ(kvcm::failedPublicationAction(!proof.neverStarted(), false), Action::RETAIN_SESSION);
+    proof.notStarted();
+    EXPECT_EQ(proof.state(), Proof::State::PROVEN_NOT_STARTED);
+    EXPECT_EQ(kvcm::failedPublicationAction(!proof.neverStarted(), false), Action::ABORT_UNCOMMITTED);
+    // A FinishWrite attempt alone still forbids abort or replay, even without payload.
+    EXPECT_EQ(kvcm::failedPublicationAction(!proof.neverStarted(), true), Action::RETAIN_SESSION);
+    Proof possible;
+    possible.pending();
+    possible.started();
+    possible.notStarted();
+    possible.pending();
+    EXPECT_EQ(possible.state(), Proof::State::MAY_HAVE_STARTED);
     EXPECT_FALSE(possible.neverStarted());
-    EXPECT_EQ(kvcm::failedPublicationAction(!possible.neverStarted(), false),
-              kvcm::FailedPublicationAction::RETAIN_SESSION);
-    EXPECT_EQ(kvcm::failedPublicationAction(false, true), kvcm::FailedPublicationAction::RETAIN_SESSION);
-}
-
-TEST(DecodePublicationConfigTest, MetadataLimitsUseValidatedPositiveSizeParser) {
-    autil::EnvGuard slots("RTP_LLM_REMOTE_CACHE_SESSION_SLOTS", "2");
-    autil::EnvGuard bytes("RTP_LLM_REMOTE_CACHE_SESSION_BYTES", "8192");
-    const auto limits = remoteCacheMetadataSessionLimits();
-    ASSERT_TRUE(limits); EXPECT_EQ(limits->sessions, 2u); EXPECT_EQ(limits->bytes, 8192u);
-    for (const auto* invalid : {"", "0", "-1", "1x", "65537", "18446744073709551616"}) {
-        autil::EnvGuard invalid_slots("RTP_LLM_REMOTE_CACHE_SESSION_SLOTS", invalid);
-        EXPECT_FALSE(remoteCacheMetadataSessionLimits()) << invalid;
-    }
-    autil::EnvGuard invalid_bytes("RTP_LLM_REMOTE_CACHE_SESSION_BYTES", "134217729");
-    EXPECT_FALSE(remoteCacheMetadataSessionLimits());
+    EXPECT_EQ(kvcm::failedPublicationAction(!possible.neverStarted(), false), Action::RETAIN_SESSION);
 }
 
 TEST(ClientFactoryFeatureBoundaryTest, DisabledAndUnsetDelegateConfigurationErrorsToTheSdk) {
@@ -80,6 +62,7 @@ TEST(ClientFactoryFeatureBoundaryTest, DisabledAndUnsetDelegateConfigurationErro
     };
     for (bool unset : {false, true}) {
         autil::EnvGuard off("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         if (unset) {
             ASSERT_EQ(unsetenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH"), 0);
         }
@@ -89,10 +72,12 @@ TEST(ClientFactoryFeatureBoundaryTest, DisabledAndUnsetDelegateConfigurationErro
         EXPECT_EQ(observe([&] { return factory.createTransferClientWithMemory(config, params, registrations); }),
                   observe([&] { return TransferClient::Create(config, params, registrations); }))
             << unset;
+        });
     }
 }
 TEST(ClientFactoryFeatureBoundaryTest, EnabledSsdStillRejectsMissingGpuRegistrationAndMixedBackends) {
     autil::EnvGuard                             enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     kvcm::ClientFactory                         factory;
     kv_cache_manager::InitParams                params{};
     kv_cache_manager::ClientMemoryRegistrations registrations;
@@ -101,6 +86,7 @@ TEST(ClientFactoryFeatureBoundaryTest, EnabledSsdStillRejectsMissingGpuRegistrat
     EXPECT_THROW(factory.createTransferClient(ssd, params), std::invalid_argument);
     EXPECT_THROW(factory.createTransferClientWithMemory(ssd, params, registrations), std::invalid_argument);
     EXPECT_THROW(factory.createTransferClientWithMemory(mixed, params, registrations), std::invalid_argument);
+    });
 }
 TEST(ClientFactoryFeatureBoundaryTest, EmptyDescriptorsCanReuseOnlySuccessfullyRegisteredGpuSubspans) {
     using Context      = kvcm::PackedSsdTransferClient::GpuPackingContext;
@@ -122,11 +108,15 @@ TEST(ClientFactoryFeatureBoundaryTest, EmptyDescriptorsCanReuseOnlySuccessfullyR
 TEST(DecodePublicationConfigTest, SingleSwitchNeedsNoCpSpecificFlag) {
     {
         autil::EnvGuard off("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         EXPECT_FALSE(remoteCacheDecodePublicationEnabled());
+        });
     }
     {
         autil::EnvGuard on("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         EXPECT_TRUE(remoteCacheDecodePublicationEnabled());
+        });
     }
 }
 TEST(DecodePublicationConfigTest, PendingBudgetsHaveBoundedDefaultsAndStrictOverrides) {
@@ -168,6 +158,7 @@ TEST(FeatureOffNativeTest, PrefillRemoteRoundTripPreservesLocalPrefixPayloadAndR
     for (const bool unset : {false, true}) {
         SCOPED_TRACE(unset);
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         if (unset) ASSERT_EQ(unsetenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH"), 0);
         auto env = makeBackendEnvironment("feature_off_prefill_payload");
         ScopedReferencedBlocks pages(env.device_pool, 3);
@@ -246,6 +237,7 @@ TEST(FeatureOffNativeTest, PrefillRemoteRoundTripPreservesLocalPrefixPayloadAndR
             EXPECT_EQ(pool->refCount(ids[i]), refs[i]);
             EXPECT_FALSE(pool->isFrozen(ids[i]));
         }
+        });
     }
 }
 
@@ -1105,6 +1097,7 @@ TEST_P(EosGpuCompletionTest, DisabledAtInitializationDoesNotPublishPinOrChangeNa
     for (const bool unset : {false, true}) {
         SCOPED_TRACE(unset);
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         if (unset) ASSERT_EQ(unsetenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH"), 0);
         Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
         std::map<std::string, std::vector<size_t>> refs;
@@ -1139,10 +1132,12 @@ TEST_P(EosGpuCompletionTest, DisabledAtInitializationDoesNotPublishPinOrChangeNa
         s.dropRequestRefs();
         for (const auto block : s.full) EXPECT_FALSE(s.env.pools_by_tag.at("full")->isAllocated(block));
         for (const auto block : s.state) EXPECT_FALSE(s.env.pools_by_tag.at("state")->isAllocated(block));
+        });
     }
 }
 
 TEST_P(EosGpuCompletionTest, RuntimeDisableSkipsEosBeforePinsAndAllowsLaterPublication) {
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
     const auto pool = s.env.pools_by_tag.at("full");
     const auto refs = pool->refCount(s.full.front());
@@ -1162,9 +1157,11 @@ TEST_P(EosGpuCompletionTest, RuntimeDisableSkipsEosBeforePinsAndAllowsLaterPubli
     EXPECT_EQ(s.finishes, 1);
     EXPECT_EQ(s.aborts, 0);
     EXPECT_EQ(pool->refCount(s.full.front()), refs);
+    });
 }
 
 TEST_P(EosGpuCompletionTest, NoProgressSnapshotAndNativePagesSurviveRequestRelease) {
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
     s.block_start = true;
     for (size_t i = 0; i < s.state.size(); ++i)
@@ -1195,8 +1192,10 @@ TEST_P(EosGpuCompletionTest, NoProgressSnapshotAndNativePagesSurviveRequestRelea
         EXPECT_FALSE(s.env.pools_by_tag.at("full")->isAllocated(block));
     for (auto block : s.state)
         EXPECT_FALSE(s.env.pools_by_tag.at("state")->isAllocated(block));
+    });
 }
 TEST_P(EosGpuCompletionTest, PartialTailUsesEarlierImmutableCheckpointNotFinalState) {
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
     // Active, incomplete final slot intentionally differs from complete state.
     s.fill(1, "state", s.state.back(), 0xee);
@@ -1204,8 +1203,10 @@ TEST_P(EosGpuCompletionTest, PartialTailUsesEarlierImmutableCheckpointNotFinalSt
     ASSERT_TRUE(waitForBackendOperationsForTest(*s.backend));
     EXPECT_EQ(s.finishes, 1);
     EXPECT_EQ(s.aborts, 0);
+    });
 }
 TEST_P(EosGpuCompletionTest, NativeSsdGdrKeepsGpuPagesThroughEosTransfer) {
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, true, std::get<2>(GetParam()));
     s.block_start = true;
     ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end(), true));
@@ -1220,8 +1221,10 @@ TEST_P(EosGpuCompletionTest, NativeSsdGdrKeepsGpuPagesThroughEosTransfer) {
     EXPECT_EQ(s.aborts, 0);
     for (auto block : s.full)
         EXPECT_FALSE(s.env.pools_by_tag.at("full")->isAllocated(block));
+    });
 }
 TEST_P(EosGpuCompletionTest, MissingStateBacksOffWithoutRelabeling) {
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
     auto     state = s.state;
     state[2]       = NULL_BLOCK_IDX;
@@ -1230,8 +1233,10 @@ TEST_P(EosGpuCompletionTest, MissingStateBacksOffWithoutRelabeling) {
     ASSERT_TRUE(waitForBackendOperationsForTest(*s.backend));
     EXPECT_EQ(s.finishes, 1);
     EXPECT_EQ(s.aborts, 0);
+    });
 }
 TEST_P(EosGpuCompletionTest, KnownPrefillBoundarySkipsCheckpointWithoutNewDecodeKv) {
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     for (const bool checkpoint_backoff : {false, true}) {
         SCOPED_TRACE(checkpoint_backoff);
         Scenario     s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
@@ -1264,9 +1269,11 @@ TEST_P(EosGpuCompletionTest, KnownPrefillBoundarySkipsCheckpointWithoutNewDecode
             EXPECT_FALSE(s.env.pools_by_tag.at("state")->isAllocated(block));
         }
     }
+    });
 }
 
 TEST_P(EosGpuCompletionTest, UnknownSdkCompletionRetainsPagesAndWaitsForExplicitMockQuiescence) {
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
     s.fail_save = true;
     ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end(), true));
@@ -1295,8 +1302,10 @@ TEST_P(EosGpuCompletionTest, UnknownSdkCompletionRetainsPagesAndWaitsForExplicit
     EXPECT_FALSE(s.backend->protected_quarantine_);
     for (int i = 0; i < s.count * s.shards; ++i)
         EXPECT_FALSE(s.env.pools_by_tag.at("full")->isAllocated(s.full[i]));
+    });
 }
 TEST_P(EosGpuCompletionTest, DuplicateEosAndFullAdmissionDoNotDoublePinOrPublish) {
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
     s.block_start = true;
     ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end(), true));
@@ -1312,8 +1321,10 @@ TEST_P(EosGpuCompletionTest, DuplicateEosAndFullAdmissionDoNotDoublePinOrPublish
     ASSERT_TRUE(waitForBackendOperationsForTest(*s.backend));
     EXPECT_EQ(s.starts, 1);
     EXPECT_EQ(s.finishes, 1);
+    });
 }
 TEST_P(EosGpuCompletionTest, LostCommitAckDoesNotAbortOrQuarantineCompletedGpuTransfer) {
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
     s.lose_commit = true;
     ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end(), true));
@@ -1323,8 +1334,10 @@ TEST_P(EosGpuCompletionTest, LostCommitAckDoesNotAbortOrQuarantineCompletedGpuTr
     EXPECT_EQ(s.aborts, 0);
     for (auto block : s.full)
         EXPECT_FALSE(s.env.pools_by_tag.at("full")->isAllocated(block));
+    });
 }
 TEST_P(EosGpuCompletionTest, UnboundedSwaNeverPretendsTwoTailPagesAreEnough) {
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), false, false, std::get<2>(GetParam()));
     auto     state = s.state;
     state[0]       = NULL_BLOCK_IDX;
@@ -1333,6 +1346,7 @@ TEST_P(EosGpuCompletionTest, UnboundedSwaNeverPretendsTwoTailPagesAreEnough) {
     ASSERT_TRUE(waitForBackendOperationsForTest(*s.backend));
     EXPECT_EQ(s.starts, 0);
     EXPECT_FALSE(s.resource.decodeCompletionSubmitted());
+    });
 }
 INSTANTIATE_TEST_SUITE_P(GenericCPAndIndependentDP,
                          EosGpuCompletionTest,

@@ -129,7 +129,6 @@ public:
             std::shared_ptr<Operation> next;
         };
         explicit CompletionResources(std::shared_ptr<kvcm::ClientWrapper> value): client(std::move(value)) {}
-        using Session = kvcm::Session;
         void holdOperation(const std::shared_ptr<Operation>& operation) noexcept {
             std::lock_guard<std::mutex> lock(mutex);
             operation->next = std::move(operations);
@@ -421,10 +420,6 @@ public:
                 return false;
             }
         }
-        const auto session_limits = remoteCacheMetadataSessionLimits();
-        if (!session_limits) return false;
-        session_limits_ = *session_limits;
-        CompletionResources::Session::configure(session_limits_);
         completion_resources_ = std::make_shared<CompletionResources>(client_wrapper_);
         if (completion_accounting_)
             completion_accounting_->startSampling();
@@ -845,7 +840,6 @@ public:
         bool                                   start_acknowledged{false};
         std::mutex                             settlement_mutex;
         std::shared_ptr<CompletionResources>    resources;
-        std::optional<CompletionResources::Session> session;
         std::shared_ptr<kvcm::PayloadDispatchProof> dispatch_proof = std::make_shared<kvcm::PayloadDispatchProof>();
 
         const std::string& sessionId() const noexcept {
@@ -922,43 +916,17 @@ public:
         const std::string trace_id     = nextTraceId("write", write_trace_sequence_);
         publication.resources = completion_resources_;
         (void)remainingTimeout(request, "before StartWrite");
-        try {
-            publication.session = CompletionResources::Session::reserve(session_limits_);
-        } catch (const std::bad_alloc&) {
-            // Lazy ID storage failed before StartWrite or payload submission.
-            throw StorageOperationBufferSafeFailure("KVCM metadata storage allocation failed before StartWrite");
-        }
-        if (!publication.session) {
-            const auto slots = CompletionResources::Session::usage(session_limits_);
-            RTP_LLM_LOG_WARNING("KVCM metadata session budget full occupied=%zu unknown=%zu capacity=%zu",
-                                slots.occupied, slots.unknown, slots.capacity);
-            throw StorageOperationBufferSafeFailure("KVCM metadata session budget full");
-        }
-        (void)remainingTimeout(request, "after metadata reservation");
         auto [success, allocation] = [&] {
             const auto stage_start = Clock::now();
             block_tree_cache_detail::ScopeRollback timer([&] {
                 collector.remote_get_write_location_time_us = elapsedTimeUs(stage_start);
             });
-            auto disposition = kvcm::MetadataCallDisposition::UNKNOWN;
-            publication.session->startInvoked();
-            try {
-                auto result = client_wrapper_->getWriteLocationWithDisposition(
-                    "", trace_id, keys, /*tokens=*/{}, location_spec_group_names, /*write_timeout_seconds=*/40,
-                    kv_cache_config_.kvcm_min_replica_count, &disposition);
-                publication.start_acknowledged = publication.session->observeStart(
-                    disposition, result.first, result.second.write_session_id);
-                return result;
-            } catch (...) {
-                publication.session->observeStart(disposition, false, {});
-                throw;
-            }
+            return client_wrapper_->getWriteLocation(
+                "", trace_id, keys, /*tokens=*/{}, location_spec_group_names, /*write_timeout_seconds=*/40,
+                kv_cache_config_.kvcm_min_replica_count);
         }();
         RTP_LLM_CHECK_WITH_INFO(success, "KVCM StartWrite failed");
-        if (!publication.start_acknowledged) {
-            RTP_LLM_LOG_WARNING("KVCM metadata Start response unaddressable; retaining unknown session contract");
-            throw StorageOperationBufferSafeFailure("KVCM metadata session identity contract unproven");
-        }
+        publication.start_acknowledged = true;
         auto& write_location = publication.location;
         write_location = std::move(allocation);
         const std::string& write_session_id = publication.sessionId();
@@ -997,7 +965,7 @@ public:
                         collector.remote_finish_write_time_us += elapsedTimeUs(stage_start);
                     });
                     try {
-                        if (!finishSession(request, publication, kv_cache_manager::BlockMaskOffset{0}, empty_locations, true)) {
+                        if (!finishSession(publication, kv_cache_manager::BlockMaskOffset{0}, empty_locations, true)) {
                             RTP_LLM_LOG_WARNING("KVCM failed to close empty write session [%s]",
                                                 write_session_id.c_str());
                         }
@@ -1077,8 +1045,8 @@ public:
                         } catch (...) {
                             if (on_worker)
                                 settleWriteFailure(request, write, touched);
-                            else
-                                write.session->retain(CompletionResources::Session::Reason::NON_BUSINESS_SETTLEMENT);
+                            // Off-worker fallback never performs metadata I/O.
+                            // The original Manager/SDK owns the unclosed session.
                             rethrowPayloadFailure(touched);
                         }
                     };
@@ -1137,8 +1105,6 @@ public:
         (void)source_may_be_touched;  // Source safety is not proof that the destination was never touched.
         const auto action = kvcm::failedPublicationAction(!write.dispatch_proof->neverStarted(), write.finish_attempted);
         if (action == kvcm::FailedPublicationAction::RETAIN_SESSION) {
-            write.session->retain(write.finish_attempted ? CompletionResources::Session::Reason::FINISH_UNKNOWN :
-                                                           CompletionResources::Session::Reason::PAYLOAD_UNPROVEN);
             if (write.finish_attempted) {
                 // ACK ambiguity does not invalidate a completed source-buffer proof.
                 if (const auto lease = std::dynamic_pointer_cast<kvcm::DecodePublicationAccounting::Lease>(
@@ -1153,7 +1119,7 @@ public:
                 reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(result);
             }
         } else if (action == kvcm::FailedPublicationAction::ABORT_UNCOMMITTED) {
-            closeUnusedWrite(request, write);
+            closeUnusedWrite(write);
         }
     }
 
@@ -1207,7 +1173,7 @@ public:
             block_tree_cache_detail::ScopeRollback timer(
                 [&] { collector.remote_finish_write_time_us += elapsedTimeUs(stage_start); });
             RTP_LLM_CHECK_WITH_INFO(
-                finishSession(request, write, write_location.locations.size(), actual_locations, false),
+                finishSession(write, write_location.locations.size(), actual_locations, false),
                 "KVCM FinishWrite failed");
         }
         collector.remote_write_cache_block_num = static_cast<int64_t>(write_location.locations.size());
@@ -1222,43 +1188,27 @@ public:
         }
     }
 
-    bool finishSession(const StorageRequest& request, WritePublication& write,
+    bool finishSession(WritePublication& write,
                        const kv_cache_manager::BlockMask& mask,
                        const kv_cache_manager::Locations& locations, bool unused_close) {
         const auto trace = nextTraceId(unused_close ? "close_write" : "finish_write", finish_write_trace_sequence_);
-        for (int attempt = 0; attempt < 3; ++attempt) {
-            // Keep the original cleanup attempt after expiry. Only retries need
-            // remaining task time; never grant a new deadline or replay UNKNOWN.
-            if (attempt) (void)remainingTimeout(request, "before FinishWrite retry");
-            RTP_LLM_CHECK_WITH_INFO(write.session->finishInvoked(unused_close), "KVCM metadata action already settled");
-            write.finish_attempted = true;
-            auto disposition = kvcm::MetadataCallDisposition::UNKNOWN;
-            bool success = false;
-            std::exception_ptr error;
-            try {
-                success = client_wrapper_->finishWriteWithDisposition(
-                    "", trace, write.sessionId(), mask, locations, &disposition);
-            } catch (...) { error = std::current_exception(); }
-            write.session->observeFinish(disposition, success);
-            if (success) return true;
-            if (disposition != kvcm::MetadataCallDisposition::NOT_SENT || attempt == 2) {
-                if (error) std::rethrow_exception(error);
-                return false;
-            }
-        }
-        return false;
+        RTP_LLM_CHECK_WITH_INFO(write.start_acknowledged && !write.finish_attempted,
+                                "KVCM metadata action already settled");
+        // Mark before the call: a false return or throw does not prove that
+        // FinishWrite was unsent. Never replay it or follow it with an abort.
+        write.finish_attempted = true;
+        return client_wrapper_->finishWrite("", trace, write.sessionId(), mask, locations);
     }
 
-    void closeUnusedWrite(const StorageRequest& request, WritePublication& write) {
+    void closeUnusedWrite(WritePublication& write) {
         if (!write.start_acknowledged || !write.dispatch_proof->neverStarted() || write.finish_attempted) {
-            write.session->retain(CompletionResources::Session::Reason::PAYLOAD_UNPROVEN);
             return;
         }
         const auto                             stage_start = Clock::now();
         block_tree_cache_detail::ScopeRollback timer(
             [&] { write.collector.remote_finish_write_time_us += elapsedTimeUs(stage_start); });
         try {
-            const bool aborted = finishSession(request, write, kv_cache_manager::BlockMaskOffset{0}, {}, true);
+            const bool aborted = finishSession(write, kv_cache_manager::BlockMaskOffset{0}, {}, true);
             if (!aborted) {
                 RTP_LLM_LOG_WARNING("KVCM failed to abort write session [%s]",
                                     write.sessionId().c_str());
@@ -2655,7 +2605,6 @@ private:
     StorageBackend::BufferResolver file_resolver_;
     std::shared_ptr<kvcm::DecodePublicationAccounting>   completion_accounting_;
     DecodePublicationLimits                              completion_limits_;
-    MetadataSessionLimits session_limits_;
     const StorageBackend&                backend_;
     CacheConfig                          cache_config_;
     KVCacheConfig                        kv_cache_config_;

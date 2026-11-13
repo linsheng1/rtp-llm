@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 
 #include <cstdlib>
 #include <limits>
@@ -29,6 +30,32 @@ protected:
     } bytes{"RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB"}, jobs{"RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS"};
     static constexpr size_t MiB = 1024 * 1024, GiB = 1024 * MiB;
 };
+
+TEST_F(DecodeBudgetConfigTest, PublicationSettingIsStrictAndReadOncePerProcess) {
+    constexpr const char* key = "RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH";
+    UnsetOverride restore(key);
+    for (const char* initial : {static_cast<const char*>(nullptr), "0", "1", "", "true", " 1", "2"}) {
+        SCOPED_TRACE(initial ? initial : "unset");
+        if (initial) setenv(key, initial, 1);
+        else unsetenv(key);
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
+            const bool valid = !initial || std::string(initial) == "0" || std::string(initial) == "1";
+            const bool enabled = initial && std::string(initial) == "1";
+            // Exercise both getter orders; they must share one cached setting.
+            if (enabled) EXPECT_TRUE(remoteCacheDecodePublicationEnabled());
+            EXPECT_EQ(remoteCacheDecodePublicationConfigValid(), valid);
+            EXPECT_EQ(remoteCacheDecodePublicationEnabled(), enabled);
+            for (const char* later : {"0", "1", "invalid"}) {
+                setenv(key, later, 1);
+                EXPECT_EQ(remoteCacheDecodePublicationEnabled(), enabled);
+                EXPECT_EQ(remoteCacheDecodePublicationConfigValid(), valid);
+            }
+            unsetenv(key);
+            EXPECT_EQ(remoteCacheDecodePublicationEnabled(), enabled);
+            EXPECT_EQ(remoteCacheDecodePublicationConfigValid(), valid);
+        });
+    }
+}
 
 TEST_F(DecodeBudgetConfigTest, UsesNativeCapacityWithoutRoundingSmallPoolsUp) {
     EXPECT_FALSE(remoteCacheDecodePublicationLimits(0));

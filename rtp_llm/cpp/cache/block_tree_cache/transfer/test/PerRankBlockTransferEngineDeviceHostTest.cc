@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/LegacyTransferEngine.h"
 #include <gtest/gtest.h>
 
@@ -739,6 +740,7 @@ TEST_F(PerRankBlockTransferEngineTest, PhysicalOriginsFollowSuccessfulDeviceHost
     const auto& tag    = group_set_->groupTags().front();
     for (const bool enabled : {false, true}) {
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         auto            engine            = makeEngine({group_set_});
         const auto      device_generation = device_pool_->decodeOriginIncarnation(device_block_);
         ASSERT_TRUE(device_pool_->bindDecodeOrigin(device_block_, device_generation, tag, origin));
@@ -759,11 +761,13 @@ TEST_F(PerRankBlockTransferEngineTest, PhysicalOriginsFollowSuccessfulDeviceHost
             EXPECT_FALSE(device_pool_->decodeOrigin(device_block_, tag));
         }
         releasePoolBlock(*host_pool_, host_block);
+        });
     }
 }
 
 TEST_F(LegacyPerRankBlockTransferEngineTest, FailedTransferCannotRebindAValidatedSource) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     auto            engine = makeEngine({group_set_});
     ASSERT_TRUE(device_pool_->enableDecodeOriginTracking());
     ASSERT_TRUE(host_pool_->enableDecodeOriginTracking());
@@ -785,6 +789,7 @@ TEST_F(LegacyPerRankBlockTransferEngineTest, FailedTransferCannotRebindAValidate
     EXPECT_FALSE(context->success());
     EXPECT_FALSE(device_pool_->decodeOrigin(device_block_, tag));
     releasePoolBlock(*host_pool_, host_block);
+    });
 }
 
 TEST_F(LegacyPerRankBlockTransferEngineTest, ExecutorDerivesDirectionFromDescriptorTargetTier) {

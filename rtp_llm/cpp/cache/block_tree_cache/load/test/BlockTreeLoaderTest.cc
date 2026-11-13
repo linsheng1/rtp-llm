@@ -1,3 +1,4 @@
+#include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
 
 #include <atomic>
@@ -34,9 +35,10 @@ using block_tree_cache_test::makeHostPool;
 using block_tree_cache_test::makeStructuralDevicePool;
 using block_tree_cache_test::releaseDeviceBlocks;
 
-TEST(BlockTreeLoaderTest, LocalOnlyCompletionNeverFabricatesRemoteTiming) {
+TEST(BlockTreeLoaderTest, LocalOnlyCompletionPreservesSourceAdoption) {
     for (const bool enabled : {false, true}) {
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         auto            coordinator = std::make_shared<LoadContextCoordinator>(
             [](const std::shared_ptr<LoadAsyncContext>&) { return true; }, LoadContextCoordinator::AbortCallback{});
         auto context = coordinator->create({}, {}, 0);
@@ -49,8 +51,8 @@ TEST(BlockTreeLoaderTest, LocalOnlyCompletionNeverFabricatesRemoteTiming) {
         ASSERT_TRUE(coordinator->registerContext(context));
         ASSERT_TRUE(context->commit());
         ASSERT_TRUE(context->success());
-        EXPECT_FALSE(context->remoteRestoreTiming().has_value());
         EXPECT_EQ(context->decodeSources(), sources);
+        });
     }
 }
 
@@ -60,6 +62,7 @@ TEST(BlockTreeLoaderTest, DeviceHotOriginsRequirePhysicalRequiredMemberConsensus
     }
     for (const bool enabled : {false, true}) {
         autil::EnvGuard           feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+        ::rtp_llm::test::withDecodePublicationStartup([&] {
         FullSWAEnvironmentOptions options;
         options.path_length = 1;
         options.enable_disk = false;
@@ -109,6 +112,7 @@ TEST(BlockTreeLoaderTest, DeviceHotOriginsRequirePhysicalRequiredMemberConsensus
         }
         environment->reclaimAll();
         environment->expectFullyReclaimed();
+        });
     }
 }
 
@@ -143,6 +147,7 @@ TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
         GTEST_SKIP() << "CUDA not available";
     }
     autil::EnvGuard           feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     FullSWAEnvironmentOptions options;
     options.path_length = 1;
     options.enable_disk = false;
@@ -237,8 +242,6 @@ TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
     backend->shutdown();
     EXPECT_EQ(backend->read_calls.load(), 1u);
     EXPECT_FALSE(context->success());
-    EXPECT_FALSE(context->remoteRestoreTiming().has_value());
-    EXPECT_FALSE(joined->remoteRestoreTiming().has_value());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::EXECUTION_EXCEPTION);
     resources = environment->resourcesForPathNode(0);
     EXPECT_TRUE(resources[0].hasTier(Tier::DEVICE));
@@ -258,6 +261,7 @@ TEST(BlockTreeLoaderTest, LocalHostLoadSettlesDespiteBackendFailure) {
     }
     environment->reclaimAll();
     environment->expectFullyReclaimed();
+    });
 }
 
 TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
@@ -1125,6 +1129,7 @@ TEST(BlockTreeLoaderTest, DecodeSourcesValidateTheActualFallbackSwaWindow) {
         GTEST_SKIP() << "CUDA not available";
     }
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
     for (const int source_case : {0, 1, 2}) {  // Consistent, conflicting, missing fallback SWA origins.
         for (const auto& [host_success, disk_success] :
              {std::pair<bool, bool>{true, true}, {true, false}, {false, true}}) {
@@ -1228,6 +1233,7 @@ TEST(BlockTreeLoaderTest, DecodeSourcesValidateTheActualFallbackSwaWindow) {
             env->expectFullyReclaimed();
         }
     }
+    });
 }
 
 TEST(BlockTreeLoaderTest, UnknownDiskCompletionFreezesOnlyDiskTransferAndStillPublishesHost) {
