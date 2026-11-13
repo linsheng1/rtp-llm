@@ -252,11 +252,15 @@ void GenerateStream::releaseResource() {
     tryReleaseResourceAfterBookkeeping();
 }
 
+bool GenerateStream::hasOutstandingResourceUseWithoutLock() const {
+    return hasPendingAsyncBookkeeping() || async_bookkeeping_->submissions || unknown_decode_publication_;
+}
+
 void GenerateStream::tryReleaseResourceAfterBookkeeping() {
     // A worker must never wait for another task queued on its own runner.
     // Recheck under the submission gate so a newly admitted frame cannot race release.
     std::lock_guard<std::mutex> lock(*mutex_);
-    if (hasPendingAsyncBookkeeping() || async_bookkeeping_->submissions || unknown_decode_publication_) {
+    if (hasOutstandingResourceUseWithoutLock()) {
         markDeferredRelease();
         return;
     }
@@ -290,6 +294,12 @@ void GenerateStream::retainUnknownDecodePublication(const std::shared_ptr<Genera
     std::lock_guard<std::mutex> lock(*mutex_);
     RTP_LLM_CHECK(owner.get() == this);
     unknown_decode_publication_ = owner; // No GPU last-use proof: retain actual pages, not just logical IDs.
+    // Set the code before emitting the bitmask event, so reporting does not
+    // construct a diagnostic string on this destructor/error path. Keep the
+    // first error (including cancellation) and the actual UNKNOWN owner.
+    if (generate_status_->error_info.ok())
+        generate_status_->error_info.setErrorCode(ErrorCode::EXECUTION_EXCEPTION);
+    reportEventWithoutLock(StreamEvents::Error, ErrorCode::EXECUTION_EXCEPTION, "");
 }
 
 void GenerateStream::endDecodePublicationSubmission() {

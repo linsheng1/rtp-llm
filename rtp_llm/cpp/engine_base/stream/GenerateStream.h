@@ -1109,6 +1109,9 @@ protected:
     int prefill_tp_size_ = -1;
 
 private:
+    // Caller holds mutex_; retaining the stream alone does not prevent explicit KV release.
+    bool hasOutstandingResourceUseWithoutLock() const;
+    friend struct GenerateStateMachine;
     AsyncProfileRequest request_profile_;
 };
 

@@ -1779,7 +1779,14 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& schedul
             catch (...) { drained = false; }
             try { cudaSyncAndCheck(); }
             catch (...) { drained = false; }
-            if (!drained) { frame->unknown = frame; return; } // Retain actual sources if any last-use proof is missing.
+            if (!drained) {
+                frame->unknown = frame; // Keep actual sources before fallible request notification.
+                for (const auto& stream : frame->streams) {
+                    try { stream->retainUnknownDecodePublication(stream); }
+                    catch (...) {} // The retained frame and submission still protect every source.
+                }
+                return;
+            }
         }
         for (const auto& stream : frame->streams) stream->endDecodePublicationSubmission();
     }) : std::shared_ptr<void>{};

@@ -216,7 +216,14 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& schedul
     auto close_frame = frame ? std::shared_ptr<void>(nullptr, [frame](void*) {
         if (!frame->handed_off && !frame->streams.empty()) {
             try { cudaSyncAndCheck(); }
-            catch (...) { frame->unknown = frame; return; } // Keep actual sources if GPU drain is unknown.
+            catch (...) {
+                frame->unknown = frame; // Keep actual sources before fallible request notification.
+                for (const auto& stream : frame->streams) {
+                    try { stream->retainUnknownDecodePublication(stream); }
+                    catch (...) {} // The retained frame and submission still protect every source.
+                }
+                return;
+            }
         }
         for (const auto& stream : frame->streams) stream->endDecodePublicationSubmission();
     }) : std::shared_ptr<void>{};
