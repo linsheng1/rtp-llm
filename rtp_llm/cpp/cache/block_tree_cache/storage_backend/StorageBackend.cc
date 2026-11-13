@@ -84,6 +84,9 @@ auto makeIoCompletion(std::shared_ptr<StorageBackendExecutor> executor,
     struct Continuation {
         Settle settle;
         Result result{};
+        // Carry failures directly: building a throwing std::function in a
+        // bad_alloc catch can itself allocate and lose lifecycle retirement.
+        std::exception_ptr error;
         explicit Continuation(Settle&& value): settle(std::move(value)) {}
     };
     // One pre-I/O allocation holds both the settlement and its terminal result.
@@ -91,16 +94,17 @@ auto makeIoCompletion(std::shared_ptr<StorageBackendExecutor> executor,
     std::shared_ptr<BlockTreeTaskPool::Completion> reservation;
     if (executor->hasCompletionReservations()) {
         reservation = executor->reserveCompletion([continuation]() mutable {
-            continuation->settle(std::move(continuation->result), true);
+            continuation->settle(std::move(continuation->result), true, false, std::move(continuation->error));
         }, task_class);
         if (!reservation) throw StorageOperationBufferSafeFailure("storage business completion capacity rejected before I/O");
     }
     return [executor = std::move(executor), state = std::move(state), continuation,
-            reservation = std::move(reservation)](Result result, bool asynchronous) mutable {
+            reservation = std::move(reservation)](Result result, bool asynchronous, std::exception_ptr error) mutable {
         if (state->completion_started.exchange(true))
             return;
         if (asynchronous && reservation) {
             continuation->result = std::move(result);
+            continuation->error = std::move(error);
             // This accepted obligation cannot be rejected by stopAdmission or
             // a deque allocation at terminal CQ time. Never settle SDK/metadata
             // business on a notifying CQ/driver lane.
@@ -111,13 +115,13 @@ auto makeIoCompletion(std::shared_ptr<StorageBackendExecutor> executor,
         reservation.reset(); // Synchronous/no-I/O result abandons the unused reservation.
         if (asynchronous) {
             try {
-                if (executor->submitCompletion([continuation, result]() mutable {
-                        continuation->settle(std::move(result), true);
+                if (executor->submitCompletion([continuation, result, error]() mutable {
+                        continuation->settle(std::move(result), true, false, std::move(error));
                     }))
                     return;
             } catch (...) {}
         }
-        continuation->settle(std::move(result), !asynchronous);
+        continuation->settle(std::move(result), !asynchronous, false, std::move(error));
     };
 }
 
@@ -637,7 +641,8 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
             auto io = error.ok() ? stageTimer("read_io", state->request, "read", state->trace_id, io_kind) :
                                    SharedTransferStageTimer{};
             auto settle_read = [this, state, error, done = std::move(done), total, io, io_kind,
-                                finished = std::move(finished)](Task result, bool, bool before_io = false) mutable {
+                                finished = std::move(finished)](Task result, bool, bool before_io = false,
+                                                               std::exception_ptr failure = {}) mutable {
                 block_tree_cache_detail::ScopeRollback retire(std::move(finished));
                 storage_backend_detail::invokeCallback(this, [&] {
                     std::optional<StorageQuarantineReason> quarantine_reason;
@@ -648,6 +653,7 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                                 complete.emplace(nullptr, "read_complete", state->request.request_id.value_or(-1), 0,
                                                  state->request.handles.size(), world_rank_, "storage_backend",
                                                  state->trace_id, CacheStageContext::storage("read"));
+                            if (failure) std::rethrow_exception(failure);
                             result();
                             if (state->request.transfer_task->expired()) {
                                 error = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "storage read deadline exceeded");
@@ -699,18 +705,18 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                     total.finish(success);
                 });
             };
-            std::function<void(Task, bool)> complete_read;
+            std::function<void(Task, bool, std::exception_ptr)> complete_read;
             try {
                 complete_read = storage_backend_detail::makeIoCompletion<Task>(
                     executor_, state, settle_read, BlockTreeTaskClass::LOAD);
             } catch (...) {
                 // Completion preparation failed before readAsyncImpl/readImpl.
                 // No external I/O can own the destination, even on bad_alloc.
-                settle_read([error = std::current_exception()] { std::rethrow_exception(error); }, false, true);
+                settle_read({}, false, true, std::current_exception());
                 return;
             }
             if (!error.ok()) {
-                complete_read({}, false);
+                complete_read({}, false, {});
                 return;
             }
             try {
@@ -721,12 +727,12 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                                    state->request.handles.size(), world_rank_, "storage_backend",
                                    state->trace_id, CacheStageContext::storage("read"));
                 if (readAsyncImpl(state->request, match_meta, [complete_read](Task result) mutable {
-                        complete_read(std::move(result), true);
+                        complete_read(std::move(result), true, {});
                     }))
                     return;
-                complete_read([this, state, match_meta] { readImpl(state->request, match_meta); }, false);
+                complete_read([this, state, match_meta] { readImpl(state->request, match_meta); }, false, {});
             } catch (...) {
-                complete_read([error = std::current_exception()] { std::rethrow_exception(error); }, false);
+                complete_read({}, false, std::current_exception());
             }
         },
         BlockTreeTaskClass::LOAD,
@@ -771,7 +777,8 @@ bool StorageBackend::write(StorageWriteTask task) {
         auto io = run ? stageTimer("write_io", state->request, "write", state->trace_id, io_kind) :
                         SharedTransferStageTimer{};
         auto settle_write = [this, state, total, io, io_kind, run, finished = std::move(finished)](
-                                WriteResult result, bool on_worker, bool before_io = false) mutable {
+                                WriteResult result, bool on_worker, bool before_io = false,
+                                std::exception_ptr failure = {}) mutable {
             block_tree_cache_detail::ScopeRollback retire(std::move(finished));
             storage_backend_detail::invokeCallback(this, [&] {
                 bool success = false;
@@ -783,6 +790,7 @@ bool StorageBackend::write(StorageWriteTask task) {
                             complete.emplace(nullptr, "write_complete", state->request.request_id.value_or(-1), 0,
                                              state->request.handles.size(), world_rank_, "storage_backend",
                                              state->trace_id, CacheStageContext::storage("write"));
+                        if (failure) std::rethrow_exception(failure);
                         if (result)
                             result(on_worker);
                         success = !state->request.transfer_task->expired();
@@ -830,14 +838,14 @@ bool StorageBackend::write(StorageWriteTask task) {
             settle_write({}, true);
             return;
         }
-        std::function<void(WriteResult, bool)> complete;
+        std::function<void(WriteResult, bool, std::exception_ptr)> complete;
         try {
             complete = storage_backend_detail::makeIoCompletion<WriteResult>(
                 executor_, state, settle_write, BlockTreeTaskClass::BACKGROUND);
         } catch (...) {
             // No startWriteImpl/writeImpl call has occurred. Preserve the
             // original error without manufacturing an UNKNOWN buffer owner.
-            settle_write([error = std::current_exception()](bool) { std::rethrow_exception(error); }, false, true);
+            settle_write({}, false, true, std::current_exception());
             return;
         }
         try {
@@ -848,13 +856,13 @@ bool StorageBackend::write(StorageWriteTask task) {
                                state->trace_id, CacheStageContext::storage("write"));
             if (state->request.completion_admission)
                 state->request.completion_admission->onRunning();
-            if (startWriteImpl(state->request, [complete](WriteResult result) { complete(std::move(result), true); }))
+            if (startWriteImpl(state->request, [complete](WriteResult result) { complete(std::move(result), true, {}); }))
                 return;
         } catch (...) {
-            complete([error = std::current_exception()](bool) { std::rethrow_exception(error); }, false);
+            complete({}, false, std::current_exception());
             return;
         }
-        complete({}, false);
+        complete({}, false, {});
     }, BlockTreeTaskClass::BACKGROUND, skip_remote, state->request.transfer_task->deadline());
     return admitted && !skip_remote;
 }

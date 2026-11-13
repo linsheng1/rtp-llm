@@ -623,6 +623,22 @@ protected:
     bool quiesceUnknownOperations() noexcept override { return quiescent.load(); }
 };
 
+class ThrowingEntryBackend: public ProtectedBackend {
+public:
+    using ProtectedBackend::ProtectedBackend;
+    size_t entries{0};
+protected:
+    bool readAsyncImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&,
+                       ReadCompletion) override {
+        ++entries;
+        throw std::bad_alloc(); // The virtual backend entry may already own I/O.
+    }
+    bool startWriteImpl(const StorageRequest&, WriteCompletion) override {
+        ++entries;
+        throw std::bad_alloc();
+    }
+};
+
 class PredicateBoundaryBackend: public ProtectedBackend {
 public:
     using ProtectedBackend::ProtectedBackend;
@@ -1102,6 +1118,52 @@ TEST(StorageBackendTest, CompletionPreparationFailureReleasesReadAndWriteWithout
             EXPECT_EQ(budget->snapshot().jobs, 0u);
             EXPECT_EQ(executor->runAll(), 0u); // No second completion was queued.
         }
+    }
+}
+
+TEST(StorageBackendTest, EntryExceptionsReachSettlementAndKeepUnknownUntilQuiescence) {
+    for (const bool read : {false, true}) {
+        auto pool = std::make_shared<TestBlockPool>();
+        const auto block = pool->malloc().value();
+        pool->incRef(block);
+        block_tree_cache_detail::ScopeRollback free_request_ref([&] { pool->decRef(block); });
+        auto executor = std::make_shared<HoldingExecutor>();
+        auto callbacks = std::make_shared<size_t>(0);
+        auto backend = std::make_shared<ThrowingEntryBackend>(true, executor);
+        ASSERT_TRUE(initBackend(*backend, pool));
+        block_tree_cache_detail::ScopeRollback cleanup([backend] { backend->proveQuiescence(); });
+        auto request = makeRequest(block);
+        request.decode_completion = !read;
+        std::weak_ptr<void> owner = backend->resources;
+        std::weak_ptr<const CacheKeysType> keys = request.keys;
+        if (read) {
+            backend->read(std::move(request), nullptr, [callbacks](ErrorInfo error) {
+                ++*callbacks;
+                EXPECT_FALSE(error.ok());
+            });
+        } else {
+            ASSERT_TRUE(backend->write(backend->prepareWrite(std::move(request))));
+        }
+        backend->resources.reset();
+        ASSERT_EQ(executor->runAll(), 1u);
+        EXPECT_EQ(backend->entries, 1u);
+        EXPECT_EQ(*callbacks, read ? 1u : 0u);
+        EXPECT_EQ(executor->runAll(), 0u);
+        EXPECT_EQ(backend->quarantine_events, 1u);
+        EXPECT_EQ(backend->quarantined_tasks, 1u);
+        EXPECT_EQ(backend->last_quarantine_reason, StorageQuarantineReason::INVALID_RESPONSE);
+        EXPECT_EQ(pool->refCount(block), 2u);
+        EXPECT_FALSE(owner.expired());
+        EXPECT_FALSE(keys.expired());
+        cleanup.run();
+        // If retirement regresses, the detached timeout keeps all live backend
+        // and pool state owned; it never references a dead stack fixture.
+        BoundedThread<void> stopping([backend] { backend->shutdown(); });
+        ASSERT_EQ(stopping.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+        stopping.get();
+        EXPECT_TRUE(owner.expired());
+        EXPECT_TRUE(keys.expired());
+        EXPECT_EQ(pool->refCount(block), 1u);
     }
 }
 
