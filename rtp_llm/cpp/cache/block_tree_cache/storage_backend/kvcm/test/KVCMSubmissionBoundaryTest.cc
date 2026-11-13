@@ -373,7 +373,8 @@ TEST_F(KVCMSubmissionBoundaryTest, LocalPeerLatchWaitsForDriverAfterEveryInlineT
     write->proof = std::make_shared<kvcm::PayloadDispatchProof>();
     write->proof->pending();
     size_t calls = 0;
-    write->business = [&] { ++calls; };
+    const std::weak_ptr<Impl::LocalPeerWrite> weak = write;
+    write->business = [write, &calls] { ++calls; }; // Same self-cycle as production collect.
     Impl::finishLocalPeer(write, 0, true);
     EXPECT_EQ(calls, 0u);
     EXPECT_FALSE(write->proof->neverStarted());
@@ -383,7 +384,8 @@ TEST_F(KVCMSubmissionBoundaryTest, LocalPeerLatchWaitsForDriverAfterEveryInlineT
     Impl::finishLocalPeers(write);
     EXPECT_EQ(calls, 1u);
     EXPECT_TRUE(write->proof->neverStarted());
-    EXPECT_FALSE(write->business);
+    write.reset();
+    EXPECT_TRUE(weak.expired()); // Finalization broke the actual callback/context cycle.
 }
 
 TEST_F(KVCMSubmissionBoundaryTest, LocalPeersRejectedOrInlineExpiredSettleOnceWithoutSdk) {
@@ -407,7 +409,7 @@ TEST_F(KVCMSubmissionBoundaryTest, LocalPeersRejectedOrInlineExpiredSettleOnceWi
 TEST_F(KVCMSubmissionBoundaryTest, PartialLocalQueueRejectionStillWaitsForAcceptedPeer) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
-        Fixture s(true, {}, 1, 2); // BACKGROUND queue has exactly one available slot.
+        Fixture s(true, {}, 1, 1); // Running job occupies no queue slot; one peer can queue.
         auto entered = std::make_shared<std::promise<void>>();
         auto started = entered->get_future();
         auto release = std::make_shared<std::promise<void>>();
@@ -479,14 +481,15 @@ TEST_F(KVCMSubmissionBoundaryTest, ParallelPeersHoldSourcesAndPublishOnceAfterBo
 TEST_F(KVCMSubmissionBoundaryTest, ShutdownDrainsAcceptedLocalPeersBeforeClientShutdown) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
-        Fixture s(true, {}, 2);
+        auto fixture = std::make_shared<Fixture>(true, std::shared_ptr<BoundaryBroadcastManager>{}, 2);
+        auto& s = *fixture;
         auto entered = std::make_shared<std::promise<void>>();
         auto started = entered->get_future();
         auto release = std::make_shared<std::promise<void>>();
         auto released = release->get_future().share();
         EXPECT_CALL(*s.client, saveKvCachesForTag(_, _, _, _)).Times(2).WillRepeatedly(Invoke(
-            [&, entered, released](const auto&, const auto& uris, const auto&, const auto&) {
-                if (++s.saves == 2) entered->set_value();
+            [saves = &s.saves, entered, released](const auto&, const auto& uris, const auto&, const auto&) {
+                if (++*saves == 2) entered->set_value();
                 EXPECT_EQ(released.wait_for(kSettlementWait), std::future_status::ready);
                 return std::make_pair(true, uris);
             }));
@@ -497,8 +500,9 @@ TEST_F(KVCMSubmissionBoundaryTest, ShutdownDrainsAcceptedLocalPeersBeforeClientS
         s.backend->impl_->local_payload_pool_->stopAdmission();
         EXPECT_FALSE(s.backend->impl_->submitLocalPayload(BlockTreeTaskClass::BACKGROUND,
             [] {}, BoundaryClock::now() + kOperationTimeout, [] {}));
-        block_tree_cache_test::BoundedThread<void> stopping([&] { s.backend->shutdown(); });
-        // Declared after the joiner: early ASSERT must unblock before it joins.
+        block_tree_cache_test::BoundedThread<void> stopping([fixture] { fixture->backend->shutdown(); });
+        // On timeout the joiner detaches while retaining fixture, never a stack reference.
+        // Unblock before the thread handle is destroyed on an early ASSERT.
         block_tree_cache_detail::ScopeRollback release_before_join([&] { unblock.run(); });
         EXPECT_EQ(stopping.waitFor(std::chrono::milliseconds(20)), std::future_status::timeout);
         EXPECT_EQ(observed->calls.load(), 0u);
