@@ -221,6 +221,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, PhysicalOriginsFollowHostDiskRoun
     const auto  origin          = std::make_shared<const DecodeCacheOrigin>(*source);
     const auto& tag             = group_set_->groupTags().front();
     const auto  host_generation = host_pool_->decodeOriginIncarnation(host_block);
+    EXPECT_FALSE(disk_pool_->decodeOrigin(disk_block, tag)); // Target has never bound an origin.
     ASSERT_TRUE(host_pool_->bindDecodeOrigin(host_block, host_generation, tag, origin));
     ASSERT_TRUE(executeSucceeded(engine, makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block)));
     EXPECT_EQ(disk_pool_->decodeOrigin(disk_block, tag), origin);

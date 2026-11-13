@@ -281,6 +281,7 @@ uint64_t IBlockPool::decodeOriginIncarnation(BlockIdxType block) const {
 }
 
 PhysicalDecodeOrigins::Origin IBlockPool::decodeOrigin(BlockIdxType block, std::string_view region) const {
+    if (!decode_origin_ever_bound_.load(std::memory_order_acquire)) return {};
     std::lock_guard<std::mutex> lock(mutex_);
     return decode_origins_ && validBlockNoLock(block) && allocated_[block] ? decode_origins_->get(block, region) :
                                                                              nullptr;
@@ -291,8 +292,13 @@ bool IBlockPool::bindDecodeOrigin(BlockIdxType                  block,
                                   std::string_view              region,
                                   PhysicalDecodeOrigins::Origin origin) {
     std::lock_guard<std::mutex> lock(mutex_);
-    return decode_origins_ && validBlockNoLock(block) && allocated_[block]
-           && decode_origins_->bind(block, expected_incarnation, region, std::move(origin));
+    const bool non_null = static_cast<bool>(origin);
+    const bool bound = decode_origins_ && validBlockNoLock(block) && allocated_[block]
+                       && decode_origins_->bind(block, expected_incarnation, region, std::move(origin));
+    // Every non-null table write (including transfer propagation) passes here.
+    // Publish only a successful bind; null/stale/failed binds do not arm it.
+    if (bound && non_null) decode_origin_ever_bound_.store(true, std::memory_order_release);
+    return bound;
 }
 
 size_t IBlockPool::totalBlocksNum() const {

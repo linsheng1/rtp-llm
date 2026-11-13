@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <chrono>
+#include <future>
+#include <mutex>
 #include <csignal>
 #include <limits>
 #include <memory>
@@ -13,6 +16,7 @@
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
 namespace rtp_llm {
@@ -284,6 +288,57 @@ TEST(IBlockPoolTest, BlockZeroIsInvalidAndNeverAllocated) {
     ASSERT_TRUE(blocks.has_value());
     EXPECT_EQ(blocks->size(), 3u);
     EXPECT_EQ(std::find(blocks->begin(), blocks->end(), 0), blocks->end());
+}
+
+void expectOriginLookupUnderPoolLock(const std::shared_ptr<TestPool>& pool, BlockIdxType block,
+                                    bool bypasses_lock, PhysicalDecodeOrigins::Origin expected) {
+    auto entered = std::make_shared<std::promise<void>>();
+    auto started = entered->get_future();
+    std::unique_lock<std::mutex> lock(pool->mutex_);
+    // BoundedThread detaches on a regression timeout; the callable owns all
+    // state it can still access. The parent always unlocks before inspecting it.
+    block_tree_cache_test::BoundedThread<PhysicalDecodeOrigins::Origin> lookup([pool, block, entered] {
+        entered->set_value();
+        return pool->decodeOrigin(block, "full");
+    });
+    const auto started_status = started.wait_for(std::chrono::seconds(5));
+    EXPECT_EQ(started_status, std::future_status::ready);
+    if (started_status == std::future_status::ready) {
+        EXPECT_EQ(lookup.waitFor(bypasses_lock ? std::chrono::milliseconds(5000) : std::chrono::milliseconds(20)),
+                  bypasses_lock ? std::future_status::ready : std::future_status::timeout);
+    }
+    lock.unlock();
+    ASSERT_EQ(lookup.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(lookup.get(), expected);
+}
+
+TEST(IBlockPoolTest, NeverBoundOriginsBypassLockUntilFirstSuccessfulNonNullBind) {
+    auto pool = makeInitializedPool(2);
+    const auto block = *pool->malloc();
+    const auto parsed = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".7680.7680.8192.8200.8201");
+    ASSERT_TRUE(parsed);
+    auto origin = std::make_shared<const DecodeCacheOrigin>(*parsed);
+    EXPECT_FALSE(pool->bindDecodeOrigin(block, 1, "full", origin)); // Tracking not enabled.
+    ASSERT_NO_FATAL_FAILURE(expectOriginLookupUnderPoolLock(pool, block, true, {}));
+    ASSERT_TRUE(pool->enableDecodeOriginTracking());
+    const auto stamp = pool->decodeOriginIncarnation(block);
+    ASSERT_NE(stamp, 0u);
+    EXPECT_TRUE(pool->bindDecodeOrigin(block, stamp, "full", nullptr));
+    EXPECT_FALSE(pool->bindDecodeOrigin(block, stamp + 1, "full", origin));
+    EXPECT_FALSE(pool->bindDecodeOrigin(block, stamp, "", origin));
+    EXPECT_FALSE(pool->bindDecodeOrigin(NULL_BLOCK_IDX, stamp, "full", origin));
+    ASSERT_NO_FATAL_FAILURE(expectOriginLookupUnderPoolLock(pool, block, true, {}));
+    ASSERT_TRUE(pool->bindDecodeOrigin(block, stamp, "full", origin));
+    ASSERT_NO_FATAL_FAILURE(expectOriginLookupUnderPoolLock(pool, block, false, origin));
+    ASSERT_TRUE(pool->bindDecodeOrigin(block, stamp, "full", nullptr));
+    ASSERT_NO_FATAL_FAILURE(expectOriginLookupUnderPoolLock(pool, block, false, {}));
+    pool->incTreeRef(block, BlockTreeRefType::CACHE);
+    pool->decTreeRef(block, BlockTreeRefType::CACHE);
+    ASSERT_NO_FATAL_FAILURE(expectOriginLookupUnderPoolLock(pool, block, false, {}));
+    ASSERT_EQ(*pool->malloc(), block);
+    EXPECT_NE(pool->decodeOriginIncarnation(block), stamp);
+    EXPECT_FALSE(pool->bindDecodeOrigin(block, stamp, "full", origin));
+    ASSERT_NO_FATAL_FAILURE(expectOriginLookupUnderPoolLock(pool, block, false, {}));
 }
 
 TEST(IBlockPoolTest, OriginTrackingIsOptionalAndFollowsAllocatedPhysicalLifetime) {
