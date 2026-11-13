@@ -503,19 +503,18 @@ public:
         if (!success) {
             return {request.local_matched_blocks_num, nullptr};
         }
-        if (decode_publication_enabled_) {
-            const bool found_any =
-                std::any_of(locations.begin(), locations.end(), [](const auto& row) { return !row.empty(); });
-            lookup_outcome = found_any ? "found_unusable" : "not_found";
-        }
+        const bool found_any = decode_publication_enabled_
+            && std::any_of(locations.begin()
+                               + (positional ? std::min(request.local_matched_blocks_num, locations.size()) : 0),
+                           locations.end(), [](const auto& row) { return !row.empty(); });
         if (positional) {
             auto meta = std::make_shared<KVCMMatchMeta>();
             meta->locations = reusableLocations(request, std::move(locations));
             meta->filtered = true;
             collector.remote_match_fail_qps        = false;
             collector.remote_match_reuse_block_num = static_cast<int64_t>(meta->locations.size());
-            if (!meta->locations.empty())
-                lookup_outcome = "usable_found";
+            lookup_outcome = !meta->locations.empty() ? "usable_found" :
+                             (found_any ? "found_unusable" : "not_found");
             if (!meta->locations.empty()) {
                 collector.remote_valid_hit_ratio =
                     static_cast<double>(request.local_matched_blocks_num + meta->locations.size()) / keys.size();
@@ -533,8 +532,8 @@ public:
         meta->locations = std::move(locations);
         collector.remote_match_fail_qps        = false;
         collector.remote_match_reuse_block_num = static_cast<int64_t>(locations_view.size());
-        if (!locations_view.empty())
-            lookup_outcome = "usable_found";
+        lookup_outcome = !locations_view.empty() ? "usable_found" :
+                         (found_any ? "found_unusable" : "not_found");
         if (!locations_view.empty()) {
             collector.remote_valid_hit_ratio =
                 static_cast<double>(request.local_matched_blocks_num + locations_view.size()) / keys.size();

@@ -387,19 +387,18 @@ TEST(ClientWrapperTest, BackendMasksPreserveOriginalKeyPositions) {
     struct Case {
         BlockMask         mask;
         BackendLocations  response;
-        std::vector<bool> expected_hits;
     };
     BackendLocations miss = all;
     miss[1].clear();
     BackendLocations already_masked = all;
     already_masked[0].clear();
     const std::vector<Case> cases{
-        {BlockMaskOffset{1}, all, {false, true, true}},
-        {BlockMaskVector{true, false, true}, all, {false, true, false}},
-        {BlockMaskOffset{1}, miss, {false, false, true}},
-        {BlockMaskOffset{1}, already_masked, {false, true, true}},
-        {BlockMaskVector{}, all, {true, true, true}},
-        {BlockMaskOffset{3}, all, {false, false, false}},
+        {BlockMaskOffset{1}, all},
+        {BlockMaskVector{true, false, true}, all},
+        {BlockMaskOffset{1}, miss},
+        {BlockMaskOffset{1}, already_masked},
+        {BlockMaskVector{}, all},
+        {BlockMaskOffset{3}, all},
     };
     for (size_t c = 0; c < cases.size(); ++c) {
         SCOPED_TRACE(c);
@@ -425,12 +424,13 @@ TEST(ClientWrapperTest, BackendMasksPreserveOriginalKeyPositions) {
         ASSERT_TRUE(ok);
         ASSERT_EQ(result.size(), 3u);
         for (size_t i = 0; i < result.size(); ++i) {
-            EXPECT_EQ(!result[i].empty(), test.expected_hits[i]);
+            ASSERT_EQ(result[i].size(), test.response[i].size());
             if (!result[i].empty()) {
-                ASSERT_EQ(result[i].size(), 1u);
+                EXPECT_EQ(result[i][0].type, test.response[i][0].type);
+                EXPECT_EQ(result[i][0].spec_size, test.response[i][0].spec_size);
                 ASSERT_EQ(result[i][0].location_specs.size(), 1u);
                 EXPECT_EQ(result[i][0].location_specs[0].spec_name, "full");
-                EXPECT_EQ(result[i][0].location_specs[0].uri, all[i][0].location_specs[0].uri);
+                EXPECT_EQ(result[i][0].location_specs[0].uri, test.response[i][0].location_specs[0].uri);
             }
         }
         wrapper->shutdown();
@@ -439,7 +439,7 @@ TEST(ClientWrapperTest, BackendMasksPreserveOriginalKeyPositions) {
     });
 }
 
-TEST(ClientWrapperTest, BackendRejectsMalformedShapeAndPropagatesSdkFailure) {
+TEST(ClientWrapperTest, BackendForwardsSdkSuccessAndPropagatesFailure) {
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
     using namespace kv_cache_manager;
@@ -461,8 +461,18 @@ TEST(ClientWrapperTest, BackendRejectsMalformedShapeAndPropagatesSdkFailure) {
         EXPECT_CALL(*meta, GetCacheLocationsByBackend("bad_shape", _, _, mask, _, type, _))
             .WillOnce(Return(std::make_pair(ClientErrorCode::ER_OK, response)));
         auto [ok, result] = wrapper->getCacheLocationsByBackend("", "bad_shape", {101, 102, 103}, {}, mask, {}, type);
-        EXPECT_FALSE(ok);
-        EXPECT_TRUE(result.empty());
+        // The wrapper preserves the SDK result; P validates shape before use.
+        ASSERT_TRUE(ok);
+        ASSERT_EQ(result.size(), response.size());
+        for (size_t i = 0; i < result.size(); ++i) {
+            ASSERT_EQ(result[i].size(), response[i].size());
+            if (!result[i].empty()) {
+                EXPECT_EQ(result[i][0].type, response[i][0].type);
+                EXPECT_EQ(result[i][0].spec_size, response[i][0].spec_size);
+                ASSERT_EQ(result[i][0].location_specs.size(), response[i][0].location_specs.size());
+                EXPECT_EQ(result[i][0].location_specs[0].uri, response[i][0].location_specs[0].uri);
+            }
+        }
     }
     EXPECT_CALL(*meta, GetCacheLocationsByBackend("sdk_error", _, _, _, _, type, _))
         .WillOnce(Return(std::make_pair(ClientErrorCode::ER_INVALID_PARAMS, all)));

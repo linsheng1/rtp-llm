@@ -4,6 +4,7 @@
 #include <future>
 #include <tuple>
 #include <thread>
+#include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "kmonitor/client/core/MetricsData.h"
@@ -22,13 +23,12 @@ Match hostCacheMatchFixture() {
     }
 }
 
-double quarantineGauge(kmonitor::MutableMetric* metric) {
+double snapshotMetric(kmonitor::MutableMetric* metric, const kmonitor::MetricsTags& tags = {}) {
     if (metric == nullptr) {
         ADD_FAILURE() << "metric is null";
         return -1;
     }
-    kmonitor::MetricsTags tags;
-    kmonitor::Metric*     gauge = metric->DeclareMetric(&tags);
+    kmonitor::Metric* gauge = metric->DeclareMetric(&tags);
     if (gauge == nullptr) {
         ADD_FAILURE() << "metric series is missing";
         return -1;
@@ -82,7 +82,8 @@ TEST(KVCMMockOnlyFullTest, MetadataRpcPreservesFiltersMasksAndHitResponses) {
     RemoteOperationResponsePB response;
 
     const kv_cache_manager::BackendLocations by_backend{
-        {{kv_cache_manager::StorageType::ST_TAIRMEMPOOL, 4096, locations[0]}}, {}};
+        {{kv_cache_manager::StorageType::ST_TAIRMEMPOOL, 4096, locations[0]}},
+        {{kv_cache_manager::StorageType::ST_TAIRMEMPOOL, 4096, {{names[1], "pace://masked"}}}}};
     EXPECT_CALL(*client, getCacheLocationsByBackend("", "metadata", keys, tokens, mask, names,
                                                    kv_cache_manager::StorageType::ST_TAIRMEMPOOL))
         .WillOnce(Return(std::make_pair(true, by_backend)));
@@ -98,7 +99,9 @@ TEST(KVCMMockOnlyFullTest, MetadataRpcPreservesFiltersMasksAndHitResponses) {
     ASSERT_EQ(hit.specs_size(), 1);
     EXPECT_EQ(hit.specs(0).name(), names[0]);
     EXPECT_EQ(hit.specs(0).uri(), "pace://hit");
-    EXPECT_EQ(response.backend_locations(1).locations_size(), 0);
+    ASSERT_EQ(response.backend_locations(1).locations_size(), 1);
+    ASSERT_EQ(response.backend_locations(1).locations(0).specs_size(), 1);
+    EXPECT_EQ(response.backend_locations(1).locations(0).specs(0).uri(), "pace://masked");
 
     const kv_cache_manager::HostCacheState hosts{hostCacheMatchFixture<kv_cache_manager::HostCacheMatch>()};
     EXPECT_CALL(*client, getHostCacheState("", "metadata", kv_cache_manager::QueryType::QT_PREFIX_MATCH,
@@ -309,7 +312,8 @@ TEST(KVCMMockOnlyFullTest, BackendReadPreservesLocalPrefixAndStopsAtRemoteMiss) 
     const auto backend_type = kv_cache_manager::StorageType::ST_TAIRMEMPOOL;
     const auto spec_size = static_cast<int32_t>(environment.cache_config.blockSizeBytesForGroup("default"));
     const kv_cache_manager::BackendLocations locations{
-        {}, {{backend_type, spec_size, {{"tp0_Fdefault", "uri_102"}}}},
+        {{backend_type, spec_size, {{"tp0_Fdefault", "uri_local_never_loaded"}}}},
+        {{backend_type, spec_size, {{"tp0_Fdefault", "uri_102"}}}},
         {{backend_type, spec_size, {{"tp0_Fdefault", "uri_103"}}}}, {},
         {{backend_type, spec_size, {{"tp0_Fdefault", "uri_105"}}}}};
     const kv_cache_manager::BlockMask offset = kv_cache_manager::BlockMaskOffset{1};
@@ -338,6 +342,59 @@ TEST(KVCMMockOnlyFullTest, BackendReadPreservesLocalPrefixAndStopsAtRemoteMiss) 
             return true;
         }));
     EXPECT_TRUE(read(*backend.backend, std::move(request), std::move(result.match_meta)));
+}
+
+TEST(KVCMMockOnlyFullTest, BackendLookupIgnoresLocalHitsAndRejectsMalformedRequiredShape) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+    auto environment = makeBackendEnvironment("kvcm_backend_lookup_shape");
+    auto client = std::make_shared<MockClientWrapper>();
+    auto reporter = std::make_shared<kmonitor::MetricsReporter>("", "", kmonitor::MetricsTags{});
+    KVCacheConfig config;
+    config.kvcm_model_sdk_config = R"([{"type":"pace"}])";
+    config.kvcm_read_backend_type = 3;
+    ParallelismConfig parallel;
+    parallel.role_type = RoleType::PREFILL;
+    parallel.prefill_cp_config.prefill_cp_size = 1;
+    EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+    EXPECT_CALL(*client, shutdown()).Times(1);
+    EXPECT_CALL(*client, loadKvCachesForTag(_, _, _, _)).Times(0);
+    auto backend = makeBackend(environment, parallel, client, nullptr, reporter, true, config);
+    ASSERT_TRUE(backend->init(environment.cache_config.topologyPtr(), environment.pools_by_tag,
+        [&](int layer, const std::string&, int block) {
+            return environment.device_pool->convertIndexToBuffer(layer, block);
+        }));
+    const auto type = kv_cache_manager::StorageType::ST_TAIRMEMPOOL;
+    const auto bytes = static_cast<int32_t>(environment.cache_config.blockSizeBytesForGroup("default"));
+    const kv_cache_manager::BackendLocations local_only{
+        {{type, bytes, {{"tp0_Fdefault", "pace://local_never_loaded"}}}}, {}, {}};
+    const std::vector<kv_cache_manager::BackendLocations> replies{
+        local_only, {}, {local_only[0], local_only[1]},
+        {local_only[0], local_only[1], local_only[2], {}}};
+    const kv_cache_manager::BlockMask offset = kv_cache_manager::BlockMaskOffset{1};
+    for (const auto& reply : replies) {
+        EXPECT_CALL(*client, getCacheLocationsByBackend(_, _, std::vector<int64_t>({101, 102, 103}), _,
+                                                       offset, _, type))
+            .WillOnce(Return(std::make_pair(true, reply)));
+        auto result = match(*backend.backend, makeStorageRequest(environment, {101, 102, 103}, 1));
+        if (reply.size() == 3) {
+            ASSERT_TRUE(result.success);
+            EXPECT_EQ(result.matched_blocks_num, 1u);
+        } else {
+            EXPECT_FALSE(result.success);
+            EXPECT_EQ(result.matched_blocks_num, 0u);
+            EXPECT_EQ(result.match_meta, nullptr);
+        }
+    }
+    auto* metrics = reporter->getMetricsGroup<RtpLLMRemoteCacheOutcomeMetrics>();
+    ASSERT_NE(metrics, nullptr);
+    for (const auto& [outcome, count] : std::vector<std::tuple<const char*, double>>{
+             {"not_found", 1}, {"found_unusable", 0}, {"failed", 3}}) {
+        kmonitor::MetricsTags tags("stage", "lookup");
+        tags.AddTag("outcome", outcome);
+        EXPECT_DOUBLE_EQ(snapshotMetric(metrics->outcome_qps_metric, tags), count);
+    }
+    });
 }
 
 TEST(KVCMMockOnlyFullTest, TP2WorkerRegistersItsRankAndExecutesLocalPayload) {
@@ -596,9 +653,9 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndFreezesSource
                               }));
     auto* quarantine_metrics = metrics_reporter->getMetricsGroup<RtpLLMRemoteCacheQuarantineMetrics>();
     ASSERT_NE(quarantine_metrics, nullptr);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_count_metric), 0);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_lease_count_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_block_count_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_block_ratio_metric), 0);
 
     kv_cache_manager::WriteLocation write_location;
     write_location.write_session_id = "tp2_failed_broadcast_write";
@@ -636,9 +693,9 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndFreezesSource
     EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_lease_count_metric), 1);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_count_metric), 1);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_lease_count_metric), 1);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_block_count_metric), 1);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_block_ratio_metric), 0.125);
     for (const auto& state : states) {
         const auto requests = snapshotRequests(state);
         ASSERT_EQ(requests.size(), 1u);
@@ -648,9 +705,9 @@ TEST(KVCMMockOnlyFullTest, TP2BroadcastFailureAbortsWriteSessionAndFreezesSource
     EXPECT_EQ(environment.device_pool->refCount(environment.block_id), source_ref_count + 1);
     EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
     EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_lease_count_metric), 0);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_count_metric), 0);
-    EXPECT_DOUBLE_EQ(quarantineGauge(quarantine_metrics->quarantined_block_ratio_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_lease_count_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_block_count_metric), 0);
+    EXPECT_DOUBLE_EQ(snapshotMetric(quarantine_metrics->quarantined_block_ratio_metric), 0);
 }
 
 TEST(KVCMMockOnlyFullTest, TP2ReadRpcFailureFreezesDestinationAndPreservesDeadline) {
