@@ -99,6 +99,9 @@ public:
         Completion(const Completion&) = delete;
         Completion& operator=(const Completion&) = delete;
         ~Completion() { if (admitted_ && !posted_.load()) pool_->abandonCompletion(*this); }
+        // The caller must also hold an independent pool/executor owner through
+        // post(). Production makeIoCompletion captures that executor strongly;
+        // otherwise dropping the last pool owner here could join this worker.
         bool post() noexcept {
             if (!admitted_) return false;
             auto pool = std::atomic_load(&pool_);

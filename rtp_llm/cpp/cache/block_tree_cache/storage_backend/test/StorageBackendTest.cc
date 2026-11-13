@@ -409,6 +409,20 @@ private:
     bool                    throw_on_submit_{false};
 };
 
+// The failure occurs at completion preparation, before any backend I/O entry.
+class FailingReservationExecutor: public HoldingExecutor {
+public:
+    bool fail_with_bad_alloc{true};
+    size_t reserve_calls{0};
+    bool hasCompletionReservations() const noexcept override { return true; }
+    std::shared_ptr<BlockTreeTaskPool::Completion> reserveCompletion(Task, BlockTreeTaskClass) override {
+        ++reserve_calls;
+        if (fail_with_bad_alloc) throw std::bad_alloc();
+        throw StorageOperationCompletionUnknown("reservation failed before I/O",
+                                                StorageQuarantineReason::INVALID_RESPONSE);
+    }
+};
+
 class TestBackend: public StorageBackend {
 public:
     explicit TestBackend(bool init_result = true, std::shared_ptr<StorageBackendExecutor> executor = nullptr):
@@ -1035,6 +1049,60 @@ TEST(StorageBackendTest, PeerProjectionRejectedForReadsAndOrdinaryWritesBeforePi
     EXPECT_EQ(pool->refCount(block), 1u);
     pool->decRef(block);
     backend.shutdown();
+}
+
+TEST(StorageBackendTest, CompletionPreparationFailureReleasesReadAndWriteWithoutUnknown) {
+    for (const bool read : {false, true}) {
+        for (const bool bad_alloc : {false, true}) {
+            auto pool = std::make_shared<TestBlockPool>();
+            const auto block = pool->malloc().value();
+            pool->incRef(block);
+            block_tree_cache_detail::ScopeRollback free_request_ref([&] { pool->decRef(block); });
+            auto executor = std::make_shared<FailingReservationExecutor>();
+            executor->fail_with_bad_alloc = bad_alloc;
+            size_t io_calls = 0, read_callbacks = 0;
+            ProtectedBackend backend(true, executor);
+            ASSERT_TRUE(initBackend(backend, pool));
+            // Let a regressed candidate drain safely AFTER observing quarantine;
+            // it must not make this negative proof hang in backend destruction.
+            block_tree_cache_detail::ScopeRollback cleanup([&] {
+                backend.proveQuiescence();
+                backend.shutdown();
+            });
+            backend.read_action = [&] { ++io_calls; };
+            backend.write_action = [&] { ++io_calls; };
+            auto budget = std::make_shared<kvcm::DecodePublicationAccounting>(16, 1);
+            auto request = makeRequest(block);
+            request.decode_completion = !read;
+            if (!read) {
+                request.completion_admission = budget->tryAcquire(16, std::nullopt);
+                ASSERT_TRUE(request.completion_admission);
+            }
+            std::weak_ptr<void> owner = backend.resources;
+            std::weak_ptr<const CacheKeysType> keys = request.keys;
+            if (read) {
+                backend.read(std::move(request), nullptr, [&](ErrorInfo error) {
+                    ++read_callbacks;
+                    EXPECT_FALSE(error.ok());
+                });
+            } else {
+                ASSERT_TRUE(backend.write(backend.prepareWrite(std::move(request))));
+            }
+            backend.resources.reset();
+            ASSERT_EQ(executor->runAll(), 1u);
+            EXPECT_EQ(executor->reserve_calls, 1u);
+            EXPECT_EQ(io_calls, 0u);
+            EXPECT_EQ(read_callbacks, read ? 1u : 0u);
+            EXPECT_EQ(backend.quarantine_events, 0u);
+            EXPECT_EQ(backend.quarantined_tasks, 0u);
+            EXPECT_FALSE(pool->isFrozen(block));
+            EXPECT_EQ(pool->refCount(block), 1u);
+            EXPECT_TRUE(owner.expired());
+            EXPECT_TRUE(keys.expired());
+            EXPECT_EQ(budget->snapshot().jobs, 0u);
+            EXPECT_EQ(executor->runAll(), 0u); // No second completion was queued.
+        }
+    }
 }
 
 TEST(StorageBackendTest, PostEntryAllocationFailureRetainsOwnersUntilExplicitQuiescence) {

@@ -637,7 +637,7 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
             auto io = error.ok() ? stageTimer("read_io", state->request, "read", state->trace_id, io_kind) :
                                    SharedTransferStageTimer{};
             auto settle_read = [this, state, error, done = std::move(done), total, io, io_kind,
-                                finished = std::move(finished)](Task result, bool) mutable {
+                                finished = std::move(finished)](Task result, bool, bool before_io = false) mutable {
                 block_tree_cache_detail::ScopeRollback retire(std::move(finished));
                 storage_backend_detail::invokeCallback(this, [&] {
                     std::optional<StorageQuarantineReason> quarantine_reason;
@@ -653,29 +653,29 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                                 error = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "storage read deadline exceeded");
                             }
                         } catch (const StorageOperationTimeout& exception) {
-                            if (state->completion_protected) {
+                            if (!before_io && state->completion_protected) {
                                 quarantineTask(state, /*is_write=*/false, exception.reason());
                             }
                             error             = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, exception.what());
-                            quarantine_reason = exception.reason();
+                            if (!before_io) quarantine_reason = exception.reason();
                         } catch (const StorageOperationCompletionUnknown& exception) {
-                            if (state->completion_protected) {
+                            if (!before_io && state->completion_protected) {
                                 quarantineTask(state, /*is_write=*/false, exception.reason());
                             }
                             error             = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
-                            quarantine_reason = exception.reason();
+                            if (!before_io) quarantine_reason = exception.reason();
                         } catch (const StorageOperationBufferSafeFailure& exception) {
                             error = ErrorInfo(state->request.transfer_task->expired() ? ErrorCode::DEADLINE_EXCEEDED :
                                                                                         ErrorCode::EXECUTION_EXCEPTION,
                                               exception.what());
                         } catch (const std::exception& exception) {
-                            if (state->completion_protected) {
+                            if (!before_io && state->completion_protected) {
                                 quarantineTask(state, /*is_write=*/false, StorageQuarantineReason::INVALID_RESPONSE);
                                 quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
                             }
                             error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
                         } catch (...) {
-                            if (state->completion_protected) {
+                            if (!before_io && state->completion_protected) {
                                 quarantineTask(state, /*is_write=*/false, StorageQuarantineReason::INVALID_RESPONSE);
                                 quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
                             }
@@ -704,7 +704,9 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                 complete_read = storage_backend_detail::makeIoCompletion<Task>(
                     executor_, state, settle_read, BlockTreeTaskClass::LOAD);
             } catch (...) {
-                settle_read([error = std::current_exception()] { std::rethrow_exception(error); }, false);
+                // Completion preparation failed before readAsyncImpl/readImpl.
+                // No external I/O can own the destination, even on bad_alloc.
+                settle_read([error = std::current_exception()] { std::rethrow_exception(error); }, false, true);
                 return;
             }
             if (!error.ok()) {
@@ -769,7 +771,7 @@ bool StorageBackend::write(StorageWriteTask task) {
         auto io = run ? stageTimer("write_io", state->request, "write", state->trace_id, io_kind) :
                         SharedTransferStageTimer{};
         auto settle_write = [this, state, total, io, io_kind, run, finished = std::move(finished)](
-                                WriteResult result, bool on_worker) mutable {
+                                WriteResult result, bool on_worker, bool before_io = false) mutable {
             block_tree_cache_detail::ScopeRollback retire(std::move(finished));
             storage_backend_detail::invokeCallback(this, [&] {
                 bool success = false;
@@ -785,28 +787,28 @@ bool StorageBackend::write(StorageWriteTask task) {
                             result(on_worker);
                         success = !state->request.transfer_task->expired();
                     } catch (const StorageOperationTimeout& error) {
-                        quarantine_reason = error.reason();
-                        if (state->completion_protected) {
+                        if (!before_io) quarantine_reason = error.reason();
+                        if (!before_io && state->completion_protected) {
                             quarantineTask(state, /*is_write=*/true, *quarantine_reason);
                         }
-                        RTP_LLM_LOG_WARNING("StorageBackend write timed out; quarantining request pins: %s", error.what());
+                        RTP_LLM_LOG_WARNING("StorageBackend write timed out: %s", error.what());
                     } catch (const StorageOperationCompletionUnknown& error) {
-                        quarantine_reason = error.reason();
-                        if (state->completion_protected) {
+                        if (!before_io) quarantine_reason = error.reason();
+                        if (!before_io && state->completion_protected) {
                             quarantineTask(state, /*is_write=*/true, *quarantine_reason);
                         }
-                        RTP_LLM_LOG_WARNING("StorageBackend write completion is unknown; quarantining request pins: %s",
+                        RTP_LLM_LOG_WARNING("StorageBackend write completion is unknown: %s",
                                             error.what());
                     } catch (const StorageOperationBufferSafeFailure& error) {
                         RTP_LLM_LOG_WARNING("StorageBackend payload-safe write failure: %s", error.what());
                     } catch (const std::exception& error) {
-                        if (state->completion_protected) {
+                        if (!before_io && state->completion_protected) {
                             quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
                             quarantineTask(state, /*is_write=*/true, *quarantine_reason);
                         }
                         RTP_LLM_LOG_ERROR("StorageBackend write failed: %s", error.what());
                     } catch (...) {
-                        if (state->completion_protected) {
+                        if (!before_io && state->completion_protected) {
                             quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
                             quarantineTask(state, /*is_write=*/true, *quarantine_reason);
                         }
@@ -833,7 +835,9 @@ bool StorageBackend::write(StorageWriteTask task) {
             complete = storage_backend_detail::makeIoCompletion<WriteResult>(
                 executor_, state, settle_write, BlockTreeTaskClass::BACKGROUND);
         } catch (...) {
-            settle_write([error = std::current_exception()](bool) { std::rethrow_exception(error); }, false);
+            // No startWriteImpl/writeImpl call has occurred. Preserve the
+            // original error without manufacturing an UNKNOWN buffer owner.
+            settle_write([error = std::current_exception()](bool) { std::rethrow_exception(error); }, false, true);
             return;
         }
         try {
