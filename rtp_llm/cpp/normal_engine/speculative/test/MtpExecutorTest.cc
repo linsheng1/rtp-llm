@@ -219,6 +219,13 @@ TEST(MtpExecutorPolicyTest, V41DecodeReservationKeepsGenericAndPrefillPolicies) 
     EXPECT_EQ(MtpExecutor::bookkeepingReadyEvent(false, transfer, commit), transfer);
     EXPECT_EQ(MtpExecutor::bookkeepingReadyEvent(false, transfer, nullptr), transfer);
     EXPECT_ANY_THROW(MtpExecutor::bookkeepingReadyEvent(true, transfer, nullptr));
+    // Publication also needs the final draft even with device reservation off.
+    EXPECT_EQ(MtpExecutor::bookkeepingReadyEvent(false, transfer, commit, true), commit);
+    EXPECT_EQ(MtpExecutor::bookkeepingReadyEvent(true, transfer, commit, true), commit);
+    EXPECT_ANY_THROW(MtpExecutor::bookkeepingReadyEvent(false, transfer, nullptr, true));
+    // Prefill/toggle-off keep the original selection, including a missing draft.
+    EXPECT_EQ(MtpExecutor::bookkeepingReadyEvent(false, transfer, commit, false), transfer);
+    EXPECT_EQ(MtpExecutor::bookkeepingReadyEvent(false, transfer, nullptr, false), transfer);
 }
 
 TEST(MtpExecutorPolicyTest, DSparkPositionStateAdvancesByAcceptedLength) {

@@ -2426,14 +2426,16 @@ bool MtpExecutor::v41AsyncCacheReservationAllowed(const std::string& model_type,
 
 std::shared_ptr<torch::Event> MtpExecutor::bookkeepingReadyEvent(bool v41_async_reservation,
                                                                  const std::shared_ptr<torch::Event>& transfer_event,
-                                                                 const std::shared_ptr<torch::Event>& draft_event) {
+                                                                 const std::shared_ptr<torch::Event>& draft_event,
+                                                                 bool decode_publication) {
     // The existing draft event is recorded on the same engine stream after
     // accept D2H and the last KV-consuming commit. Reuse that later fence for
     // the worker's existing single wait: publishing completion can then release
     // a finished/cancelled stream without racing its final draft KV accesses.
-    RTP_LLM_CHECK_WITH_INFO(!v41_async_reservation || draft_event != nullptr,
-                            "V4.1 async cache reservation requires the final draft KV-use event");
-    return v41_async_reservation ? draft_event : transfer_event;
+    const bool final_draft_required = v41_async_reservation || decode_publication;
+    RTP_LLM_CHECK_WITH_INFO(!final_draft_required || draft_event != nullptr,
+                            "V4.1 async cache reservation/publication requires the final draft KV-use event");
+    return final_draft_required ? draft_event : transfer_event;
 }
 
 bool MtpExecutor::mustWaitBeforeStreamPreparation(bool stream_async,
@@ -4043,8 +4045,10 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     // --- Launch async worker (unchanged) ---
     auto* processor                      = batch_stream_processor_.get();
     auto  spec_decode_copy               = spec_decode_output;
+    const bool protect_decode = remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE;
     spec_decode_copy.transfer_done_event = bookkeepingReadyEvent(
-        v41_async_cache_reservation_ && useDeviceInput(), spec_decode_output.transfer_done_event, draft_event);
+        v41_async_cache_reservation_ && useDeviceInput(), spec_decode_output.transfer_done_event, draft_event,
+        protect_decode);
     auto target_logprobs_copy = std::move(target_logprobs);
     auto draft_prefill_copy   = std::move(draft_prefill_output);
     auto stream_groups_copy   = stream_groups;
@@ -4056,7 +4060,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         std::optional<torch::Event> final_event;
         std::optional<torch::Stream> worker_stream;
         bool counted{false}, protect{false};
-        std::atomic<bool> entered{false}, writer_ready{false}, retired{false};
+        std::atomic<bool> entered{false}, writer_dependency_ready{false}, retired{false};
         ~BookkeepingHold() { finish(); }
         void finish() {
             if (!counted || retired.exchange(true)) return;
@@ -4065,7 +4069,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                 if (!entered.load()) {
                     if (initial) initial->synchronize(); else safe = false;
                 } else if (protect) {
-                    safe = writer_ready.load();
+                    safe = writer_dependency_ready.load();
                     if (safe) {
                         final_event->record(*worker_stream);
                         final_event->synchronize(); // Includes bookkeeping GPU copies, not just the model writer.
@@ -4081,7 +4085,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
     auto retirement = std::make_shared<BookkeepingHold>();
     retirement->streams = std::move(streams_for_inc);
     retirement->initial = draft_event;
-    retirement->protect = remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE;
+    retirement->protect = protect_decode;
     if (retirement->protect) {
         retirement->worker_stream = spec_bookkeeping_runner_.stream();
         retirement->final_event.emplace(cuda_graph::makeGraphEvent());
@@ -4105,7 +4109,14 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         }
         if (draft_event) {
             if (retirement->protect) {
-                try { draft_event->synchronize(); retirement->writer_ready.store(true); }
+                // The processor's existing host wait now uses this final draft
+                // event before any stream update/publication. Queue the original
+                // GPU dependency here; final_event still drains bookkeeping's
+                // last use, including errors before the processor's host wait.
+                try {
+                    draft_event->block(cuda_graph::graphGetCurrentStream());
+                    retirement->writer_dependency_ready.store(true); // Dependency queued, not host completion.
+                }
                 catch (...) {
                     for (const auto& stream : worker_streams) stream->retainUnknownDecodePublication(stream);
                     throw;
