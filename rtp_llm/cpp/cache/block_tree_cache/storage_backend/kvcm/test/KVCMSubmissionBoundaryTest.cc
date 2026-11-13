@@ -555,5 +555,75 @@ TEST_F(KVCMSubmissionBoundaryTest, LocalPeerUnknownRetainsOperationAndSourceWith
     });
 }
 
+TEST_F(KVCMSubmissionBoundaryTest, OrdinaryFullPrefixIntersectsGroupsAndEndpointCannotBackOff) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    test::withDecodePublicationStartup([&] {
+        // Reuse this target's actual backend-source seam. No copied planner or
+        // product hook; selection-only fixture, not a model/SDK transfer test.
+        BackendEnvironment env;
+        env.cache_config.dtype = DataType::TYPE_FP16;
+        env.cache_config.layer_num = 2;
+        env.cache_config.seq_size_per_block = 8;
+        auto policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        env.cache_config.fromGroupedSpecs(
+            {test::makeMhaSpec("full0", 8, DataType::TYPE_FP16, 1, 2),
+             test::makeMhaSpec("full1", 8, DataType::TYPE_FP16, 1, 2)},
+            {{0}, {1}}, {CacheGroupType::FULL, CacheGroupType::FULL}, {"full0", "full1"}, {policy, policy});
+        env.cache_config.finalizeBlockNums(8, RuntimeConfig{});
+        initializeEnvironmentPools(env, "full_prefix_intersection", 8);
+        auto client = std::make_shared<MockClientWrapper>();
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, _)).Times(0);
+        EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(0);
+        auto parallel = singleRankConfig();
+        parallel.role_type = RoleType::DECODE;
+        parallel.prefill_cp_config.prefill_cp_size = 1;
+        KVCacheConfig settings;
+        settings.kvcm_model_sdk_config = R"([{"type":"pace"}])";
+        auto backend = makeBackend(env, parallel, client, nullptr, nullptr, true, settings);
+        ASSERT_TRUE(initSingleRank(*backend.backend, env));
+        for (int variant = 0; variant < 5; ++variant) {
+            SCOPED_TRACE(variant);
+            BatchKVCacheResource resource;
+            resource.resetBatchSize(1);
+            resource.initGroups(env.cache_config.topologyPtr());
+            BlockIndicesType first(4, env.block_id), second(4, env.block_id);
+            size_t expected_end = 8;
+            if (variant == 0) { first[3] = NULL_BLOCK_IDX; second[1] = NULL_BLOCK_IDX; }
+            if (variant == 1) { first[1] = NULL_BLOCK_IDX; second[3] = NULL_BLOCK_IDX; }
+            if (variant == 2) { first.resize(2); second[3] = NULL_BLOCK_IDX; expected_end = 16; }
+            if (variant == 3) { second[0] = NULL_BLOCK_IDX; expected_end = 0; }
+            if (variant == 4) { first[1] = NULL_BLOCK_IDX; expected_end = 0; }
+            resource.setBatchBlocks(0, "full0", first);
+            resource.setBatchBlocks(0, "full1", second);
+            resource.setBatchCacheKeys(0, {101, 102, 103, 104});
+            if (variant == 4) {
+                // A malformed exact endpoint has a valid shorter FULL prefix,
+                // but must be rejected, never relabeled. No pin/content claim.
+                auto endpoint = std::make_shared<DecodeEndpoint>();
+                endpoint->end = 32;
+                endpoint->blocks = {{"full0", first}, {"full1", second}};
+                resource.decode_endpoint = std::move(endpoint);
+            }
+            {
+                auto request = backend.backend->impl_->planCompletedDecode(resource, 32);
+                if (expected_end) {
+                    ASSERT_FALSE(request.empty());
+                    EXPECT_EQ(request.published_tokens, expected_end);
+                    EXPECT_EQ(request.keys->size(), expected_end / 8);
+                    EXPECT_EQ(request.computed_tokens, 32u);
+                    for (const auto& handles : request.handles) EXPECT_EQ(handles.size(), 2u);
+                } else EXPECT_TRUE(request.empty());
+            } // Return any plan-only budget before the next case; no task is submitted.
+            const auto usage = backend.backend->impl_->completion_accounting_->snapshot();
+            EXPECT_EQ(usage.bytes, 0u);
+            EXPECT_EQ(usage.jobs, 0u);
+            for (const auto& [tag, pool] : env.pools_by_tag)
+                EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u) << tag;
+        }
+    });
+}
+
 } // namespace
 } // namespace rtp_llm

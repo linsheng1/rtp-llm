@@ -929,6 +929,7 @@ protected:
         std::unique_ptr<MockQuiescentKVCMBackend> backend;
         std::map<std::string, std::string>  specs;
         std::atomic<int>                    starts{0}, saves{0}, finishes{0}, aborts{0};
+        std::atomic<size_t>                 requested_keys{0};
         bool                                block_start = false, fail_save = false, lose_commit = false;
         std::promise<void>                  entered, released;
         std::shared_future<void>            release = released.get_future().share();
@@ -983,6 +984,7 @@ protected:
                 .WillRepeatedly(
                     Invoke([&](const auto&, const auto&, const auto& keys, const auto&, const auto&, auto, auto) {
                         ++starts;
+                        requested_keys = keys.size();
                         if (block_start) {
                             entered.set_value();
                             EXPECT_EQ(release.wait_for(std::chrono::seconds(5)), std::future_status::ready);
@@ -1233,6 +1235,53 @@ TEST_P(EosGpuCompletionTest, MissingStateBacksOffWithoutRelabeling) {
     ASSERT_TRUE(waitForBackendOperationsForTest(*s.backend));
     EXPECT_EQ(s.finishes, 1);
     EXPECT_EQ(s.aborts, 0);
+    });
+}
+TEST_P(EosGpuCompletionTest, FullPrefixHolesAndTruncationKeepLargestCompleteCheckpoint) {
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+    for (int variant = 0; variant < 8; ++variant) {
+        SCOPED_TRACE(variant);
+        Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
+        auto full = s.full;
+        size_t expected_keys = 0;
+        switch (variant) {
+        case 0: full[0] = NULL_BLOCK_IDX; break;
+        case 1: full[s.shards] = NULL_BLOCK_IDX; expected_keys = 1; break;
+        case 2: full[3 * s.shards - 1] = NULL_BLOCK_IDX; expected_keys = 2; break;
+        case 3: full.resize(2 * s.shards); expected_keys = 2; break;
+        case 4:
+            // An odd/native base column inside a CP canonical block, not a
+            // canonical boundary. CP1 is only the degenerate control.
+            full[s.shards > 1 ? s.shards + 1 : 1] = NULL_BLOCK_IDX;
+            expected_keys = 1;
+            break;
+        case 5: {
+            full[3 * s.shards - 1] = NULL_BLOCK_IDX; // FULL permits two canonical keys.
+            auto state = s.state;
+            state[1] = NULL_BLOCK_IDX; // The unchanged terminal check must back off to one.
+            s.resource.setBatchBlocks(0, "state", state);
+            expected_keys = 1;
+            break;
+        }
+        case 6: full[3 * s.shards] = NULL_BLOCK_IDX; expected_keys = 3; break; // Uncomputed tail ignored.
+        case 7: full.clear(); break;
+        }
+        s.resource.setBatchBlocks(0, "full", full);
+        ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end(), true));
+        ASSERT_TRUE(waitForBackendOperationsForTest(*s.backend));
+        EXPECT_EQ(s.requested_keys.load(), expected_keys);
+        EXPECT_EQ(s.starts.load(), expected_keys ? 1 : 0);
+        EXPECT_EQ(s.finishes.load(), expected_keys ? 1 : 0);
+        EXPECT_EQ(s.aborts.load(), 0);
+        EXPECT_EQ(s.resource.decodeCompletionSubmitted(), expected_keys != 0);
+        if (expected_keys) EXPECT_GT(s.saves.load(), 0);
+        else EXPECT_EQ(s.saves.load(), 0);
+        for (const auto& [tag, pool] : s.env.pools_by_tag) {
+            EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u) << tag;
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u) << tag;
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u) << tag;
+        }
+    }
     });
 }
 TEST_P(EosGpuCompletionTest, KnownPrefillBoundarySkipsCheckpointWithoutNewDecodeKv) {

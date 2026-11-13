@@ -223,13 +223,23 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
     }
     // State/SWA slots must denote the same token boundary as the P key.
     size_t unit = canonical_unit;
+    size_t full_prefix = completed_full;
     for (const auto& entry : group_policy_->groups()) {
         const auto& group = topology_->group(entry.second.tag);
         if (!entry.second.is_full)
             unit = std::lcm(unit, group.seqSizePerBlock());
+        else if (!endpoint) {
+            // Every lower ordinary candidate uses a subset of this FULL
+            // prefix. Check it once, not again after each STATE/SWA backoff.
+            const auto& blocks = source_blocks(entry.second.tag);
+            const size_t limit = std::min(full_prefix, blocks.size());
+            size_t prefix = 0;
+            while (prefix < limit && !isNullBlockIdx(blocks[prefix])) ++prefix;
+            full_prefix = prefix;
+        }
     }
     CPSlotMapper mapper(0, target_physical_shards_, static_cast<int>(base));
-    size_t       end = computed_end / unit * unit;
+    size_t       end = (endpoint ? computed_end : std::min(computed_end, full_prefix * base)) / unit * unit;
     if (endpoint && end != endpoint->end) return request;
     for (; end > 0; end -= unit) {
         const size_t count = end / canonical_unit;
@@ -239,6 +249,7 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
             const auto& group  = topology_->group(spec.tag);
             const auto& blocks = source_blocks(spec.tag);
             if (spec.is_full) {
+                if (!endpoint) continue; // Proved above for this and every smaller candidate.
                 for (size_t i = 0; i < end / base; ++i)
                     if (i >= blocks.size() || isNullBlockIdx(blocks[i])) {
                         ready = false;
