@@ -107,6 +107,34 @@ TEST(StorageBackendExecutorTest, ReservedCompletionSharesWorkerAndDrainsBeforeNo
     EXPECT_EQ(executor->queueSizes().completion, 0u);
 }
 
+TEST(StorageBackendExecutorTest, PostedRecordDoesNotOwnPoolAndShutdownWaitsForItsCallback) {
+    std::promise<void> entered;
+    auto entered_result = entered.get_future();
+    std::promise<void> unblock;
+    auto released = unblock.get_future().share();
+    auto pool = std::make_shared<BlockTreeTaskPool>(1, 0, "completion_owner", 1);
+    block_tree_cache_detail::ScopeRollback release([&] { unblock.set_value(); });
+    ASSERT_TRUE(pool->start());
+    auto record = pool->reserveCompletion([&] {
+        entered.set_value();
+        released.wait();
+    }, BlockTreeTaskClass::LOAD);
+    ASSERT_TRUE(record);
+    ASSERT_TRUE(record->post());
+    ASSERT_EQ(entered_result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    std::weak_ptr<BlockTreeTaskPool> lifetime = pool;
+    BoundedThread<void> stopped([owner = std::move(pool)]() mutable { owner.reset(); });
+    // Release before a possible ASSERT unwind joins the shutdown thread.
+    block_tree_cache_detail::ScopeRollback unblock_shutdown([&] { release.run(); });
+    EXPECT_EQ(stopped.waitFor(std::chrono::milliseconds(20)), std::future_status::timeout);
+    release.run();
+    ASSERT_EQ(stopped.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    stopped.get();
+    EXPECT_TRUE(lifetime.expired()); // Still retaining record must not retain a stopped pool.
+    EXPECT_FALSE(record->post());
+    record.reset();
+}
+
 TEST(StorageBackendExecutorTest, HonorsConfiguredWorkerAndQueueCapacity) {
     auto executor = makeStorageBackendExecutor(/*thread_count=*/2, /*queue_size=*/1);
     ASSERT_TRUE(executor->start());

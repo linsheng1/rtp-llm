@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <future>
 #include <new>
+#include <stdexcept>
 #include <vector>
 
 #ifdef NDEBUG
@@ -32,7 +33,7 @@ void operator delete[](void* value, std::size_t) noexcept { std::free(value); }
 namespace {
 // Test-only spelling for the original pool's completion reservation API.
 struct Lane: rtp_llm::BlockTreeTaskPool {
-    using Ticket = CompletionTicket;
+    using Ticket = Completion;
     Lane(size_t capacity, size_t workers): BlockTreeTaskPool(workers, 0, "completion_test", capacity) {}
     static std::shared_ptr<Lane> create(size_t capacity, size_t workers = 1) {
         if (!capacity || !workers) throw std::invalid_argument("invalid test completion configuration");
@@ -169,13 +170,16 @@ void concurrentNotificationClaimsExactlyOnce() {
 void allocationFailureCannotDebitAnExistingReservation() {
     auto lane = Lane::create(3); CHECK(lane->start());
     auto existing = lane->reserve([] {}, false);
-    for (const int fail : {0, 1, 2}) {
-        fail_after = fail; bool rejected = false;
-        try { (void)lane->reserve([] {}, true); } catch (const std::bad_alloc&) { rejected = true; }
-        fail_after = -1;
-        CHECK(rejected); CHECK(lane->snapshot().outstanding == 1);
-    }
-    existing.reset(); lane->waitForIdle(); lane->shutdown();
+    // The merged callback record has one allocation, instead of a node,
+    // ticket and ticket control block. Fail that allocation before admission.
+    fail_after = 0; bool rejected = false;
+    try { (void)lane->reserve([] {}, true); } catch (const std::bad_alloc&) { rejected = true; }
+    fail_after = -1;
+    CHECK(rejected); CHECK(lane->snapshot().outstanding == 1);
+    auto next = lane->reserve([] {}, true); CHECK(next);
+    CHECK(lane->snapshot().outstanding == 2);
+    next.reset(); CHECK(lane->snapshot().outstanding == 1);
+    existing.reset(); lane->waitForIdle(); CHECK(lane->snapshot().outstanding == 0); lane->shutdown();
 }
 
 void queuedBusinessMayReserveAfterNormalAdmissionStops() {

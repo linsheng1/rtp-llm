@@ -37,7 +37,7 @@ public:
     }
 
     bool hasCompletionReservations() const noexcept override { return has_completion_reservations_; }
-    std::shared_ptr<BlockTreeTaskPool::CompletionTicket>
+    std::shared_ptr<BlockTreeTaskPool::Completion>
     reserveCompletion(Task task, BlockTreeTaskClass task_class) override {
         return pool_->reserveCompletion(std::move(task), task_class);
     }

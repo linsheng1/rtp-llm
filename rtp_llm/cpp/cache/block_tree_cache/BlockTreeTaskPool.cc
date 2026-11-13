@@ -132,44 +132,39 @@ BlockTreeTaskPool::QueuedTask BlockTreeTaskPool::popNextNormalTaskLocked() {
     return task;
 }
 
-std::shared_ptr<BlockTreeTaskPool::CompletionTicket>
+std::shared_ptr<BlockTreeTaskPool::Completion>
 BlockTreeTaskPool::reserveCompletion(std::function<void()> task, BlockTreeTaskClass task_class) {
     if (!task) return {};
-    auto node = std::make_shared<CompletionNode>(std::move(task), task_class == BlockTreeTaskClass::LOAD);
-    auto ticket = std::shared_ptr<CompletionTicket>(new CompletionTicket(shared_from_this(), node));
+    // Allocate the callback record before charging; failed construction cannot
+    // debit an existing obligation or recursively return unacquired capacity.
+    auto node = std::make_shared<Completion>(shared_from_this(), std::move(task), task_class == BlockTreeTaskClass::LOAD);
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-    // Keep LOAD admission headroom as well as dispatch priority. For tiny
-    // pools retain at least one BACKGROUND slot; capacity one cannot be split.
-    const size_t limit = node->load ? completion_capacity_ :
+    const size_t limit = node->load_ ? completion_capacity_ :
         completion_capacity_ - std::min(kLoadReservedSlots, completion_capacity_ / 2);
     if (!started_ || shutdown_ || completion_admission_stopped_ || completion_outstanding_ >= limit) {
-        node->phase.store(CompletionPhase::ABANDONED); ++completion_rejected_; return {};
+        ++completion_rejected_;
+        return {};
     }
-    node->phase.store(CompletionPhase::RESERVED);
+    node->admitted_ = true;
     ++completion_outstanding_;
-    return ticket;
+    return node;
 }
-bool BlockTreeTaskPool::postCompletion(const std::shared_ptr<CompletionNode>& node) noexcept {
+bool BlockTreeTaskPool::postCompletion(const std::shared_ptr<Completion>& node) noexcept {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-    if (node->phase.load() != CompletionPhase::RESERVED) return false;
-    node->phase.store(CompletionPhase::QUEUED);
-    auto& head = node->load ? completed_load_ : completed_background_;
-    auto*& tail = node->load ? completed_load_tail_ : completed_background_tail_;
-    if (tail) tail->next = node; else head = node;
+    if (!node->admitted_ || node->posted_.exchange(true)) return false;
+    auto& head = node->load_ ? completed_load_ : completed_background_;
+    auto*& tail = node->load_ ? completed_load_tail_ : completed_background_tail_;
+    if (tail) tail->next_ = node; else head = node;
     tail = node.get();
-    ++(node->load ? completion_load_ : completion_background_);
+    ++(node->load_ ? completion_load_ : completion_background_);
     taskStarted(); queue_cv_.notify_one();
     return true;
 }
-void BlockTreeTaskPool::abandonCompletion(const std::shared_ptr<CompletionNode>& node) noexcept {
-    std::function<void()> retired;
-    {
-        std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-        if (node->phase.load() != CompletionPhase::RESERVED) return;
-        node->phase.store(CompletionPhase::ABANDONED);
-        retired.swap(node->task);
-    }
-    retired = {}; // Release owners outside the queue lock, before returning capacity.
+void BlockTreeTaskPool::abandonCompletion(Completion& node) noexcept {
+    // Only the last owner of an unposted record reaches here. Release its
+    // callback owners outside the queue lock before returning capacity.
+    auto retired = std::move(node.task_);
+    retired = {};
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
     --completion_outstanding_; completion_idle_.notify_all();
 }
@@ -188,7 +183,7 @@ BlockTreeTaskPool::CompletionSnapshot BlockTreeTaskPool::completionSnapshot() co
 void BlockTreeTaskPool::workerLoop() {
     for (;;) {
         std::function<void()> task;
-        std::shared_ptr<CompletionNode> reserved;
+        std::shared_ptr<Completion> reserved;
         {
             std::unique_lock<std::mutex> lock(lifecycle_mutex_);
             const auto can_reserve = [this] {
@@ -202,11 +197,11 @@ void BlockTreeTaskPool::workerLoop() {
                 const bool load = completed_load_ && (!completed_background_ || completion_burst_ < kMaxLoadBurst);
                 auto& head = load ? completed_load_ : completed_background_;
                 auto*& tail = load ? completed_load_tail_ : completed_background_tail_;
-                reserved = std::move(head); head = std::move(reserved->next); if (!head) tail = nullptr;
+                reserved = std::move(head); head = std::move(reserved->next_); if (!head) tail = nullptr;
                 --(load ? completion_load_ : completion_background_);
                 completion_burst_ = load ? std::min(completion_burst_ + 1, kMaxLoadBurst) : 0;
-                reserved->phase.store(CompletionPhase::RUNNING); ++completion_running_;
-                task.swap(reserved->task);
+                ++completion_running_;
+                task.swap(reserved->task_);
             } else if (!completion_queue_.empty()) {
                 task = std::move(completion_queue_.front()); completion_queue_.pop_front();
             } else if (normalQueueSizeLocked()) {
@@ -219,7 +214,6 @@ void BlockTreeTaskPool::workerLoop() {
         taskFinished();
         if (reserved) {
             std::lock_guard<std::mutex> lock(lifecycle_mutex_);
-            reserved->phase.store(CompletionPhase::DONE);
             --completion_running_; --completion_outstanding_; completion_idle_.notify_all();
         }
     }

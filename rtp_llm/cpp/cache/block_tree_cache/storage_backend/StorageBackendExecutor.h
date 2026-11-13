@@ -30,7 +30,7 @@ public:
     // Default KVCM executors reserve a bounded, allocation-free post before
     // external I/O. Custom legacy executors keep their existing contract.
     virtual bool hasCompletionReservations() const noexcept { return false; }
-    virtual std::shared_ptr<BlockTreeTaskPool::CompletionTicket>
+    virtual std::shared_ptr<BlockTreeTaskPool::Completion>
     reserveCompletion(Task, BlockTreeTaskClass) { return {}; }
     virtual BlockTreeQueueSizes queueSizes() const { return {}; }
     // Async executors leave the completion queue open while the backend drains
