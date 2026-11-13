@@ -12,12 +12,9 @@
 namespace rtp_llm {
 
 BlockTreeTaskPool::BlockTreeTaskPool(size_t thread_count, size_t queue_size, std::string thread_name,
-                                     size_t completion_threads, size_t completion_capacity):
-    thread_count_(thread_count), queue_size_(queue_size), completion_threads_(completion_threads),
-    completion_capacity_(completion_capacity), thread_name_(std::move(thread_name)) {
-    if (completion_threads > std::numeric_limits<size_t>::max() - thread_count
-        || (completion_threads && !completion_capacity)) throw std::invalid_argument("invalid completion pool configuration");
-}
+                                     size_t completion_capacity):
+    thread_count_(thread_count), queue_size_(queue_size),
+    completion_capacity_(completion_capacity), thread_name_(std::move(thread_name)) {}
 
 BlockTreeTaskPool::~BlockTreeTaskPool() {
     shutdown();
@@ -25,19 +22,19 @@ BlockTreeTaskPool::~BlockTreeTaskPool() {
 
 bool BlockTreeTaskPool::start() {
     std::unique_lock<std::mutex> lock(lifecycle_mutex_);
-    if (started_ || shutdown_ || thread_count_ + completion_threads_ == 0) {
+    if (started_ || shutdown_ || thread_count_ == 0) {
         return false;
     }
 
     auto thread_pool =
-        std::make_shared<autil::LockFreeThreadPool>(thread_count_ + completion_threads_, thread_count_ + completion_threads_, nullptr, thread_name_.c_str());
+        std::make_shared<autil::LockFreeThreadPool>(thread_count_, thread_count_, nullptr, thread_name_.c_str());
     if (!thread_pool->start()) {
         return false;
     }
     thread_pool_ = thread_pool;
     started_     = true;
-    for (size_t index = 0; index < thread_count_ + completion_threads_; ++index) {
-        auto*                               work_item = new autil::LambdaWorkItem([this, index] { workerLoop(index >= thread_count_); });
+    for (size_t index = 0; index < thread_count_; ++index) {
+        auto*                               work_item = new autil::LambdaWorkItem([this] { workerLoop(); });
         const autil::ThreadPool::ERROR_TYPE error     = thread_pool->pushWorkItem(work_item, false);
         if (error != autil::ThreadPool::ERROR_NONE) {
             work_item->destroy();
@@ -83,9 +80,7 @@ bool BlockTreeTaskPool::submit(BlockTreeTaskClass               task_class,
     auto& queue = task_class == BlockTreeTaskClass::LOAD ? load_queue_ : background_queue_;
     queue.push_back(QueuedTask{std::move(task), std::move(on_timeout), std::move(deadline)});
     taskStarted();
-    // A completion-only worker cannot consume normal work.
-    if (completion_threads_) queue_cv_.notify_all();
-    else queue_cv_.notify_one();
+    queue_cv_.notify_one();
     return true;
 }
 
@@ -163,7 +158,7 @@ bool BlockTreeTaskPool::postCompletion(const std::shared_ptr<CompletionNode>& no
     if (tail) tail->next = node; else head = node;
     tail = node.get();
     ++(node->load ? completion_load_ : completion_background_);
-    taskStarted(); queue_cv_.notify_all();
+    taskStarted(); queue_cv_.notify_one();
     return true;
 }
 void BlockTreeTaskPool::abandonCompletion(const std::shared_ptr<CompletionNode>& node) noexcept {
@@ -190,18 +185,18 @@ BlockTreeTaskPool::CompletionSnapshot BlockTreeTaskPool::completionSnapshot() co
     return {completion_capacity_, completion_outstanding_, completion_load_, completion_background_, completion_running_,
             completion_rejected_, started_ && !shutdown_ && !completion_admission_stopped_};
 }
-void BlockTreeTaskPool::workerLoop(bool completion_only) {
+void BlockTreeTaskPool::workerLoop() {
     for (;;) {
         std::function<void()> task;
         std::shared_ptr<CompletionNode> reserved;
         {
             std::unique_lock<std::mutex> lock(lifecycle_mutex_);
-            const auto can_reserve = [this, completion_only] {
-                return (completion_only || !completion_threads_) && (completed_load_ || completed_background_);
+            const auto can_reserve = [this] {
+                return completed_load_ || completed_background_;
             };
             queue_cv_.wait(lock, [&] {
                 return shutdown_ || can_reserve() || !completion_queue_.empty()
-                    || (!completion_only && normalQueueSizeLocked());
+                    || normalQueueSizeLocked();
             });
             if (can_reserve()) {
                 const bool load = completed_load_ && (!completed_background_ || completion_burst_ < kMaxLoadBurst);
@@ -214,7 +209,7 @@ void BlockTreeTaskPool::workerLoop(bool completion_only) {
                 task.swap(reserved->task);
             } else if (!completion_queue_.empty()) {
                 task = std::move(completion_queue_.front()); completion_queue_.pop_front();
-            } else if (!completion_only && normalQueueSizeLocked()) {
+            } else if (normalQueueSizeLocked()) {
                 auto queued = popNextNormalTaskLocked();
                 task = queued.deadline && Clock::now() >= *queued.deadline ? std::move(queued.on_timeout) : std::move(queued.run);
             } else if (shutdown_) return;

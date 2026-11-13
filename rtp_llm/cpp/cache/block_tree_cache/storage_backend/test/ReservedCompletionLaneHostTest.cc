@@ -33,7 +33,7 @@ namespace {
 // Test-only spelling for the original pool's completion reservation API.
 struct Lane: rtp_llm::BlockTreeTaskPool {
     using Ticket = CompletionTicket;
-    Lane(size_t capacity, size_t workers): BlockTreeTaskPool(0, 0, "completion_test", workers, capacity) {}
+    Lane(size_t capacity, size_t workers): BlockTreeTaskPool(workers, 0, "completion_test", capacity) {}
     static std::shared_ptr<Lane> create(size_t capacity, size_t workers = 1) {
         if (!capacity || !workers) throw std::invalid_argument("invalid test completion configuration");
         return std::make_shared<Lane>(capacity, workers);
@@ -179,7 +179,7 @@ void allocationFailureCannotDebitAnExistingReservation() {
 }
 
 void queuedBusinessMayReserveAfterNormalAdmissionStops() {
-    auto pool = std::make_shared<rtp_llm::BlockTreeTaskPool>(1, 4, "queued_reserve", 1, 2);
+    auto pool = std::make_shared<rtp_llm::BlockTreeTaskPool>(1, 4, "queued_reserve", 2);
     CHECK(pool->start()); Gate gate;
     CHECK(pool->submit(rtp_llm::BlockTreeTaskClass::BACKGROUND, [&] { gate.run(); }));
     gate.wait();

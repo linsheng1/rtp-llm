@@ -42,7 +42,7 @@ public:
     static constexpr size_t kLoadReservedSlots = 64;
 
     BlockTreeTaskPool(size_t thread_count, size_t queue_size, std::string thread_name,
-                      size_t completion_threads = 0, size_t completion_capacity = 0);
+                      size_t completion_capacity = 0);
     class CompletionTicket;
     struct CompletionSnapshot {
         size_t capacity, outstanding, queued_load, queued_background, running, rejected;
@@ -103,7 +103,7 @@ public:
 private:
     bool postCompletion(const std::shared_ptr<CompletionNode>& node) noexcept;
     void abandonCompletion(const std::shared_ptr<CompletionNode>& node) noexcept;
-    void       workerLoop(bool completion_only);
+    void       workerLoop();
     size_t     backgroundLimit() const;
     size_t     normalQueueSizeLocked() const;
     QueuedTask popNextNormalTaskLocked();
@@ -112,7 +112,7 @@ private:
 
     const size_t      thread_count_;
     const size_t      queue_size_;
-    const size_t      completion_threads_, completion_capacity_;
+    const size_t      completion_capacity_;
     const std::string thread_name_;
 
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;

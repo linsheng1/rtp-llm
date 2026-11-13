@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <thread>
 #include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 
@@ -54,6 +55,56 @@ TEST(StorageBackendExecutorTest, CompletionCapabilityDoesNotBypassReservationAdm
     EXPECT_EQ(calls.load(), 1);
     EXPECT_TRUE(bounded->hasCompletionReservations());
     EXPECT_FALSE(bounded->reserveCompletion([] {}, BlockTreeTaskClass::LOAD));
+}
+
+TEST(StorageBackendExecutorTest, ReservedCompletionSharesWorkerAndDrainsBeforeNormalWork) {
+    // Captured state outlives executor shutdown even after an ASSERT return.
+    std::mutex mutex;
+    std::vector<int> order;
+    const auto record = [&](int value) { std::lock_guard<std::mutex> lock(mutex); order.push_back(value); };
+    std::promise<std::thread::id> entered;
+    auto entered_result = entered.get_future();
+    std::promise<void> unblock;
+    auto released = unblock.get_future().share();
+    std::promise<void> settled;
+    auto settled_result = settled.get_future();
+    std::thread::id completion_worker;
+    auto owner = std::make_shared<int>(7);
+    std::weak_ptr<int> lifetime = owner;
+    auto executor = makeStorageBackendExecutor(1, 2);
+    block_tree_cache_detail::ScopeRollback release([&] { unblock.set_value(); });
+    ASSERT_TRUE(executor->start());
+    ASSERT_TRUE(executor->submit([&] {
+        entered.set_value(std::this_thread::get_id());
+        released.wait();
+    }));
+    ASSERT_EQ(entered_result.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+    const auto worker = entered_result.get();
+    ASSERT_TRUE(executor->submit([&] { record(1); }, BlockTreeTaskClass::LOAD));
+    ASSERT_TRUE(executor->submit([&] { record(2); }, BlockTreeTaskClass::BACKGROUND));
+    auto completion = executor->reserveCompletion([&, retained = owner] {
+        EXPECT_EQ(*retained, 7);
+        completion_worker = std::this_thread::get_id();
+        record(0);
+        settled.set_value();
+    }, BlockTreeTaskClass::LOAD);
+    ASSERT_TRUE(completion);
+    ASSERT_TRUE(completion->post());
+    EXPECT_FALSE(completion->post());
+    completion.reset();
+    owner.reset();
+    EXPECT_FALSE(lifetime.expired());
+    EXPECT_EQ(settled_result.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    EXPECT_EQ(executor->queueSizes().completion, 1u);
+    executor->stopAdmission();
+    EXPECT_FALSE(executor->submit([] {}));
+    release.run();
+    executor->shutdown();
+    EXPECT_EQ(settled_result.wait_for(std::chrono::milliseconds(0)), std::future_status::ready);
+    EXPECT_EQ(completion_worker, worker);
+    EXPECT_EQ(order, (std::vector<int>{0, 1, 2}));
+    EXPECT_TRUE(lifetime.expired());
+    EXPECT_EQ(executor->queueSizes().completion, 0u);
 }
 
 TEST(StorageBackendExecutorTest, HonorsConfiguredWorkerAndQueueCapacity) {

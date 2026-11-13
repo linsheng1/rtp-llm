@@ -11,7 +11,7 @@ namespace {
 class DefaultStorageBackendExecutor final: public StorageBackendExecutor {
 public:
     DefaultStorageBackendExecutor(size_t thread_count, size_t queue_size):
-        pool_(std::make_shared<BlockTreeTaskPool>(thread_count, queue_size, "remote_cache", queue_size ? thread_count : 0, queue_size)),
+        pool_(std::make_shared<BlockTreeTaskPool>(thread_count, queue_size, "remote_cache", queue_size)),
         has_completion_reservations_(queue_size != 0) {}
 
     ~DefaultStorageBackendExecutor() override {
