@@ -11,12 +11,14 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/test/mock/MockCoordinatorCacheManager.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
@@ -39,6 +41,7 @@
 #include <functional>
 #include <memory>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <thread>
 
@@ -124,6 +127,14 @@ public:
 
     ~StreamReadStorageBackend() override {
         shutdown();
+    }
+
+    // Observe the existing call points without admitting a real publication.
+    // Keeping admission untouched lets the same request reach both points.
+    std::function<void(const BatchKVCacheResource&, size_t, bool)> observe_completed_decode;
+    bool captureCompletedDecode(const BatchKVCacheResource& resource, size_t end, bool finished) override {
+        if (observe_completed_decode) observe_completed_decode(resource, end, finished);
+        return false;
     }
 
     void blockMatches() {
@@ -416,6 +427,334 @@ protected:
     GenerateStreamPtr               stream_;
     std::shared_ptr<KVCacheManager> cache_manager_;
 };
+
+namespace {
+// Call-point/owner coverage only. No model writer, executor event, SDK I/O or
+// STATE/SWA byte proof. Weak observers must not extend the source lifetime.
+struct PublicationGroupSnapshot {
+    BlockIndicesType physical, kernel, endpoint_blocks, pinned;
+    std::weak_ptr<BlockIds> owner;
+    std::vector<std::weak_ptr<const DecodeEndpoint::PageHold>> holds;
+    std::vector<uint64_t> incarnations, pin_incarnations;
+    std::vector<uint32_t> refs;
+};
+struct PublicationCallSnapshot {
+    std::string phase;
+    size_t end{0};
+    size_t endpoint_end{0};
+    bool aligned{false};
+    CacheKeysType keys;
+    std::weak_ptr<const DecodeEndpoint> endpoint;
+    std::map<std::string, PublicationGroupSnapshot> groups;
+};
+struct PublicationObservations {
+    std::string phase;
+    std::vector<PublicationCallSnapshot> calls;
+};
+} // namespace
+
+class PublicationCallPointTest: public StreamCacheResourceTest {
+protected:
+    void prepare(bool dspark, RoleType role = RoleType::DECODE, bool retained = false) {
+        ModelConfig model;
+        model.model_type = "deepseek_v41";
+        model.num_layers = 1;
+        model.max_seq_len = 2048;
+        model.vocab_size = 1000;
+        model.special_tokens.eos_token_id = 999;
+        model.data_type = DataType::TYPE_BF16;
+        model.attn_config.head_num = model.attn_config.kv_head_num = 1;
+        model.attn_config.size_per_head = 512;
+        model.attn_config.use_mla = true;
+        model.attn_config.tokens_per_block = 256;
+        model.attn_config.kernel_tokens_per_block = 128;
+        model.attn_config.sliding_window = 128;
+        model.hybrid_attention_config.hybrid_attention_types.assign(1, HybridAttentionType::NONE);
+        model.cache_min_replay_tokens = 1;
+        model.cache_key_hash_seed = 0x4453563431494631LL;
+        auto full = test::makeDsv4Desc("csa_kv", "compressed_kv", 288, DataType::TYPE_UINT8, 2);
+        full.block_stride_bytes_alignment = 4608;
+        auto state = test::makeDsv4Desc("csa_state", "fixed_state", 1024, DataType::TYPE_FP32);
+        state.compression_ratio = 2;
+        state.state_ring_overlap = 0;
+        auto swa = test::makeDsv4Desc("swa_kv", "sliding_window_kv", 528, DataType::TYPE_UINT8);
+        swa.block_stride_bytes_alignment = 16896;
+        model.kv_cache_spec_descs = {{full, state, swa}};
+        auto draft = model;
+        draft.num_layers = 3;
+        draft.is_mtp = true;
+        draft.hybrid_attention_config.hybrid_attention_types.assign(3, HybridAttentionType::NONE);
+        draft.kv_cache_spec_descs.assign(3, {swa});
+        SpeculativeExecutionConfig speculation;
+        speculation.type = dspark ? SP_TYPE_DSPARK : SP_TYPE_NONE;
+        speculation.gen_num_per_cycle = dspark ? 5 : 0;
+        ParallelismConfig parallel;
+        parallel.role_type = role;
+        parallel.prefill_cp_config.prefill_cp_size = 1;
+        PDSepConfig pd;
+        pd.role_type = role;
+        KVCacheConfig settings; // No real SDK or local cache insertion in this unit test.
+        auto config = CacheConfigCreator::createConfig(model, parallel, settings, speculation,
+                                                       dspark ? &draft : nullptr);
+        config.finalizeBlockNums(8, RuntimeConfig{});
+        cache_manager_ = std::make_shared<KVCacheManager>(config, false, nullptr, settings, parallel,
+                                                         RuntimeConfig{}, speculation, pd);
+        ASSERT_TRUE(cache_manager_->init());
+        for (const auto& pool : cache_manager_->coordinator_manager_->groupBlockPools())
+            ASSERT_TRUE(pool->enableDecodeOriginTracking());
+        backend_ = std::make_shared<StreamReadStorageBackend>();
+        cache_manager_->coordinator_manager_->block_tree_cache_.reset();
+        cache_manager_->block_tree_cache_.reset();
+        settings.enable_remote_cache = true;
+        auto cache = createBlockTreeCache(config, settings, cache_manager_->coordinator_manager_, parallel, backend_);
+        ASSERT_NE(cache, nullptr);
+        cache_manager_->block_tree_cache_ = cache;
+        cache_manager_->coordinator_manager_->attachBlockTreeCache(cache);
+
+        ResourceContext context;
+        context.cache_manager = cache_manager_;
+        context.role_type = role;
+        context.reuse_cache = true;
+        context.enable_device_cache = false; // Release frees pages instead of inserting local cache entries.
+        auto input = std::make_shared<GenerateInput>();
+        input->input_ids = torch::ones({255}, torch::kInt32);
+        input->generate_config = std::make_shared<GenerateConfig>();
+        input->generate_config->num_return_sequences = 1;
+        input->generate_config->max_new_tokens = 3;
+        input->need_release_resource = !retained;
+        stream_ = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, context, nullptr);
+        stream_->generate_status_->status = StreamState::RUNNING;
+        auto& resource = stream_->streamCacheResource();
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
+        observations_ = std::make_shared<PublicationObservations>();
+        std::weak_ptr<KVCacheManager> manager = cache_manager_;
+        backend_->observe_completed_decode = [manager, observations = observations_](const auto& value, size_t end, bool done) {
+            ASSERT_TRUE(done);
+            ASSERT_EQ(value.batchSize(), 1);
+            const auto live_manager = manager.lock();
+            ASSERT_TRUE(live_manager);
+            PublicationCallSnapshot snapshot;
+            snapshot.phase = observations->phase;
+            snapshot.end = end;
+            snapshot.aligned = value.lastBlockAligned();
+            snapshot.keys = value.cacheKeys(0);
+            snapshot.endpoint = value.decode_endpoint;
+            if (value.decode_endpoint) snapshot.endpoint_end = value.decode_endpoint->end;
+            const auto& tags = live_manager->cacheConfig().groupTags();
+            const auto& pools = live_manager->coordinator_manager_->groupBlockPools();
+            for (size_t i = 0; i < tags.size(); ++i) {
+                auto& group = snapshot.groups[tags[i]];
+                group.physical = value.blocks(0, tags[i]);
+                group.kernel = value.kernelBlocks(0, tags[i]);
+                group.owner = value.groupBlockIds(0, tags[i]);
+                ASSERT_FALSE(group.owner.expired());
+                ASSERT_FALSE(group.physical.empty());
+                for (auto block : group.physical) {
+                    if (isNullBlockIdx(block)) continue;
+                    ASSERT_TRUE(pools[i]->isAllocated(block));
+                    group.refs.push_back(pools[i]->refCount(block));
+                    group.incarnations.push_back(pools[i]->decodeOriginIncarnation(block));
+                    EXPECT_GT(group.refs.back(), 0u);
+                    EXPECT_GT(group.incarnations.back(), 0u);
+                }
+                if (value.decode_endpoint) {
+                    const auto blocks = value.decode_endpoint->blocks.find(tags[i]);
+                    if (blocks != value.decode_endpoint->blocks.end()) group.endpoint_blocks = blocks->second;
+                    const auto found = value.decode_endpoint->pages.find(tags[i]);
+                    if (found != value.decode_endpoint->pages.end()) {
+                        for (const auto& hold : found->second) {
+                            ASSERT_TRUE(hold);
+                            ASSERT_TRUE(hold->pool->isAllocated(hold->block));
+                            EXPECT_GT(hold->pool->refCount(hold->block), 0u);
+                            group.pinned.push_back(hold->block);
+                            group.holds.push_back(hold);
+                            group.pin_incarnations.push_back(hold->pool->decodeOriginIncarnation(hold->block));
+                            EXPECT_GT(group.pin_incarnations.back(), 0u);
+                        }
+                    }
+                }
+            }
+            observations->calls.push_back(std::move(snapshot));
+        };
+    }
+
+    void finish(bool dspark) {
+        auto token = torch::ones({1, 1}, torch::kInt32);
+        stream_->update({token, 1}); // Context result; no complete D endpoint yet.
+        ASSERT_FALSE(stream_->hasError());
+        ASSERT_EQ(stream_->seqLength(), 256);
+        auto& resource = stream_->streamCacheResource();
+        if (dspark) stream_->setReserveStep(2); // Two accepted tokens below; no real proposer is run.
+        ASSERT_TRUE(resource.incrKVBlock().ok());
+        if (dspark) {
+            const auto& value = resource.kvCache();
+            const auto& tags = cache_manager_->cacheConfig().groupTags();
+            auto ids = torch::full({static_cast<int64_t>(tags.size()), 1, value.curBlocksNum()},
+                                   NULL_BLOCK_IDX, torch::kInt32);
+            for (size_t i = 0; i < tags.size(); ++i) {
+                const auto& blocks = value.blocks(0, tags[i]);
+                std::copy(blocks.begin(), blocks.end(), ids.data_ptr<int32_t>() + i * ids.size(2));
+            }
+            auto endpoint = cache_manager_->retainDecodeEndpoint(ids, tags, 0, 256);
+            ASSERT_TRUE(endpoint);
+            ASSERT_FALSE(endpoint->pages.empty());
+            resource.kvCacheMutable().decode_round_endpoints.push_back(endpoint);
+            endpoint.reset(); // Only the real request resource owns it from here.
+            auto buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
+            buffer->tokens = torch::zeros({1, 6}, torch::kInt32);
+            stream_->setSPOutputBuffer(buffer);
+            observations_->phase = "generate_done";
+            StreamSpecUpdateInfo update{torch::ones({1, 2}, torch::kInt32), 2, -1, {}, {}};
+            update.speculative_propose_step = 5;
+            update.accepted_draft_tokens = update.verified_draft_tokens = 1;
+            stream_->specUpdate(update);
+        } else {
+            stream_->update({token, 1});
+            ASSERT_FALSE(stream_->hasError());
+            ASSERT_TRUE(resource.incrKVBlock().ok());
+            observations_->phase = "generate_done_before_remap";
+            StreamUpdateInfo update{.new_tokens = token, .num_new_tokens = 1,
+                                    .src_batch_indices = torch::zeros({1}, torch::kInt32)};
+            stream_->update(update); // The real batch-one src[0] remapping path.
+        }
+        ASSERT_FALSE(stream_->hasError());
+        ASSERT_EQ(stream_->seqLength(), 258);
+        ASSERT_TRUE(stream_->hasEvent(StreamEvents::GenerateDone));
+        ASSERT_EQ(observations_->calls.size(), 1u);
+        EXPECT_EQ(observations_->calls[0].end, 257u);
+        EXPECT_FALSE(resource.isResourceReleased());
+    }
+
+    void compareCalls(bool dspark) {
+        ASSERT_EQ(observations_->calls.size(), 2u);
+        const auto& before = observations_->calls[0];
+        const auto& after = observations_->calls[1];
+        EXPECT_EQ(after.phase, "release");
+        EXPECT_EQ(before.end, after.end);
+        EXPECT_EQ(before.endpoint_end, after.endpoint_end);
+        EXPECT_EQ(before.keys, after.keys);
+        EXPECT_FALSE(before.keys.empty());
+        EXPECT_EQ(before.aligned, after.aligned);
+        ASSERT_EQ(before.groups.size(), after.groups.size());
+        for (const auto& [tag, group] : before.groups) {
+            SCOPED_TRACE(tag);
+            const auto& released = after.groups.at(tag);
+            EXPECT_EQ(group.physical, released.physical);
+            EXPECT_EQ(group.kernel, released.kernel);
+            EXPECT_EQ(group.endpoint_blocks, released.endpoint_blocks);
+            EXPECT_EQ(group.incarnations, released.incarnations);
+            EXPECT_EQ(group.refs, released.refs);
+            EXPECT_FALSE(group.owner.owner_before(released.owner));
+            EXPECT_FALSE(released.owner.owner_before(group.owner));
+            EXPECT_EQ(group.pinned, released.pinned);
+            EXPECT_EQ(group.pin_incarnations, released.pin_incarnations);
+            ASSERT_EQ(group.holds.size(), released.holds.size());
+            for (size_t i = 0; i < group.holds.size(); ++i) {
+                EXPECT_FALSE(group.holds[i].owner_before(released.holds[i]));
+                EXPECT_FALSE(released.holds[i].owner_before(group.holds[i]));
+                EXPECT_TRUE(released.holds[i].expired());
+            }
+        }
+        EXPECT_FALSE(before.endpoint.owner_before(after.endpoint));
+        EXPECT_FALSE(after.endpoint.owner_before(before.endpoint));
+        EXPECT_TRUE(after.endpoint.expired());
+        if (dspark) {
+            EXPECT_EQ(before.endpoint_end, 256u);
+            EXPECT_FALSE(before.groups.at("csa_state").pinned.empty());
+            EXPECT_FALSE(before.groups.at("swa_kv").pinned.empty());
+            EXPECT_FALSE(before.groups.at("csa_kv").pinned.empty());
+            EXPECT_EQ(cache_manager_->cacheConfig().mtp_sub_configs.size(), 1u);
+            EXPECT_EQ(cache_manager_->cacheConfig().layerIdsForGroup("swa_kv").size(), 4u);
+        }
+        for (const auto& pool : cache_manager_->coordinator_manager_->groupBlockPools())
+            EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+    }
+
+    void cleanup() {
+        if (backend_) backend_->observe_completed_decode = {};
+        if (stream_) {
+            stream_->streamCacheResource().setNeedReleaseResource(true);
+            stream_->releaseResource();
+        }
+        if (backend_) backend_->shutdown();
+        stream_.reset();
+        cache_manager_.reset();
+        backend_.reset();
+        observations_.reset();
+    }
+    std::shared_ptr<StreamReadStorageBackend> backend_;
+    std::shared_ptr<PublicationObservations> observations_;
+};
+
+TEST_F(PublicationCallPointTest, GenerateDoneAndReleaseKeepNativeMapsAndWeakOwners) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    test::withDecodePublicationStartup([&] {
+        for (bool dspark : {false, true}) for (bool deferred : {false, true}) {
+            SCOPED_TRACE(dspark); SCOPED_TRACE(deferred);
+            prepare(dspark);
+            ASSERT_FALSE(HasFatalFailure());
+            finish(dspark);
+            ASSERT_FALSE(HasFatalFailure());
+            observations_->phase = "release";
+            if (deferred) {
+                stream_->incPendingAsyncBookkeeping();
+                auto worker = std::shared_ptr<void>(nullptr, [stream = stream_](void*) {
+                    stream->decPendingAsyncBookkeepingAndMaybeRelease();
+                });
+                EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+                EXPECT_TRUE(stream_->isDeferredReleasePending());
+                EXPECT_EQ(observations_->calls.size(), 1u);
+                EXPECT_FALSE(stream_->streamCacheResource().isResourceReleased());
+                worker.reset();
+            } else stream_->releaseResource();
+            EXPECT_TRUE(stream_->streamCacheResource().isResourceReleased());
+            compareCalls(dspark);
+            stream_->releaseResource(); // Idempotent public release, not the aborting raw double-release API.
+            EXPECT_EQ(observations_->calls.size(), 2u);
+            cleanup();
+        }
+    }, [&] { cleanup(); });
+}
+
+TEST_F(PublicationCallPointTest, CancellationAfterGenerateDoneSkipsReleasePublication) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    test::withDecodePublicationStartup([&] {
+        for (bool dspark : {false, true}) {
+            prepare(dspark);
+            ASSERT_FALSE(HasFatalFailure());
+            finish(dspark);
+            ASSERT_FALSE(HasFatalFailure());
+            stream_->reportError(ErrorCode::CANCELLED, "cancel after GenerateDone");
+            observations_->phase = "release";
+            stream_->releaseResource();
+            EXPECT_EQ(observations_->calls.size(), 1u); // Real difference if the old point is removed.
+            EXPECT_TRUE(stream_->streamCacheResource().isResourceReleased());
+            cleanup();
+        }
+    }, [&] { cleanup(); });
+}
+
+TEST_F(PublicationCallPointTest, PrefillRetainedPrefillAndToggleOffNeverCapture) {
+    for (const char* enabled : {"0", "1"}) {
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled);
+        test::withDecodePublicationStartup([&] {
+            for (auto role : {RoleType::PREFILL, RoleType::DECODE}) for (bool retained : {false, true}) {
+                if (role == RoleType::DECODE && (retained || enabled[0] == '1')) continue;
+                prepare(false, role, retained);
+                ASSERT_FALSE(HasFatalFailure());
+                stream_->reportEvent(StreamEvents::GenerateDone);
+                stream_->fillSubGenerateStatus(StreamState::FINISHED);
+                stream_->generate_status_->status = StreamState::FINISHED;
+                stream_->streamCacheResource().publishCompletedDecode(254);
+                stream_->releaseResource();
+                EXPECT_TRUE(observations_->calls.empty());
+                EXPECT_EQ(stream_->streamCacheResource().isResourceReleased(), !retained);
+                cleanup();
+            }
+        }, [&] { cleanup(); });
+    }
+}
 
 TEST_F(StreamCacheResourceTest, testResourceContextReadsIgnoreRequestCacheSwitchesEnv) {
     {

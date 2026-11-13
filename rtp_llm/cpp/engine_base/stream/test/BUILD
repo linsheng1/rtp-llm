@@ -59,6 +59,8 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + test_deps + [
+        "//rtp_llm/cpp/cache:cache_core",
+        "//rtp_llm/cpp/cache/block_tree_cache:device_block_pool",
         "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
         "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
     ],
