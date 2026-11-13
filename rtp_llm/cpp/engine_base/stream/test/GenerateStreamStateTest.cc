@@ -137,7 +137,7 @@ TEST_F(GenerateStreamStateTest, DecodePublicationClockComesFromFirstGenerateDone
     EXPECT_LE(*eos, after);
     stream->reportEvent(StreamEvents::GenerateDone);
     EXPECT_EQ(stream->kvCache().decodeCompletionLifecycle().eosAt(), eos);
-    });
+    }, [&] { TearDown(); cache_manager_.reset(); });
 }
 
 TEST_F(GenerateStreamStateTest, DisabledPublicationDoesNotRecordDecodeEosClock) {
@@ -146,7 +146,7 @@ TEST_F(GenerateStreamStateTest, DisabledPublicationDoesNotRecordDecodeEosClock) 
     auto            stream = createStream({1, 2, 3, 4}, true, RoleType::DECODE);
     stream->reportEvent(StreamEvents::GenerateDone);
     EXPECT_FALSE(stream->kvCache().decodeCompletionLifecycle().eosAt());
-    });
+    }, [&] { TearDown(); cache_manager_.reset(); });
 }
 
 TEST_F(GenerateStreamStateTest, testInitialStateIsWaiting) {

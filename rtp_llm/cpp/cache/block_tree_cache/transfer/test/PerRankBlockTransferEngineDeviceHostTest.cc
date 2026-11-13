@@ -761,7 +761,7 @@ TEST_F(PerRankBlockTransferEngineTest, PhysicalOriginsFollowSuccessfulDeviceHost
             EXPECT_FALSE(device_pool_->decodeOrigin(device_block_, tag));
         }
         releasePoolBlock(*host_pool_, host_block);
-        });
+        }, [&] { TearDown(); per_rank_transfer_engine_.reset(); group_set_.reset(); host_pool_.reset(); device_pool_.reset(); });
     }
 }
 
@@ -789,7 +789,7 @@ TEST_F(LegacyPerRankBlockTransferEngineTest, FailedTransferCannotRebindAValidate
     EXPECT_FALSE(context->success());
     EXPECT_FALSE(device_pool_->decodeOrigin(device_block_, tag));
     releasePoolBlock(*host_pool_, host_block);
-    });
+    }, [&] { TearDown(); per_rank_transfer_engine_.reset(); group_set_.reset(); host_pool_.reset(); device_pool_.reset(); });
 }
 
 TEST_F(LegacyPerRankBlockTransferEngineTest, ExecutorDerivesDirectionFromDescriptorTargetTier) {

@@ -66,7 +66,7 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, RecomputeInvalidatesOnlyItsWrita
         for (size_t i = 0; i < blocks.size(); ++i)
             EXPECT_EQ(static_cast<bool>(pool->decodeOrigin(blocks[i], "default")), !enabled || i == 0);
         allocator_->free({resource, nullptr});
-        });
+        }, [&] { TearDown(); allocator_.reset(); });
     }
 }
 
@@ -90,7 +90,7 @@ TEST_F(CoordinatorCacheManagerAtomicUpdateTest, CopySubmissionDoesNotPreserveThe
         allocator_->blockBatchCopyByGroup({{"default", blocks[0], blocks[0]}});
         EXPECT_EQ(pool->decodeOrigin(blocks[0], "default"), origin);
         pool->decRef(blocks);
-        });
+        }, [&] { TearDown(); allocator_.reset(); });
     }
 }
 

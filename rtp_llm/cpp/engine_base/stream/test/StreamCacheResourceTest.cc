@@ -1234,7 +1234,7 @@ TEST_F(StreamCacheResourceTest, RequestFinishFiltersRemoteReuseOnlyForSingleRepl
             EXPECT_TRUE(resource.isResourceReleased());
         }
     }
-    });
+    }, [&] { TearDown(); stream_.reset(); cache_manager_.reset(); });
 }
 
 TEST_F(StreamCacheResourceTest, AdoptedRemoteCountsControlRequestFinishWrites) {
@@ -1876,7 +1876,7 @@ TEST_F(StreamCacheResourceTest, PartialLoadFailureRetainsDecodeSourcesOnlyForRea
             EXPECT_FALSE(resource.decode_reuse_use_state_.consume(true));
         }
     }
-    });
+    }, [&] { TearDown(); stream_.reset(); cache_manager_.reset(); });
 }
 
 TEST_F(StreamCacheResourceTest, testPrefillLoadFailureDetachShortfallRearmsAllocation) {

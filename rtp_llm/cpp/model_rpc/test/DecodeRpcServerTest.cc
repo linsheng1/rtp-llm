@@ -3,6 +3,7 @@
 
 #include <chrono>
 #include <limits>
+#include <optional>
 #include <thread>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
@@ -847,6 +848,77 @@ TEST_F(PrefillCompletionRpcTest, HandoffCommitsFirstTokenToLocalXGrammar) {
     }
 }
 
+TEST_F(PrefillCompletionRpcTest, LoadTopologyFailureClearsStaleBoundary) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        class LoadFailureService final: public RpcService::Service {
+        public:
+            grpc::Status RemoteGenerate(grpc::ServerContext* server_context, ServerStream* rpc_stream) override {
+                DecodeRpcContext rpc_context{rpc_stream};
+                kmonitor::MetricsReporterPtr reporter;
+                DecodeGenerateContext context(rpc_context, 0, server_context, reporter, handler.meta_);
+                context.request_id = 42;
+                context.setStream(stream);
+                context.loaded_prefill_kv_end = 999; // Must be cleared before attempting the real load.
+                handler.loadCacheFromPrefill(context);
+                boundary_after_load = context.loaded_prefill_kv_end;
+                if (context.error_status.ok()) {
+                    generation_entered = true;
+                    handler.localGenerate(context);
+                }
+                context.markRpcHandlingCompleted();
+                return context.error_status;
+            }
+            DecodeRpcServer handler;
+            GenerateStreamPtr stream;
+            std::optional<int64_t> boundary_after_load{999};
+            bool generation_entered = false;
+        } service;
+        auto input = std::make_shared<GenerateInput>();
+        input->request_id = 42;
+        input->begin_time_us = currentTimeUs();
+        input->generate_config = std::make_shared<GenerateConfig>();
+        input->input_ids = torch::tensor({1, 2, 3}, torch::kInt32);
+        ModelConfig model;
+        model.max_seq_len = 16;
+        model.vocab_size = 128;
+        service.stream = std::make_shared<NormalGenerateStream>(input, model, RuntimeConfig{}, ResourceContext{}, nullptr);
+        const auto cache_config = test::makeSimpleMhaCacheConfig(1, 4, 2, DataType::TYPE_FP16);
+        service.stream->kvCachePtr()->resetBatchSize(1);
+        service.stream->kvCachePtr()->initGroups(cache_config.topologyPtr());
+        service.stream->kvCachePtr()->setBatchCacheKeys(0, {101});
+        service.handler.meta_ = std::make_shared<RpcServerRuntimeMeta>();
+        // No workers/peers: the production all-rank loader returns a topology
+        // error before SDK/RDMA. No fake load result or product hook is used.
+        int port = 0;
+        grpc::ServerBuilder builder;
+        builder.AddListeningPort("127.0.0.1:0", grpc::InsecureServerCredentials(), &port);
+        builder.RegisterService(&service);
+        auto server = builder.BuildAndStart();
+        ASSERT_NE(server, nullptr);
+        auto stub = RpcService::NewStub(grpc::CreateChannel("127.0.0.1:" + std::to_string(port),
+                                                          grpc::InsecureChannelCredentials()));
+        grpc::ClientContext context;
+        context.set_deadline(std::chrono::system_clock::now() + std::chrono::seconds(5));
+        auto rpc = stub->RemoteGenerate(&context);
+        GenerateRequestPB request;
+        request.set_stage(RemoteStage::LOAD);
+        request.set_request_id(42);
+        ASSERT_TRUE(rpc->Write(request));
+        rpc->WritesDone();
+        GenerateOutputsPB response;
+        ASSERT_TRUE(rpc->Read(&response));
+        EXPECT_NE(response.error_info().error_code(), 0);
+        EXPECT_FALSE(rpc->Finish().ok());
+        server->Shutdown();
+        server->Wait();
+        EXPECT_FALSE(service.boundary_after_load);
+        EXPECT_FALSE(service.stream->kvCache().decodeCompletionLifecycle().prefillComputedEnd());
+        EXPECT_FALSE(service.generation_entered);
+        EXPECT_EQ(service.stream->outputTokenLen(), 0);
+    });
+}
+
 TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailures) {
     class CompletionService final: public RpcService::Service {
     public:
@@ -961,8 +1033,8 @@ TEST_F(PrefillCompletionRpcTest, SettlesWithoutDecodeAndPreservesProtocolFailure
                               mode == "prefill_only_generate" || mode == "bare_zero_generate" ?
                                                       RemoteStage::GENERATE :
                                                       RemoteStage::PREFILL_COMPLETE);
-            request.set_request_id(42);
-            request.set_client_id("prefill");
+            request.set_request_id(mode == "wrong_request" ? 43 : 42);
+            request.set_client_id(mode == "wrong_client" ? "other" : "prefill");
             EXPECT_TRUE(rpc->Write(request));
         }
         rpc->WritesDone();

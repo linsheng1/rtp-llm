@@ -297,7 +297,7 @@ TEST_F(PrefillRpcServerTest, GenerateHandoffDoesNotSendRemovedBoundaryField) {
         EXPECT_EQ(handoff.client_id(), "prefill");
         EXPECT_EQ(handoff.first_generate_token_id(), 7);
         EXPECT_EQ(GenerateRequestPB::descriptor()->FindFieldByNumber(13), nullptr);
-        });
+        }, [&] { TearDown(); metrics_reporter_.reset(); });
     }
 }
 

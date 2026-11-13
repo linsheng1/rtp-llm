@@ -1,3 +1,4 @@
+#include <filesystem>
 #include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/LegacyTransferEngine.h"
 #include <gtest/gtest.h>
@@ -231,7 +232,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, PhysicalOriginsFollowHostDiskRoun
     EXPECT_FALSE(disk_pool_->decodeOrigin(disk_block, tag));
     releasePoolBlock(*host_pool_, host_block);
     releasePoolBlock(*disk_pool_, disk_block);
-    });
+    }, [&] { TearDown(); per_rank_transfer_engine_.reset(); group_set_.reset(); disk_pool_.reset(); host_pool_.reset(); std::filesystem::remove_all(temp_dir_.path); });
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, ReportsSuccessfulQueueWaitThroughMetricsReporter) {

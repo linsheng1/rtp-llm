@@ -1,3 +1,4 @@
+#include <filesystem>
 #include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/legacy/LegacyTransferEngine.h"
 #include <gtest/gtest.h>
@@ -2427,7 +2428,7 @@ TEST_F(TransferWorkLoopCrcTest, DecodeOriginsAreVisibleAtReadyAndClearedAfterCrc
     ASSERT_TRUE(await(disk_load));
     EXPECT_EQ(device->decodeOrigin(targets[1], tag), origin);
     engine->shutdown();
-    });
+    }, [&] { TearDown(); group.reset(); disk.reset(); host.reset(); retained_controlled_disk.reset(); device.reset(); reporter.reset(); raw.reset(); std::filesystem::remove_all(temp.path); });
 }
 
 TEST_F(TransferWorkLoopCrcTest, UniformBatchLimitBoundsBothDirectionsAndDispatcherSplitsRequests) {

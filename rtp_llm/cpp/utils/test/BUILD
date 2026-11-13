@@ -161,3 +161,14 @@ cc_test(
     deps = google_test_deps + ["//rtp_llm/cpp/utils:core_utils"],
     copts = copts(),
 )
+
+# CPU-only regression for exec isolation, assertion diagnostics and cleanup.
+cc_test(
+    name = "decode_publication_test_support_test",
+    srcs = ["DecodePublicationTestSupportTest.cc"],
+    copts = copts(),
+    deps = google_test_deps + [
+        "//rtp_llm/cpp/utils:decode_publication_test_support",
+        "@com_google_googletest//:gmock",
+    ],
+)
