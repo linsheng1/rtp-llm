@@ -533,6 +533,102 @@ TEST(KVCMLocalTest, PublicationSwitchPreservesLegacyHostPoolFallbackAndRequiresG
     }
 }
 
+TEST(KVCMLocalTest, DecodePublicationParsesSdkOptionsAndKeepsBackendContracts) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    struct Case { std::string json; int read_backend; bool gdr; bool valid; };
+    const std::vector<Case> cases{
+        {R"([{"type":"pace","sdk_log_file_path":"logs/pace client.log","sdk_log_level":"INFO"}])", 0, true, true},
+        {R"( [ { "sdk_log_level" : "INFO", "type" : "pace", "sdk_log_file_path" : "logs/pace client.log" } ] )", 3, true, true},
+        {R"([{"sdk_log_level":"INFO","type":"pace_ssd","sdk_log_file_path":"logs/pace client.log"}])", 9, true, true},
+        {R"([{"type":"pace_ssd"}])", 0, true, false},
+        {R"([{"type":"pace"}])", 9, true, false},
+        {R"([{"type":"pace_ssd"}])", 9, false, false},
+        {R"([{"type":"pace"}])", 0, false, false},
+        {R"([{"type":"pace"}])", 0, true, true},
+        {R"(null)", 0, true, false},
+        {R"([])", 0, true, false},
+        {R"({"type":"pace"})", 0, true, false},
+        {R"([1])", 0, true, false},
+        {R"([{}])", 0, true, false},
+        {R"([{"type":1}])", 0, true, false},
+        {R"([{"type":"pace_typo"}])", 0, true, false},
+        {R"([{"type":"pace"},{"type":"pace_ssd"}])", 0, true, false},
+        {R"([{"type":"pace"},{"type":"local"}])", 0, true, false},
+        {R"([{"type":"pace"},{"type":"pace"}])", 0, true, false},
+        {R"([{"type":"pace"})", 0, true, false},
+    };
+    for (const auto& value : cases) {
+        SCOPED_TRACE(value.json);
+        auto environment = makeBackendEnvironment("publication_sdk_options");
+        auto client = std::make_shared<MockClientWrapper>();
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).Times(value.valid ? 1 : 0)
+            .WillRepeatedly(Invoke([&](const auto& configs, auto, const auto&, const auto&) {
+                // Observe the effective SDK config passed to real client creation,
+                // not just a standalone JSON parse or the admission helper.
+                const auto fields = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
+                    autil::legacy::ToJson(configs.at("")));
+                const auto sdk_fields = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
+                    fields.at("sdk_config"));
+                kvcm::SdkWrapperConfig expected;
+                expected.parseBackendConfigs(value.json);
+                const auto actual = autil::legacy::ToJsonString(sdk_fields.at("sdk_backend_configs"));
+                EXPECT_EQ(actual, autil::legacy::ToJsonString(expected.sdk_backend_configs()));
+                if (value.json.find("sdk_log_file_path") != std::string::npos) {
+                    EXPECT_NE(actual.find("logs/pace client.log"), std::string::npos);
+                    EXPECT_NE(actual.find("INFO"), std::string::npos);
+                }
+                return true;
+            }));
+        KVCacheConfig config;
+        config.kvcm_model_sdk_config = value.json;
+        config.kvcm_read_backend_type = value.read_backend;
+        config.kvcm_instance_id_salt = "sdk-options-contract";
+        auto parallel = singleRankConfig();
+        parallel.role_type = RoleType::PREFILL;
+        parallel.prefill_cp_config.prefill_cp_size = 1;
+        auto backend = makeBackend(environment, parallel, client, nullptr, nullptr, value.gdr, config);
+        bool initialized = false;
+        EXPECT_NO_THROW(initialized = initSingleRank(*backend.backend, environment));
+        EXPECT_EQ(initialized, value.valid);
+    }
+}
+
+TEST(KVCMLocalTest, OptionalSaltPreservesPrefillDecodeIdentityAndLayoutIsolation) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    const auto instance = [](RoleType role, int cp, const std::string& salt) {
+        auto environment = makeBackendEnvironment("publication_optional_salt");
+        auto client = std::make_shared<MockClientWrapper>();
+        std::string id;
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Invoke(
+            [&](const auto& configs, auto, const auto&, const auto&) {
+                id = configs.at("")->instance_id();
+                return true;
+            }));
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        KVCacheConfig config;
+        config.kvcm_model_sdk_config = R"([{"type":"pace","sdk_log_level":"INFO"}])";
+        config.kvcm_instance_id_salt = salt;
+        auto parallel = singleRankConfig();
+        parallel.role_type = role;
+        parallel.prefill_cp_config.prefill_cp_size = cp;
+        parallel.prefill_cp_config.kv_cache_sharded = true;
+        auto backend = makeBackend(environment, parallel, client, nullptr, nullptr, true, config);
+        EXPECT_TRUE(initSingleRank(*backend.backend, environment));
+        EXPECT_FALSE(id.empty());
+        backend.backend->shutdown();
+        return id;
+    };
+    const auto p = instance(RoleType::PREFILL, 1, "");
+    const auto d = instance(RoleType::DECODE, 1, "");
+    EXPECT_EQ(p, d);
+    EXPECT_EQ(instance(RoleType::PREFILL, 1, "explicit-salt"), "explicit-salt_" + p);
+    EXPECT_EQ(instance(RoleType::DECODE, 1, "explicit-salt"), "explicit-salt_" + d);
+    // CP2 is an identity-generation check, not multi-rank transfer acceptance.
+    EXPECT_NE(instance(RoleType::DECODE, 2, ""), d);
+    EXPECT_NE(instance(RoleType::DECODE, 2, "explicit-salt"), "explicit-salt_" + d);
+}
+
 TEST(KVCMLocalTest, DsparkAdmitsNativeCacheTagsAndRejectsIncompleteDraftConfiguration) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     createDevice();

@@ -15,13 +15,27 @@ bool configureDecodePublication(const CacheTopology&                            
     // resolver, or allocate publication accounting for an ordinary P cache.
     if (!decode_publication_enabled_)
         return true;
-    std::string backend_config = kv_cache_config_.kvcm_model_sdk_config;
-    backend_config.erase(
-        std::remove_if(backend_config.begin(), backend_config.end(), [](unsigned char c) { return std::isspace(c); }),
-        backend_config.end());
-    // The enabled path selects its backend from existing PACE configuration.
-    pace_backend_  = backend_config == "[{\"type\":\"pace\"}]" || backend_config == "[{\"type\":\"pace_ssd\"}]";
-    const bool ssd = backend_config == "[{\"type\":\"pace_ssd\"}]";
+    std::string backend_type;
+    try {
+        // Use the same polymorphic parser as client creation. Inspect its wire
+        // type without rewriting the caller's SDK options (including logging).
+        kvcm::SdkWrapperConfig sdk;
+        sdk.parseBackendConfigs(kv_cache_config_.kvcm_model_sdk_config);
+        const auto& backends = sdk.sdk_backend_configs();
+        if (backends.size() == 1) {
+            const auto fields = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
+                autil::legacy::ToJson(backends.front()));
+            autil::legacy::FromJson(backend_type, fields.at("type"));
+        }
+    } catch (const autil::legacy::ExceptionBase& error) {
+        RTP_LLM_LOG_ERROR("parse Decode publication SDK config failed: %s", error.what());
+        return false;
+    } catch (const std::exception& error) {
+        RTP_LLM_LOG_ERROR("initialize Decode publication SDK config failed: %s", error.what());
+        return false;
+    }
+    pace_backend_  = backend_type == "pace" || backend_type == "pace_ssd";
+    const bool ssd = backend_type == "pace_ssd";
     if (pace_backend_
         && ((ssd && (kv_cache_config_.kvcm_read_backend_type != 9 || !gdr_enabled_))
             || (!ssd && kv_cache_config_.kvcm_read_backend_type == 9))) {
@@ -50,17 +64,15 @@ bool configureDecodePublication(const CacheTopology&                            
         || static_cast<size_t>(target_prefill_cp_)
                > static_cast<size_t>(std::numeric_limits<int>::max()) / cache_config_.seq_size_per_block
         || ((!cache_config_.mtp_sub_configs.empty() || sp_config_.type != SP_TYPE_NONE) && !supported_speculation) || !kv_cache_config_.kvcm_client_config.empty()
-        || kv_cache_config_.kvcm_instance_id_salt.empty()
-        || (pace_backend_ && backend_config != (ssd ? "[{\"type\":\"pace_ssd\"}]" : "[{\"type\":\"pace\"}]"))
         || (is_decode_role_ && (parallelism_config_.tp_size != 1 || parallelism_config_.dp_size < 1))
         || (prefill && (parallelism_config_.tp_size != target_prefill_cp_ || parallelism_config_.dp_size != 1))) {
         RTP_LLM_LOG_ERROR(
             "Decode publication requires matching target P CP layout, positive D DP, DSV4.1 complete target/draft endpoints, and native PACE: "
-            "dsv41_tags=%d supported_speculation=%d sp_type=%d draft_modules=%zu role=%d tp=%ld dp=%ld target_cp=%d base=%zu pace=%d custom_client=%d salt_empty=%d",
+            "dsv41_tags=%d supported_speculation=%d sp_type=%d draft_modules=%zu role=%d tp=%ld dp=%ld target_cp=%d base=%zu pace=%d custom_client=%d",
             dsv41, supported_speculation, static_cast<int>(sp_config_.type), cache_config_.mtp_sub_configs.size(),
             static_cast<int>(parallelism_config_.role_type), parallelism_config_.tp_size, parallelism_config_.dp_size,
             target_prefill_cp_, cache_config_.seq_size_per_block, pace_backend_,
-            !kv_cache_config_.kvcm_client_config.empty(), kv_cache_config_.kvcm_instance_id_salt.empty());
+            !kv_cache_config_.kvcm_client_config.empty());
         return false;
     }
     if (!gdr_enabled_) {
