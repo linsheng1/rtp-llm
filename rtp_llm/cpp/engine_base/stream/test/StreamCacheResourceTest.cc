@@ -429,8 +429,9 @@ protected:
 };
 
 namespace {
-// Call-point/owner coverage only. No model writer, executor event, SDK I/O or
-// STATE/SWA byte proof. Weak observers must not extend the source lifetime.
+// Call-point/owner coverage with a reduced native-policy layout (one target
+// layer, no indexer/HCA). No model writer, executor event, SDK I/O or STATE/SWA
+// byte proof. Weak observers must not extend the source lifetime.
 struct PublicationGroupSnapshot {
     BlockIndicesType physical, kernel, endpoint_blocks, pinned;
     std::weak_ptr<BlockIds> owner;
@@ -550,6 +551,9 @@ protected:
                 group.owner = value.groupBlockIds(0, tags[i]);
                 ASSERT_FALSE(group.owner.expired());
                 ASSERT_FALSE(group.physical.empty());
+                const size_t kernel_pages = tags[i] == "csa_kv" ? 2 : 1;
+                EXPECT_EQ(live_manager->cacheConfig().topology().group(tags[i]).kernelBlocksPerKvBlock(), kernel_pages);
+                EXPECT_EQ(group.kernel.size(), group.physical.size() * kernel_pages);
                 for (auto block : group.physical) {
                     if (isNullBlockIdx(block)) continue;
                     ASSERT_TRUE(pools[i]->isAllocated(block));
@@ -579,7 +583,7 @@ protected:
         };
     }
 
-    void finish(bool dspark) {
+    void finish(bool dspark, bool expect_capture = true) {
         auto token = torch::ones({1, 1}, torch::kInt32);
         stream_->update({token, 1}); // Context result; no complete D endpoint yet.
         ASSERT_FALSE(stream_->hasError());
@@ -587,7 +591,7 @@ protected:
         auto& resource = stream_->streamCacheResource();
         if (dspark) stream_->setReserveStep(2); // Two accepted tokens below; no real proposer is run.
         ASSERT_TRUE(resource.incrKVBlock().ok());
-        if (dspark) {
+        if (dspark && expect_capture) {
             const auto& value = resource.kvCache();
             const auto& tags = cache_manager_->cacheConfig().groupTags();
             auto ids = torch::full({static_cast<int64_t>(tags.size()), 1, value.curBlocksNum()},
@@ -601,6 +605,8 @@ protected:
             ASSERT_FALSE(endpoint->pages.empty());
             resource.kvCacheMutable().decode_round_endpoints.push_back(endpoint);
             endpoint.reset(); // Only the real request resource owns it from here.
+        }
+        if (dspark) {
             auto buffer = std::make_shared<SpeculativeExecutorStreamOutput>();
             buffer->tokens = torch::zeros({1, 6}, torch::kInt32);
             stream_->setSPOutputBuffer(buffer);
@@ -616,13 +622,14 @@ protected:
             observations_->phase = "generate_done_before_remap";
             StreamUpdateInfo update{.new_tokens = token, .num_new_tokens = 1,
                                     .src_batch_indices = torch::zeros({1}, torch::kInt32)};
-            stream_->update(update); // The real batch-one src[0] remapping path.
+            stream_->update(update); // Real batch-one remap path with identity mapping; not a reordering test.
         }
         ASSERT_FALSE(stream_->hasError());
         ASSERT_EQ(stream_->seqLength(), 258);
         ASSERT_TRUE(stream_->hasEvent(StreamEvents::GenerateDone));
-        ASSERT_EQ(observations_->calls.size(), 1u);
-        EXPECT_EQ(observations_->calls[0].end, 257u);
+        ASSERT_EQ(observations_->calls.size(), expect_capture ? 1u : 0u);
+        if (expect_capture) EXPECT_EQ(observations_->calls[0].end, 257u);
+        if (!dspark) EXPECT_FALSE(resource.kvCache().decode_endpoint);
         EXPECT_FALSE(resource.isResourceReleased());
     }
 
@@ -666,6 +673,13 @@ protected:
             EXPECT_FALSE(before.groups.at("csa_kv").pinned.empty());
             EXPECT_EQ(cache_manager_->cacheConfig().mtp_sub_configs.size(), 1u);
             EXPECT_EQ(cache_manager_->cacheConfig().layerIdsForGroup("swa_kv").size(), 4u);
+        } else {
+            EXPECT_EQ(before.endpoint_end, 0u); // Ordinary publication uses the live tables, not an endpoint.
+            EXPECT_TRUE(before.endpoint.expired());
+            for (const auto& [tag, group] : before.groups) {
+                EXPECT_TRUE(group.endpoint_blocks.empty());
+                EXPECT_TRUE(group.pinned.empty());
+            }
         }
         for (const auto& pool : cache_manager_->coordinator_manager_->groupBlockPools())
             EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
@@ -707,7 +721,8 @@ TEST_F(PublicationCallPointTest, GenerateDoneAndReleaseKeepNativeMapsAndWeakOwne
                 EXPECT_EQ(observations_->calls.size(), 1u);
                 EXPECT_FALSE(stream_->streamCacheResource().isResourceReleased());
                 worker.reset();
-            } else stream_->releaseResource();
+            } else EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+            ASSERT_FALSE(HasFatalFailure());
             EXPECT_TRUE(stream_->streamCacheResource().isResourceReleased());
             compareCalls(dspark);
             stream_->releaseResource(); // Idempotent public release, not the aborting raw double-release API.
@@ -720,15 +735,17 @@ TEST_F(PublicationCallPointTest, GenerateDoneAndReleaseKeepNativeMapsAndWeakOwne
 TEST_F(PublicationCallPointTest, CancellationAfterGenerateDoneSkipsReleasePublication) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     test::withDecodePublicationStartup([&] {
-        for (bool dspark : {false, true}) {
+        for (bool dspark : {false, true}) for (bool cancelled : {false, true}) {
+            SCOPED_TRACE(dspark); SCOPED_TRACE(cancelled);
             prepare(dspark);
             ASSERT_FALSE(HasFatalFailure());
             finish(dspark);
             ASSERT_FALSE(HasFatalFailure());
-            stream_->reportError(ErrorCode::CANCELLED, "cancel after GenerateDone");
+            if (cancelled) stream_->reportError(ErrorCode::CANCELLED, "cancel after GenerateDone");
             observations_->phase = "release";
-            stream_->releaseResource();
-            EXPECT_EQ(observations_->calls.size(), 1u); // Real difference if the old point is removed.
+            EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+            ASSERT_FALSE(HasFatalFailure());
+            EXPECT_EQ(observations_->calls.size(), cancelled ? 1u : 2u); // Noncancelled control reaches release.
             EXPECT_TRUE(stream_->streamCacheResource().isResourceReleased());
             cleanup();
         }
@@ -741,16 +758,20 @@ TEST_F(PublicationCallPointTest, PrefillRetainedPrefillAndToggleOffNeverCapture)
         test::withDecodePublicationStartup([&] {
             for (auto role : {RoleType::PREFILL, RoleType::DECODE}) for (bool retained : {false, true}) {
                 if (role == RoleType::DECODE && (retained || enabled[0] == '1')) continue;
-                prepare(false, role, retained);
-                ASSERT_FALSE(HasFatalFailure());
-                stream_->reportEvent(StreamEvents::GenerateDone);
-                stream_->fillSubGenerateStatus(StreamState::FINISHED);
-                stream_->generate_status_->status = StreamState::FINISHED;
-                stream_->streamCacheResource().publishCompletedDecode(254);
-                stream_->releaseResource();
-                EXPECT_TRUE(observations_->calls.empty());
-                EXPECT_EQ(stream_->streamCacheResource().isResourceReleased(), !retained);
-                cleanup();
+                for (bool dspark : {false, true}) {
+                    if (role == RoleType::PREFILL && dspark) continue; // P normally uses the context update.
+                    SCOPED_TRACE(enabled); SCOPED_TRACE(dspark); SCOPED_TRACE(retained);
+                    prepare(dspark, role, retained);
+                    ASSERT_FALSE(HasFatalFailure());
+                    finish(dspark, false); // Drive the actual old update/specUpdate publication sites too.
+                    ASSERT_FALSE(HasFatalFailure());
+                    observations_->phase = "release";
+                    EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+                    ASSERT_FALSE(HasFatalFailure());
+                    EXPECT_TRUE(observations_->calls.empty());
+                    EXPECT_EQ(stream_->streamCacheResource().isResourceReleased(), !retained);
+                    cleanup();
+                }
             }
         }, [&] { cleanup(); });
     }
