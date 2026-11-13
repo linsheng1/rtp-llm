@@ -274,7 +274,7 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     compact_token_logprobs        = copyToPinnedCpuAsync(compact_token_logprobs, need_d2h_sync);
     compact_top_logprob_token_ids = copyToPinnedCpuAsync(compact_top_logprob_token_ids, need_d2h_sync);
     compact_top_logprobs          = copyToPinnedCpuAsync(compact_top_logprobs, need_d2h_sync);
-    syncPinnedCpuCopies(need_d2h_sync);
+    syncPinnedCpuCopies(need_d2h_sync || merge_outputs.wait_for_kv_writer);
     // No new fence: this is evidence from the output copy's existing stream
     // synchronization, combined with the producer's post-model rank dependency.
     const bool context_kv_all_rank_gpu_ready =

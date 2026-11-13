@@ -423,18 +423,13 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& schedul
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output");
         int64_t      start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         absl::Status result;
-        if (publication_frame) {
-            auto writer_done = cuda_graph::makeGraphEvent();
-            writer_done.record(cuda_graph::graphGetCurrentStream());
-            writer_done.synchronize();
-        }
         if (zero_token_batch) {
             cudaSyncAndCheck();
             result = batch_stream_processor_->dispatchPrefillOnly(
                 stream_groups, model_output.generation_prefill_cuda_graph_status,
                 model_output.context_kv_has_rank_completion_dependency);
         } else {
-            MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output)};
+            MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output), publication_frame};
             if (useDeviceInput()) {
                 publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
             }
@@ -790,7 +785,7 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
         std::optional<torch::Event> final_event;
         std::optional<torch::Stream> worker_stream;
         bool counted{false}, protect{false};
-        std::atomic<bool> entered{false}, writer_ready{false}, retired{false};
+        std::atomic<bool> entered{false}, writer_dependency_ready{false}, retired{false};
         ~BookkeepingHold() { finish(); }
         void finish() {
             if (!counted || retired.exchange(true)) return;
@@ -799,7 +794,7 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
                 if (!entered.load()) {
                     if (initial) initial->synchronize(); else safe = false;
                 } else if (protect) {
-                    safe = writer_ready.load();
+                    safe = writer_dependency_ready.load();
                     if (safe) {
                         final_event->record(*worker_stream);
                         final_event->synchronize(); // Includes bookkeeping GPU copies, not just the model writer.
@@ -817,6 +812,9 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
     retirement->initial = sampler_event;
     retirement->protect = remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE;
     if (retirement->protect) {
+        // process records this after the model writer and sampling. Without
+        // that dependency, synchronizing only the worker cannot publish safely.
+        RTP_LLM_CHECK_WITH_INFO(sampler_event != nullptr, "Decode publication requires the sampler writer event");
         retirement->worker_stream = dispatch_runner_.stream();
         retirement->final_event.emplace(cuda_graph::makeGraphEvent());
     }
@@ -836,7 +834,13 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
         // the main thread continues to the next gather.
         if (sampler_event) {
             if (retirement->protect) {
-                try { sampler_event->synchronize(); retirement->writer_ready.store(true); }
+                // Output staging host-waits this dependency before updating any
+                // stream, including CPU-only outputs. Final retirement still
+                // waits bookkeeping's last GPU use on success or exception.
+                try {
+                    sampler_event->block(cuda_graph::graphGetCurrentStream());
+                    retirement->writer_dependency_ready.store(true);
+                }
                 catch (...) {
                     for (const auto& stream : worker_streams) stream->retainUnknownDecodePublication(stream);
                     throw;
@@ -845,7 +849,8 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
         }
 
         auto status =
-            processor->dispatch(stream_groups_copy, {std::move(model_output_copy), std::move(sampler_output_copy)});
+            processor->dispatch(stream_groups_copy,
+                                {std::move(model_output_copy), std::move(sampler_output_copy), retirement->protect});
         if (!status.ok()) {
             RTP_LLM_LOG_ERROR("[normal-stream-async] dispatch (worker) failed: %s", status.ToString().c_str());
         }
