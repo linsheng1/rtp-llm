@@ -746,7 +746,7 @@ TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWire
         kvcm::KVCMConfig::LocationSpecInfoMap infos;
         kvcm::KVCMConfig::LocationSpecGroups groups;
     };
-    const auto instance = [&](RoleType role, int cp, bool sharded, bool bounded, bool dspark) {
+    const auto instance = [&](RoleType role, int cp, bool sharded, bool bounded, bool dspark, int gamma = 5) {
         auto parallel = singleRankConfig();
         parallel.role_type = role;
         parallel.tp_size = role == RoleType::PREFILL ? cp : 1;
@@ -759,22 +759,26 @@ TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWire
         settings.kvcm_model_sdk_config = R"([{"type":"pace"}])";
         SpeculativeExecutionConfig speculation;
         speculation.type = dspark ? SP_TYPE_DSPARK : SP_TYPE_NONE;
-        speculation.gen_num_per_cycle = dspark ? 5 : 0; // Three draft layers, five proposals.
+        speculation.gen_num_per_cycle = dspark ? gamma : 0; // Draft layers remain three, independent of gamma.
         const auto target = model(bounded, false);
         const auto draft = model(bounded, true);
         BackendEnvironment environment;
         auto& cache = environment.cache_config;
         cache = CacheConfigCreator::createConfig(target, parallel, settings, speculation, dspark ? &draft : nullptr);
         cache.finalizeBlockNums(4, RuntimeConfig{});
+        EXPECT_EQ(cache.cache_key_hash_seed, bounded ? 0x4453563431494231LL : 0x4453563431494631LL);
         EXPECT_EQ(cache.seq_size_per_block, 256u);
         EXPECT_EQ(cache.layer_all_num(), dspark ? 8u : 5u);
         EXPECT_EQ(cache.mtp_sub_configs.size(), dspark ? 1u : 0u);
         if (dspark) EXPECT_EQ(cache.mtp_sub_configs.front()->layer_num, 3u);
         const size_t shards = sharded ? cp : 1;
         // Independent literal wire sizes: two kernel pages per logical FULL
-        // block; STATE has 2 (+5 rounded to 8) FP32 entries, CP-aligned; SWA
-        // has 128 (+5 rounded/aligned) rows with 16896-byte stride alignment.
-        const size_t state_bytes = (dspark ? 32768 : (shards == 4 ? 16384 : 8192)) / shards;
+        // block; STATE has 2 (+3 rounded to 6, or +5 rounded to 8) FP32
+        // entries, CP-aligned; SWA has 128 (+3/+5 rounded/aligned) rows
+        // with 16896-byte stride alignment. The gamma variants below are 3/5.
+        const size_t state_full_bytes = dspark ? (gamma == 3 && shards < 4 ? 24576 : 32768) :
+                                                (shards == 4 ? 16384 : 8192);
+        const size_t state_bytes = state_full_bytes / shards;
         const size_t swa_bytes = (dspark ? 84480 : 67584) / shards;
         const std::map<std::string, size_t> expected_bytes{
             {"csa_kv", 36864}, {"hca_kv", 73728}, {"indexer_kv", 34816},
@@ -816,6 +820,7 @@ TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWire
         backend.backend->shutdown();
         return observed;
     };
+    std::map<std::tuple<bool, int, bool>, std::string> target_only_identities;
     for (bool bounded : {false, true}) for (bool dspark : {false, true}) for (int cp : {1, 2, 4}) {
         std::string replicated_identity;
         for (bool sharded : {false, true}) {
@@ -825,6 +830,17 @@ TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWire
             EXPECT_EQ(p.identity, d.identity);
             EXPECT_EQ(p.infos, d.infos);
             EXPECT_EQ(p.groups, d.groups);
+            const auto key = std::make_tuple(bounded, cp, sharded);
+            if (!dspark) target_only_identities.emplace(key, p.identity);
+            else EXPECT_NE(p.identity, target_only_identities.at(key));
+            if (dspark && cp == 1 && !sharded) {
+                const auto p3 = instance(RoleType::PREFILL, cp, sharded, bounded, true, 3);
+                const auto d3 = instance(RoleType::DECODE, cp, sharded, bounded, true, 3);
+                EXPECT_EQ(p3.identity, d3.identity);
+                EXPECT_EQ(p3.infos, d3.infos);
+                EXPECT_EQ(p3.groups, d3.groups);
+                EXPECT_NE(p3.identity, p.identity); // Original speculation identity retains gamma.
+            }
             if (!sharded) replicated_identity = p.identity;
             else if (cp > 1) EXPECT_NE(p.identity, replicated_identity);
             else EXPECT_EQ(p.identity, replicated_identity);
