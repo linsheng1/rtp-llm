@@ -2217,34 +2217,51 @@ private:
 
     using PayloadResult = BroadcastResult<FunctionRequestPB, FunctionResponsePB>;
 
-    struct ProjectedWrite {
+    // Both P's singleton and D's local peers use the original payload queue.
+    bool submitLocalPayload(BlockTreeTaskClass task_class, Task run, Clock::time_point deadline, Task expire) {
+        return local_payload_pool_->submit(task_class, std::move(run), deadline, std::move(expire));
+    }
+
+    struct LocalPeerWrite {
         std::vector<std::shared_ptr<CompletionResources::Operation>> operations;
         std::vector<FunctionRequestPB> requests;
         std::vector<FunctionResponsePB> responses;
-        std::vector<Task> run, expire;
-        std::weak_ptr<PayloadResult> result;
         std::shared_ptr<kvcm::PayloadDispatchProof> proof;
         std::function<void()> business;
         TransferTask task;
-        ProjectedWrite(const TransferTask& task): task(task) {}
+        std::atomic<size_t> remaining;
+        std::atomic<bool> canceled{false};
+        LocalPeerWrite(const TransferTask& task, size_t peers): task(task), remaining(peers + 1) {}
     };
 
-    void runProjectedWrite(const std::shared_ptr<ProjectedWrite>& write, size_t peer, bool expired) noexcept {
-        const auto result = write->result.lock();
-        if (!result) return;
-        const auto operation = write->operations[peer];
-        if (expired || !backend_.remoteCacheEnabled() || !result->tryStart(peer)) {
-            result->complete(peer, PayloadResult::Outcome::notStarted(
-                write->task.expired() ? PayloadResult::Result::TIMEOUT : PayloadResult::Result::CANCELED));
+    static void finishLocalPeers(const std::shared_ptr<LocalPeerWrite>& write) noexcept {
+        // The driver owns +1 until every submit has returned. Each concrete
+        // pool job calls exactly one of run/expire, including inline expiry.
+        if (write->remaining.fetch_sub(1) != 1) return;
+        write->proof->notStarted(); // All terminal; cannot downgrade an SDK handoff.
+        auto business = std::move(write->business); // Break the collect/context cycle.
+        try { if (business) business(); } catch (...) {} // Same notification contract as onDone.
+    }
+
+    static void finishLocalPeer(const std::shared_ptr<LocalPeerWrite>& write, size_t peer, bool expired) noexcept {
+        auto& response = *write->responses[peer].mutable_remote_response();
+        if (expired) response.set_transfer_status(REMOTE_TRANSFER_STATUS_TIMEOUT);
+        if (response.transfer_status() != REMOTE_TRANSFER_STATUS_SUCCESS) write->canceled.store(true);
+        finishLocalPeers(write); // No access to request state after this terminal.
+    }
+
+    void runLocalPeer(const std::shared_ptr<LocalPeerWrite>& write, size_t peer) noexcept {
+        if (write->task.expired() || write->canceled.load() || !backend_.remoteCacheEnabled()) {
+            finishLocalPeer(write, peer, write->task.expired());
             return;
         }
+        const auto operation = write->operations[peer];
         auto& response = *write->responses[peer].mutable_remote_response();
         bool touched = false;
         completion_resources_->holdOperation(operation);
         try {
             setCudaDevice();
             if (!operation->tags.empty()) {
-                result->markMayTouch(peer);
                 const auto status = executeTagTransfers(REMOTE_OPERATION_WRITE, operation->tags, operation->blocks,
                     operation->uris, operation->buffers, response, touched, nullptr, write->task,
                     &write->requests[peer].remote_request(), write->proof.get());
@@ -2258,21 +2275,21 @@ private:
             if (completion_accounting_) completion_accounting_->stopAdmission();
         }
         response.set_payload_buffer_safe(!touched);
-        const auto outcome = touched ? PayloadResult::Outcome::unknown() :
-            PayloadResult::Outcome{response.transfer_status() == REMOTE_TRANSFER_STATUS_SUCCESS ? PayloadResult::Result::SUCCESS :
-                response.transfer_status() == REMOTE_TRANSFER_STATUS_TIMEOUT ? PayloadResult::Result::TIMEOUT : PayloadResult::Result::FAILED,
-                PayloadResult::Proof::BUFFER_SAFE};
-        result->complete(peer, outcome);
+        finishLocalPeer(write, peer, false);
     }
 
     template<typename PrepareCompletion>
-    void dispatchProjectedAsync(const std::vector<FunctionRequestPB>& requests, const StorageRequest& request,
+    void dispatchLocalPeers(const std::vector<FunctionRequestPB>& requests, const StorageRequest& request,
         bool& touched, PrepareCompletion prepare_completion, std::shared_ptr<kvcm::PayloadDispatchProof> proof) {
         touched = false;
-        auto write = std::make_shared<ProjectedWrite>(*request.transfer_task);
+        RTP_LLM_CHECK(local_payload_pool_ && proof && !requests.empty());
+        auto write = std::make_shared<LocalPeerWrite>(*request.transfer_task, requests.size());
         write->requests = requests; write->responses.resize(requests.size()); write->proof = std::move(proof);
-        write->operations.reserve(requests.size()); write->run.reserve(requests.size()); write->expire.reserve(requests.size());
-        const std::weak_ptr<ProjectedWrite> weak = write;
+        write->operations.reserve(requests.size());
+        std::vector<Task> run, expire;
+        run.reserve(requests.size()); expire.reserve(requests.size());
+        // Prepare every descriptor, response, closure and business callback
+        // before any peer can hand off a buffer to the SDK.
         for (size_t peer = 0; peer < requests.size(); ++peer) {
             const auto& remote = requests[peer].remote_request();
             auto operation = std::make_shared<CompletionResources::Operation>();
@@ -2288,35 +2305,28 @@ private:
             auto* response = write->responses[peer].mutable_remote_response();
             response->set_payload_buffer_safe(true); response->set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
             write->operations.push_back(std::move(operation));
-            write->run.push_back([this, weak, peer] { if (const auto value = weak.lock()) runProjectedWrite(value, peer, false); });
-            write->expire.push_back([this, weak, peer] { if (const auto value = weak.lock()) runProjectedWrite(value, peer, true); });
+            run.push_back([this, write, peer] { runLocalPeer(write, peer); });
+            expire.push_back([write, peer] { finishLocalPeer(write, peer, true); });
         }
-        auto result = PayloadResult::createPayloadWindow(requests.size(),
-            std::max<size_t>(1, kv_cache_config_.kvcm_asyncwrapper_thread_num), write->task.deadline(),
-            [this, write](size_t peer, const auto&) {
-                return local_payload_pool_->submit(BlockTreeTaskClass::BACKGROUND, write->run[peer],
-                    write->task.deadline(), write->expire[peer]);
-            },
-            [write] {
-                const auto result = write->result.lock();
-                for (size_t peer = 0; peer < write->responses.size(); ++peer) {
-                    if (result->outcome(peer).proof == PayloadResult::Proof::NOT_STARTED) {
-                        auto* response = write->responses[peer].mutable_remote_response();
-                        response->set_payload_buffer_safe(true);
-                        response->set_transfer_status(result->outcome(peer).result == PayloadResult::Result::TIMEOUT ?
-                            REMOTE_TRANSFER_STATUS_TIMEOUT : REMOTE_TRANSFER_STATUS_FAILED);
-                    }
-                }
-                write->proof->notStarted(); // Cannot downgrade MAY_HAVE_STARTED.
-            }, [write] { auto business = std::move(write->business); if (business) business(); });
-        write->result = result;
-        write->business = prepare_completion([this, write, result](bool& source_touched, bool& sdk_failed) {
-            result->waitDone(0, false);
+        write->business = prepare_completion([this, write](bool& source_touched, bool& sdk_failed) {
             for (const auto& response : write->responses) sdk_failed |= response.remote_response().sdk_failed();
             return validateResponses(std::move(write->responses), write->requests.size(), source_touched);
         });
         write->proof->pending(); touched = true;
-        result->start();
+        for (size_t peer = 0; peer < requests.size(); ++peer) {
+            bool accepted = false;
+            if (!write->canceled.load()) {
+                try {
+                    accepted = submitLocalPayload(BlockTreeTaskClass::BACKGROUND, std::move(run[peer]),
+                        write->task.deadline(), std::move(expire[peer]));
+                } catch (...) {
+                    // This concrete pool cannot throw after enqueue. Earlier
+                    // peers may still own DMA; never throw or settle them early.
+                }
+            }
+            if (!accepted) finishLocalPeer(write, peer, write->task.expired());
+        }
+        finishLocalPeers(write); // Release the driver's +1, after the last submit.
     }
 
     template<typename Completion>
@@ -2336,7 +2346,7 @@ private:
                               bool& source_may_be_touched, PrepareCompletion prepare_completion,
                               std::shared_ptr<kvcm::PayloadDispatchProof> proof = {}) {
         if (request.decode_completion) {
-            dispatchProjectedAsync(requests, request, source_may_be_touched, std::move(prepare_completion), std::move(proof));
+            dispatchLocalPeers(requests, request, source_may_be_touched, std::move(prepare_completion), std::move(proof));
             return;
         }
         if (broadcast_manager_) {
@@ -2383,7 +2393,7 @@ private:
         if (proof) proof->pending(); // Must precede submit: an expired task can complete inline.
         bool accepted = false;
         try {
-            accepted = local_payload_pool_->submit(task_class, std::move(run), deadline, std::move(expire));
+            accepted = submitLocalPayload(task_class, std::move(run), deadline, std::move(expire));
         } catch (...) {
             // This concrete pool has no throwing work after enqueue; failed insertion did not hand off.
             if (proof) proof->notStarted();

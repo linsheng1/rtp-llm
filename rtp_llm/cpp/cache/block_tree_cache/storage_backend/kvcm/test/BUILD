@@ -245,13 +245,6 @@ cc_test_wrapper(
     deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + kvcm_backend_test_deps,
 )
 
-cc_test(
-    name = "decode_payload_window_test",
-    srcs = ["BoundedFanoutHostTest.cc"],
-    copts = ["-std=c++17", "-UNDEBUG", "-pthread"],
-    linkopts = ["-pthread"],
-    deps = ["//rtp_llm/cpp/model_rpc:broadcast_manager", "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto"],
-)
 # Do not link kvcm_storage_backend: this test includes its current .cc once.
 cc_test_wrapper(
     name = "kvcm_submission_boundary_test",

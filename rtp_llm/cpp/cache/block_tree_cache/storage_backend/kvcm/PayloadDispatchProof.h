@@ -13,7 +13,8 @@ public:
         state_.compare_exchange_strong(expected, State::HANDOFF_PENDING);
     }
     void started() noexcept { state_.store(State::MAY_HAVE_STARTED); }
-    // Only the local carrier's mutually exclusive expire/reject path calls this.
+    // Single-carrier expire/reject, or a local peer latch after ALL carriers
+    // are terminal. Never infer this from one peer while another can start.
     void notStarted() noexcept {
         auto expected = State::HANDOFF_PENDING;
         state_.compare_exchange_strong(expected, State::PROVEN_NOT_STARTED);

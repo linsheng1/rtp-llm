@@ -69,73 +69,6 @@ public:
     ~BroadcastResult() = default;
 
 public:
-    // DSV4.1 payloads reuse this result's terminal flags, lock, wait and onDone.
-    // No driver queue/thread or second parent result owns the same operation.
-    using Clock = std::chrono::steady_clock;
-    using Task = DoneCallback;
-    enum class Proof { NOT_STARTED, BUFFER_SAFE, UNKNOWN };
-    enum class Result { SUCCESS, FAILED, TIMEOUT, CANCELED, UNKNOWN };
-    struct Outcome {
-        Result result{Result::FAILED}; Proof proof{Proof::NOT_STARTED};
-        static Outcome success() noexcept { return {Result::SUCCESS, Proof::BUFFER_SAFE}; }
-        static Outcome notStarted(Result why = Result::FAILED) noexcept { return {why, Proof::NOT_STARTED}; }
-        static Outcome unknown() noexcept { return {Result::UNKNOWN, Proof::UNKNOWN}; }
-    };
-    struct Snapshot { size_t children, remaining, active, peak, submitting; bool submissions_closed, finished, canceled; };
-    using Launch = std::function<bool(size_t, const std::shared_ptr<BroadcastResult>&)>;
-    static std::shared_ptr<BroadcastResult> createPayloadWindow(size_t count, size_t window, Clock::time_point deadline,
-                                                              Launch launch, Task finalize, Task notify) {
-        if (!window || !launch || !finalize || !notify) throw std::invalid_argument("invalid payload window");
-        // All result/callback storage is prepared before any RPC/SDK handoff.
-        std::vector<std::shared_ptr<WorkerRpcContext>> contexts(count);
-        auto result = std::make_shared<BroadcastResult>(contexts);
-        result->payload_enabled_ = true; result->payload_slots_.resize(count); result->payload_window_ = window; result->payload_deadline_ = deadline;
-        result->payload_launch_ = std::move(launch); result->payload_finalize_ = std::move(finalize);
-        result->onDone(std::move(notify));
-        return result;
-    }
-    void start() noexcept {
-        { std::lock_guard<std::mutex> lock(wait_done_mutex_); if (!payload_enabled_ || payload_started_) return; payload_started_ = true; }
-        drivePayload();
-    }
-    void cancel() noexcept {
-        { std::lock_guard<std::mutex> lock(wait_done_mutex_); payload_canceled_ = true; closePayloadTail(Result::CANCELED); }
-        finishPayload();
-    }
-    bool tryStart(size_t rank) noexcept {
-        std::lock_guard<std::mutex> lock(wait_done_mutex_);
-        if (rank >= payload_slots_.size() || finished_[rank] || payload_slots_[rank].claimed
-            || payload_canceled_ || Clock::now() >= payload_deadline_) return false;
-        payload_slots_[rank].claimed = true; return true;
-    }
-    bool markMayTouch(size_t rank) noexcept {
-        std::lock_guard<std::mutex> lock(wait_done_mutex_);
-        if (rank >= payload_slots_.size() || finished_[rank] || !payload_slots_[rank].claimed) return false;
-        payload_slots_[rank].may_touch = true; return true;
-    }
-    bool complete(size_t rank, Outcome outcome) noexcept {
-        {
-            std::lock_guard<std::mutex> lock(wait_done_mutex_);
-            if (rank >= payload_slots_.size() || finished_[rank] || !payload_slots_[rank].submitted) return false;
-            if (outcome.proof == Proof::NOT_STARTED && payload_slots_[rank].may_touch) outcome = Outcome::unknown();
-            payload_slots_[rank].outcome = outcome; finished_[rank] = true;
-            ++finished_count_; --payload_active_;
-            if (outcome.result != Result::SUCCESS) { payload_canceled_ = true; closePayloadTail(outcome.result == Result::TIMEOUT ? Result::TIMEOUT : Result::CANCELED); }
-        }
-        drivePayload(); finishPayload(); return true;
-    }
-    Outcome outcome(size_t rank) const {
-        std::lock_guard<std::mutex> lock(wait_done_mutex_);
-        if (rank >= payload_slots_.size() || !finished_[rank]) throw std::logic_error("payload rank not terminal");
-        return payload_slots_[rank].outcome;
-    }
-    Snapshot snapshot() const noexcept {
-        std::lock_guard<std::mutex> lock(wait_done_mutex_);
-        return {payload_slots_.size(), payload_slots_.size() - static_cast<size_t>(finished_count_), payload_active_,
-                payload_peak_, payload_submitting_, payload_closed_, already_done_.load(), payload_canceled_};
-    }
-    Clock::time_point deadline() const noexcept { return payload_deadline_; }
-public:
     bool done() const {
         return already_done_.load(std::memory_order_acquire);
     }
@@ -302,7 +235,7 @@ public:
         std::vector<DoneCallback> callbacks;
         {
             std::lock_guard<std::mutex> lock(wait_done_mutex_);
-            if (already_done_.load() || payload_enabled_) return;
+            if (already_done_.load()) return;
             grpc_status_failure_seen_ = true;
             if (rank < finished_.size() && !finished_[rank]) { finished_[rank] = true; ++finished_count_; }
             if (rank < rpc_succeeded_.size()) rpc_succeeded_[rank] = false;
@@ -314,78 +247,6 @@ public:
 
 private:
     friend class BroadcastManager;
-
-    struct PayloadSlot { bool submitted{false}, claimed{false}, may_touch{false}; Outcome outcome; };
-    void closePayloadTail(Result reason) noexcept {
-        for (size_t rank = payload_next_; rank < payload_slots_.size(); ++rank) {
-            if (!payload_slots_[rank].submitted && !finished_[rank]) {
-                finished_[rank] = true; ++finished_count_; payload_slots_[rank].outcome = Outcome::notStarted(reason);
-            }
-        }
-        payload_next_ = payload_slots_.size(); payload_closed_ = true;
-    }
-    void finishPayload() noexcept {
-        Task finalize;
-        {
-            std::lock_guard<std::mutex> lock(wait_done_mutex_);
-            if (already_done_.load() || payload_finalizing_ || !payload_started_ || !payload_closed_
-                || payload_active_ || payload_submitting_ || payload_driving_) return;
-            payload_finalizing_ = true; finalize = std::move(payload_finalize_);
-        }
-        // Normalize NOT_STARTED/UNKNOWN wire responses BEFORE done/waiters.
-        // Production finalization catches errors and marks aggregate UNKNOWN.
-        try { finalize(); } catch (...) { std::terminate(); }
-        std::vector<DoneCallback> callbacks;
-        Launch retired_launch;
-        {
-            std::lock_guard<std::mutex> lock(wait_done_mutex_);
-            grpc_status_failure_seen_ = std::any_of(payload_slots_.begin(), payload_slots_.end(),
-                [](const auto& slot) { return slot.outcome.result != Result::SUCCESS || slot.outcome.proof != Proof::BUFFER_SAFE; });
-            retired_launch = std::move(payload_launch_);
-            finishLocked(callbacks);
-        }
-        wait_done_cv_.notify_all();
-        for (auto& callback : callbacks) { try { callback(); } catch (...) {} }
-    }
-    void drivePayload() noexcept {
-        const auto self = this->shared_from_this();
-        {
-            std::lock_guard<std::mutex> lock(wait_done_mutex_);
-            if (!payload_started_ || already_done_.load() || payload_driving_ || payload_finalizing_) return;
-            payload_driving_ = true;
-        }
-        for (;;) {
-            size_t rank = 0;
-            bool launch = false;
-            {
-                std::lock_guard<std::mutex> lock(wait_done_mutex_);
-                if (Clock::now() >= payload_deadline_) { payload_canceled_ = true; closePayloadTail(Result::TIMEOUT); }
-                if (!payload_closed_ && payload_next_ < payload_slots_.size() && payload_active_ < payload_window_) {
-                    rank = payload_next_++; payload_slots_[rank].submitted = true;
-                    ++payload_active_; ++payload_submitting_; payload_peak_ = std::max(payload_peak_, payload_active_);
-                    launch = true;
-                    if (payload_next_ == payload_slots_.size()) payload_closed_ = true;
-                } else {
-                    if (payload_next_ == payload_slots_.size()) payload_closed_ = true;
-                    payload_driving_ = false;
-                }
-            }
-            if (!launch) { finishPayload(); return; }
-            bool accepted = false;
-            try { accepted = payload_launch_(rank, self); } catch (...) {}
-            if (!accepted) complete(rank, Outcome::notStarted());
-            {
-                std::lock_guard<std::mutex> lock(wait_done_mutex_);
-                --payload_submitting_;
-            }
-        }
-    }
-    std::vector<PayloadSlot> payload_slots_;
-    Launch payload_launch_;
-    Task payload_finalize_;
-    Clock::time_point payload_deadline_{};
-    size_t payload_window_{0}, payload_next_{0}, payload_active_{0}, payload_peak_{0}, payload_submitting_{0};
-    bool payload_enabled_{false}, payload_started_{false}, payload_closed_{false}, payload_canceled_{false}, payload_driving_{false}, payload_finalizing_{false};
 
     std::string failureSummaryNoLock() const {
         const auto& rpc_error = connect_failure_summary_.empty() ? rpc_failure_summary_ : connect_failure_summary_;

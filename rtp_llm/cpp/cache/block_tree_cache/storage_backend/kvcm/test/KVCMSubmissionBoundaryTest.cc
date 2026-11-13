@@ -61,6 +61,7 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/MockKVCMClient.h"
 
@@ -129,7 +130,8 @@ protected:
         std::atomic<bool> bad_close{false};
         size_t refs = env.device_pool->refCount(env.block_id);
 
-        Fixture(bool decode, std::shared_ptr<BoundaryBroadcastManager> broadcast = {}) {
+        Fixture(bool decode, std::shared_ptr<BoundaryBroadcastManager> broadcast = {},
+                size_t workers = 1, size_t queue_size = 8) {
             EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
             EXPECT_CALL(*client, shutdown()).Times(1);
             EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, _)).WillRepeatedly(Invoke(
@@ -166,8 +168,8 @@ protected:
             config.kvcm_server_address = "unused-test-address";
             config.kvcm_instance_id_salt = decode ? "projected-boundary" : "broadcast-boundary";
             config.kvcm_model_sdk_config = R"([{"type":"pace"}])";
-            config.kvcm_asyncwrapper_thread_num = 1;
-            config.kvcm_asyncwrapper_queue_size = 8;
+            config.kvcm_asyncwrapper_thread_num = workers;
+            config.kvcm_asyncwrapper_queue_size = queue_size;
             auto parallel = singleRankConfig();
             parallel.role_type = decode ? RoleType::DECODE : RoleType::PREFILL;
             parallel.tp_size = decode ? 1 : 2;
@@ -256,6 +258,45 @@ protected:
         }
     }
 
+    struct PeerObservation {
+        std::promise<void> ready;
+        std::shared_future<void> done = ready.get_future().share();
+        std::atomic<size_t> calls{0};
+        bool touched{true}, sdk_failed{false};
+        std::exception_ptr error;
+        std::vector<FunctionResponsePB> responses;
+        std::shared_ptr<kvcm::PayloadDispatchProof> proof = std::make_shared<kvcm::PayloadDispatchProof>();
+    };
+
+    static std::shared_ptr<PeerObservation> dispatchPeers(Fixture& s, bool expired = false) {
+        // Exercise the actual local D dispatch and SDK, independently of metadata.
+        // Full Start/Finish integration is covered by projectedCase and cases below.
+        auto request = s.request(true);
+        request.transfer_task.emplace(std::vector<TransferDescriptor>{},
+                                      expired ? std::chrono::milliseconds(0) : kOperationTimeout);
+        std::vector<FunctionRequestPB> peers(2);
+        for (size_t peer = 0; peer < peers.size(); ++peer) {
+            auto* remote = peers[peer].mutable_remote_request();
+            remote->set_op(REMOTE_OPERATION_WRITE);
+            remote->add_group_tags("default");
+            remote->add_block_ids(s.env.block_id);
+            remote->add_uris("pace://peer:" + std::to_string(peer));
+        }
+        auto observed = std::make_shared<PeerObservation>();
+        auto prepare = [observed](auto collect) {
+            return [observed, collect = std::move(collect)]() mutable {
+                ++observed->calls;
+                try { observed->responses = collect(observed->touched, observed->sdk_failed); }
+                catch (...) { observed->error = std::current_exception(); }
+                observed->ready.set_value();
+            };
+        };
+        bool touched = false;
+        s.backend->impl_->dispatchLocalPeers(peers, request, touched, prepare, observed->proof);
+        EXPECT_TRUE(touched); // Carrier accepted/pending; settlement provides final proof.
+        return observed;
+    }
+
     void projectedCase(bool mixed) {
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
         ::rtp_llm::test::withDecodePublicationStartup([&] {
@@ -270,7 +311,7 @@ protected:
         auto release = std::make_shared<std::promise<void>>();
         auto released = release->get_future().share();
         // Pin the sole REAL payload worker, not the business/completion lane.
-        // Its next CUDA query is runProjectedWrite AFTER tryStart, BEFORE SDK.
+        // Its next CUDA query is runLocalPeer AFTER cancel/expiry checks, BEFORE SDK.
         ASSERT_TRUE(s.backend->impl_->local_payload_pool_->submit(BlockTreeTaskClass::BACKGROUND,
             [entered, released, checks, deadline, mixed] {
                 boundary_before_cuda_query = [checks, deadline, mixed] {
@@ -288,12 +329,12 @@ protected:
         *deadline = request.transfer_task->deadline();
         ASSERT_TRUE(s.submit(std::move(request)));
         // One worker + FIFO BACKGROUND barrier proves projected dispatch has
-        // enqueued its first child while the payload worker is still held.
+        // enqueued both peers while the payload worker is still held.
         auto barrier = std::make_shared<std::promise<void>>();
         auto queued = barrier->get_future();
         ASSERT_TRUE(s.backend->executor_->submit([barrier] { barrier->set_value(); }, BlockTreeTaskClass::BACKGROUND));
         ASSERT_EQ(queued.wait_for(kSetupWait), std::future_status::ready);
-        EXPECT_EQ(s.backend->impl_->local_payload_pool_->queueSizes().background, 1u);
+        EXPECT_EQ(s.backend->impl_->local_payload_pool_->queueSizes().background, 2u);
         unblock.run();
         // SDK success of peer0 proves source BUFFER_SAFE in the mixed case; it
         // must NOT be misused as permission to abort an incomplete destination.
@@ -317,5 +358,198 @@ TEST_F(KVCMSubmissionBoundaryTest, ProjectedAllPeersStopBeforeSdkClosesUnusedSes
 TEST_F(KVCMSubmissionBoundaryTest, ProjectedOneSdkHandoffAndOnePreflightExpiryRetainsSession) {
     projectedCase(true);
 }
+
+TEST_F(KVCMSubmissionBoundaryTest, LocalPeerLatchWaitsForDriverAfterEveryInlineTerminal) {
+    // Actual production latch: peers can finish inline, but cannot notify until
+    // the driver drops +1. No copy of the old window/proof model is tested here.
+    using Impl = KVCMStorageBackend::Impl;
+    TransferTask task({}, kOperationTimeout);
+    auto write = std::make_shared<Impl::LocalPeerWrite>(task, 2);
+    write->responses.resize(2);
+    for (auto& item : write->responses) {
+        item.mutable_remote_response()->set_payload_buffer_safe(true);
+        item.mutable_remote_response()->set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
+    }
+    write->proof = std::make_shared<kvcm::PayloadDispatchProof>();
+    write->proof->pending();
+    size_t calls = 0;
+    write->business = [&] { ++calls; };
+    Impl::finishLocalPeer(write, 0, true);
+    EXPECT_EQ(calls, 0u);
+    EXPECT_FALSE(write->proof->neverStarted());
+    Impl::finishLocalPeer(write, 1, true);
+    EXPECT_EQ(calls, 0u);
+    EXPECT_EQ(write->remaining.load(), 1u);
+    Impl::finishLocalPeers(write);
+    EXPECT_EQ(calls, 1u);
+    EXPECT_TRUE(write->proof->neverStarted());
+    EXPECT_FALSE(write->business);
+}
+
+TEST_F(KVCMSubmissionBoundaryTest, LocalPeersRejectedOrInlineExpiredSettleOnceWithoutSdk) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        for (const bool expired : {false, true}) {
+            Fixture s(true);
+            if (!expired) s.backend->impl_->local_payload_pool_->stopAdmission();
+            auto observed = dispatchPeers(s, expired);
+            ASSERT_EQ(observed->done.wait_for(kSetupWait), std::future_status::ready);
+            EXPECT_EQ(observed->calls.load(), 1u);
+            EXPECT_TRUE(observed->error);
+            EXPECT_FALSE(observed->touched);
+            EXPECT_TRUE(observed->proof->neverStarted());
+            EXPECT_EQ(s.saves.load(), 0);
+            EXPECT_EQ(s.backend->impl_->completion_resources_->unresolved.load(), 0u);
+        }
+    });
+}
+
+TEST_F(KVCMSubmissionBoundaryTest, PartialLocalQueueRejectionStillWaitsForAcceptedPeer) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        Fixture s(true, {}, 1, 2); // BACKGROUND queue has exactly one available slot.
+        auto entered = std::make_shared<std::promise<void>>();
+        auto started = entered->get_future();
+        auto release = std::make_shared<std::promise<void>>();
+        auto released = release->get_future().share();
+        ASSERT_TRUE(s.backend->impl_->local_payload_pool_->submit(BlockTreeTaskClass::BACKGROUND,
+            [entered, released] { entered->set_value(); released.wait(); }));
+        block_tree_cache_detail::ScopeRollback unblock([release] { release->set_value(); });
+        ASSERT_EQ(started.wait_for(kSetupWait), std::future_status::ready);
+        auto observed = dispatchPeers(s);
+        EXPECT_EQ(s.backend->impl_->local_payload_pool_->queueSizes().background, 1u);
+        EXPECT_EQ(observed->done.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+        EXPECT_EQ(observed->calls.load(), 0u);
+        EXPECT_FALSE(observed->proof->neverStarted()); // Pending accepted peer, not zero-submission.
+        unblock.run();
+        ASSERT_EQ(observed->done.wait_for(kSetupWait), std::future_status::ready);
+        EXPECT_EQ(observed->calls.load(), 1u);
+        EXPECT_TRUE(observed->error);
+        EXPECT_FALSE(observed->touched);
+        EXPECT_TRUE(observed->proof->neverStarted());
+        EXPECT_EQ(s.saves.load(), 0); // Queued accepted peer observes cancellation before SDK.
+    });
+}
+
+TEST_F(KVCMSubmissionBoundaryTest, ParallelPeersHoldSourcesAndPublishOnceAfterBothSdkCalls) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        Fixture s(true, {}, 2);
+        auto mutex = std::make_shared<std::mutex>();
+        auto cv = std::make_shared<std::condition_variable>();
+        auto entered = std::make_shared<size_t>(0);
+        auto release = std::make_shared<bool>(false);
+        EXPECT_CALL(*s.client, saveKvCachesForTag(_, _, _, _)).Times(2).WillRepeatedly(Invoke(
+            [&, mutex, cv, entered, release](const auto&, const auto& uris, const auto&, const auto&) {
+                ++s.saves;
+                std::unique_lock<std::mutex> lock(*mutex);
+                ++*entered;
+                cv->notify_all();
+                EXPECT_TRUE(cv->wait_for(lock, kSettlementWait, [&] { return *release; }));
+                return std::make_pair(true, uris);
+            }));
+        EXPECT_CALL(*s.client, finishWrite(_, _, _, _, _)).Times(1).WillOnce(Invoke(
+            [&](const auto&, const auto&, const auto&, const auto& mask, const auto& locations) {
+                ++s.closes;
+                const auto* offset = std::get_if<kv_cache_manager::BlockMaskOffset>(&mask);
+                s.bad_close = locations.empty() || !offset || *offset != 1;
+                return true;
+            }));
+        block_tree_cache_detail::ScopeRollback unblock([mutex, cv, release] {
+            { std::lock_guard<std::mutex> lock(*mutex); *release = true; }
+            cv->notify_all();
+        });
+        auto request = s.request(true);
+        request.transfer_task.emplace(std::vector<TransferDescriptor>{}, kOperationTimeout);
+        ASSERT_TRUE(s.submit(std::move(request)));
+        {
+            std::unique_lock<std::mutex> lock(*mutex);
+            ASSERT_TRUE(cv->wait_for(lock, kSetupWait, [&] { return *entered == 2; }));
+        }
+        EXPECT_EQ(s.saves.load(), 2); // Two actual SDK mocks entered before either returns.
+        EXPECT_EQ(s.closes.load(), 0);
+        EXPECT_GT(s.env.device_pool->refCount(s.env.block_id), s.refs);
+        unblock.run();
+        ASSERT_NO_FATAL_FAILURE(s.expectSettled(false, false));
+        EXPECT_EQ(s.saves.load(), 2);
+        EXPECT_EQ(s.backend->impl_->completion_resources_->unresolved.load(), 0u);
+    });
+}
+
+TEST_F(KVCMSubmissionBoundaryTest, ShutdownDrainsAcceptedLocalPeersBeforeClientShutdown) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        Fixture s(true, {}, 2);
+        auto entered = std::make_shared<std::promise<void>>();
+        auto started = entered->get_future();
+        auto release = std::make_shared<std::promise<void>>();
+        auto released = release->get_future().share();
+        EXPECT_CALL(*s.client, saveKvCachesForTag(_, _, _, _)).Times(2).WillRepeatedly(Invoke(
+            [&, entered, released](const auto&, const auto& uris, const auto&, const auto&) {
+                if (++s.saves == 2) entered->set_value();
+                EXPECT_EQ(released.wait_for(kSettlementWait), std::future_status::ready);
+                return std::make_pair(true, uris);
+            }));
+        block_tree_cache_detail::ScopeRollback unblock([release] { release->set_value(); });
+        auto observed = dispatchPeers(s);
+        ASSERT_EQ(started.wait_for(kSetupWait), std::future_status::ready);
+        // Accepted operations remain live when new payload admission stops.
+        s.backend->impl_->local_payload_pool_->stopAdmission();
+        EXPECT_FALSE(s.backend->impl_->submitLocalPayload(BlockTreeTaskClass::BACKGROUND,
+            [] {}, BoundaryClock::now() + kOperationTimeout, [] {}));
+        block_tree_cache_test::BoundedThread<void> stopping([&] { s.backend->shutdown(); });
+        // Declared after the joiner: early ASSERT must unblock before it joins.
+        block_tree_cache_detail::ScopeRollback release_before_join([&] { unblock.run(); });
+        EXPECT_EQ(stopping.waitFor(std::chrono::milliseconds(20)), std::future_status::timeout);
+        EXPECT_EQ(observed->calls.load(), 0u);
+        unblock.run();
+        ASSERT_EQ(observed->done.wait_for(kSetupWait), std::future_status::ready);
+        EXPECT_EQ(observed->calls.load(), 1u);
+        EXPECT_FALSE(observed->error);
+        EXPECT_FALSE(observed->touched);
+        EXPECT_EQ(observed->responses.size(), 2u);
+        EXPECT_FALSE(observed->proof->neverStarted());
+        ASSERT_EQ(stopping.waitFor(kSetupWait), std::future_status::ready);
+        stopping.get();
+    });
+}
+
+TEST_F(KVCMSubmissionBoundaryTest, LocalPeerSafeFailureCancelsTailButCannotAbortStartedSession) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        Fixture s(true); // One worker makes the canceled tail deterministic.
+        EXPECT_CALL(*s.client, saveKvCachesForTag(_, _, _, _)).Times(1).WillOnce(Invoke(
+            [&](const auto&, const auto&, const auto&, const auto&) {
+                ++s.saves;
+                // SDK returned buffer-safe success, but an invalid URI cardinality.
+                return std::make_pair(true, kv_cache_manager::UriStrVec{"pace://bad:0", "pace://bad:1"});
+            }));
+        ASSERT_TRUE(s.submit(s.request(true)));
+        ASSERT_NO_FATAL_FAILURE(s.expectSettled(true, false));
+        EXPECT_EQ(s.saves.load(), 1);
+        EXPECT_EQ(s.backend->impl_->completion_resources_->unresolved.load(), 0u);
+    });
+}
+
+TEST_F(KVCMSubmissionBoundaryTest, LocalPeerUnknownRetainsOperationAndSourceWithoutFinishOrAbort) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        Fixture s(true);
+        EXPECT_CALL(*s.client, saveKvCachesForTag(_, _, _, _)).Times(1).WillOnce(Invoke(
+            [&](const auto&, const auto&, const auto&, const auto&) {
+                ++s.saves;
+                return std::make_pair(false, kv_cache_manager::UriStrVec{}); // Explicitly no safety proof.
+            }));
+        ASSERT_TRUE(s.submit(s.request(true)));
+        ASSERT_NO_FATAL_FAILURE(s.expectSettled(true, true));
+        EXPECT_EQ(s.saves.load(), 1);
+        EXPECT_EQ(s.backend->impl_->completion_resources_->unresolved.load(), 1u);
+        std::lock_guard<std::mutex> lock(s.backend->impl_->completion_resources_->mutex);
+        ASSERT_TRUE(s.backend->impl_->completion_resources_->operations);
+        EXPECT_EQ(s.backend->impl_->completion_resources_->operations->client, s.client);
+        EXPECT_FALSE(s.backend->impl_->completion_resources_->operations->buffers.empty());
+    });
+}
+
 } // namespace
 } // namespace rtp_llm
