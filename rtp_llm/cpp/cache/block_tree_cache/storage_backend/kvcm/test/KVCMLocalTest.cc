@@ -1083,8 +1083,8 @@ TEST(KVCMLocalTest, FailedOrThrowingStartNeverDispatchesOrClosesPayload) {
     }
 }
 
-// Exercise the production failed-post fallback using the legacy executor
-// contract, without changing the default executor or its completion reservations.
+// Exercise the non-reservation (queue_size=0 or custom executor) failed-post
+// fallback, without changing the default executor or its completion reservations.
 class RejectCompletionExecutor final: public StorageBackendExecutor {
 public:
     explicit RejectCompletionExecutor(std::shared_ptr<StorageBackendExecutor> delegate): delegate_(std::move(delegate)) {}

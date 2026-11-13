@@ -169,6 +169,5 @@ cc_test(
     copts = copts(),
     deps = google_test_deps + [
         "//rtp_llm/cpp/utils:decode_publication_test_support",
-        "@com_google_googletest//:gmock",
     ],
 )
