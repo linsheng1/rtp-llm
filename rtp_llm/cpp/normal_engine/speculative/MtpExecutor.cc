@@ -2433,6 +2433,9 @@ std::shared_ptr<torch::Event> MtpExecutor::bookkeepingReadyEvent(bool v41_async_
     // the worker's existing single wait: publishing completion can then release
     // a finished/cancelled stream without racing its final draft KV accesses.
     const bool final_draft_required = v41_async_reservation || decode_publication;
+    // The publication caller is dispatchDecodeAsync (stream-async only).
+    // decodeStep records draft_event for stream-async/publication rounds;
+    // a missing event is a broken dependency and must fail closed here.
     RTP_LLM_CHECK_WITH_INFO(!final_draft_required || draft_event != nullptr,
                             "V4.1 async cache reservation/publication requires the final draft KV-use event");
     return final_draft_required ? draft_event : transfer_event;
