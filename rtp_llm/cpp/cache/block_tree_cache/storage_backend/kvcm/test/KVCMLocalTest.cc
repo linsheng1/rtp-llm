@@ -638,6 +638,60 @@ TEST(KVCMLocalTest, OptionalSaltPreservesPrefillDecodeIdentityAndLayoutIsolation
     });
 }
 
+TEST(KVCMLocalTest, PrefillIdentityAndSpecsUseOwnGeometryWhileOnlyDecodeProjects) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        // Config-generation coverage only: these mocks perform no collective,
+        // SDK transfer or model execution, and do not certify runtime topologies.
+        const auto instance = [](RoleType role, int tp, int dp, int target_cp) {
+            auto environment = makeBackendEnvironment("role_scoped_geometry");
+            auto client = std::make_shared<MockClientWrapper>();
+            const int wire_tp = role == RoleType::DECODE ? target_cp : tp;
+            std::string identity;
+            EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Invoke(
+                [&](const auto& configs, auto, const auto& registrations, const auto&) {
+                    identity = configs.at("")->instance_id();
+                    const auto fields = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
+                        autil::legacy::ToJson(configs.at("")));
+                    kvcm::KVCMConfig::LocationSpecInfoMap infos;
+                    autil::legacy::FromJson(infos, fields.at("location_spec_infos"));
+                    EXPECT_EQ(infos.size(), static_cast<size_t>(wire_tp));
+                    for (int rank = 0; rank < wire_tp; ++rank)
+                        EXPECT_EQ(infos.count("tp" + std::to_string(rank) + "_Fdefault"), 1u);
+                    EXPECT_EQ(registrations.size(), role == RoleType::DECODE ? static_cast<size_t>(target_cp) : 1u);
+                    return true;
+                }));
+            EXPECT_CALL(*client, shutdown()).Times(1);
+            KVCacheConfig config;
+            config.kvcm_model_sdk_config = R"([{"type":"pace"}])";
+            auto parallel = singleRankConfig();
+            parallel.role_type = role;
+            parallel.tp_size = tp;
+            parallel.dp_size = dp;
+            parallel.prefill_cp_config.prefill_cp_size = target_cp;
+            parallel.prefill_cp_config.kv_cache_sharded = false;
+            std::shared_ptr<BroadcastManager> broadcast;
+            if (tp > 1)
+                broadcast = std::make_shared<BroadcastManager>(std::vector<std::string>(tp, "unused-geometry-peer"));
+            auto backend = makeBackend(environment, parallel, client, std::move(broadcast), nullptr, true, config);
+            EXPECT_TRUE(initSingleRank(*backend.backend, environment));
+            EXPECT_FALSE(identity.empty());
+            backend.backend->shutdown();
+            return identity;
+        };
+        const auto p11 = instance(RoleType::PREFILL, 1, 1, 1);
+        EXPECT_EQ(instance(RoleType::PREFILL, 1, 1, 2), p11);
+        const auto p21 = instance(RoleType::PREFILL, 2, 1, 2);
+        EXPECT_EQ(instance(RoleType::PREFILL, 2, 1, 1), p21);
+        EXPECT_NE(p21, p11);
+        const auto p12 = instance(RoleType::PREFILL, 1, 2, 1);
+        EXPECT_NE(p12, p11);
+        EXPECT_EQ(instance(RoleType::PREFILL, 1, 2, 2), p12);
+        EXPECT_EQ(instance(RoleType::DECODE, 1, 1, 2), p21);
+        EXPECT_EQ(instance(RoleType::DECODE, 1, 2, 2), p21);
+    });
+}
+
 TEST(KVCMLocalTest, DsparkAdmitsNativeCacheTagsAndRejectsIncompleteDraftConfiguration) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {

@@ -63,10 +63,9 @@ bool configureDecodePublication(const CacheTopology&                            
         || static_cast<size_t>(target_prefill_cp_)
                > static_cast<size_t>(std::numeric_limits<int>::max()) / cache_config_.seq_size_per_block
         || ((!cache_config_.mtp_sub_configs.empty() || sp_config_.type != SP_TYPE_NONE) && !supported_speculation) || !kv_cache_config_.kvcm_client_config.empty()
-        || (is_decode_role_ && (parallelism_config_.tp_size != 1 || parallelism_config_.dp_size < 1))
-        || (prefill && (parallelism_config_.tp_size != target_prefill_cp_ || parallelism_config_.dp_size != 1))) {
+        || (is_decode_role_ && (parallelism_config_.tp_size != 1 || parallelism_config_.dp_size < 1))) {
         RTP_LLM_LOG_ERROR(
-            "Decode publication requires matching target P CP layout, positive D DP, DSV4.1 complete target/draft endpoints, and native PACE: "
+            "Decode publication requires valid target CP, D TP1/positive DP, DSV4.1 complete target/draft endpoints, and native PACE: "
             "dsv41_tags=%d supported_speculation=%d sp_type=%d draft_modules=%zu role=%d tp=%ld dp=%ld target_cp=%d base=%zu pace=%d custom_client=%d",
             dsv41, supported_speculation, static_cast<int>(sp_config_.type), cache_config_.mtp_sub_configs.size(),
             static_cast<int>(parallelism_config_.role_type), parallelism_config_.tp_size, parallelism_config_.dp_size,

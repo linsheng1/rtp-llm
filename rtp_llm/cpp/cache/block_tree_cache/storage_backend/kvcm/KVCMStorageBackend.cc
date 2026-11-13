@@ -1712,13 +1712,13 @@ private:
         auto groups = std::make_shared<kvcm::KVCMConfig::LocationSpecGroups>();
         RTP_LLM_CHECK_WITH_INFO(
             group_policy_->buildLocationSpecGroups(
-                decode_publication_enabled_ ? target_prefill_tp_ : static_cast<int>(parallelism_config_.tp_size),
+                decode_publication_enabled_ && is_decode_role_ ? target_prefill_tp_ : static_cast<int>(parallelism_config_.tp_size),
                 *groups,
                 runtime_config_.model_name,
                 merge_full_specs_),
             "failed to build KVCM location spec groups");
         for (const auto& [group_id, group] : group_policy_->groups()) {
-            for (int rank = 0; rank < (decode_publication_enabled_ ? target_prefill_tp_ : parallelism_config_.tp_size);
+            for (int rank = 0; rank < (decode_publication_enabled_ && is_decode_role_ ? target_prefill_tp_ : parallelism_config_.tp_size);
                  ++rank) {
                 const std::string spec_name =
                     kvcm::genLocationSpecName(rank, group.group_name, runtime_config_.model_name, merge_full_specs_);
@@ -1776,8 +1776,9 @@ private:
         if (!cache_config_.mtp_sub_configs.empty()) {
             draft_info = '{' + sp_config_.to_string() + '}';
         }
-        const auto wire_tp = decode_publication_enabled_ ? target_prefill_tp_ : parallelism_config_.tp_size;
-        const auto wire_dp = decode_publication_enabled_ ? 1 : parallelism_config_.dp_size;
+        // Only D projects into P geometry; P always advertises its actual layout.
+        const auto wire_tp = decode_publication_enabled_ && is_decode_role_ ? target_prefill_tp_ : parallelism_config_.tp_size;
+        const auto wire_dp = decode_publication_enabled_ && is_decode_role_ ? 1 : parallelism_config_.dp_size;
         // Match the baseline P writer identity exactly. Canonical CP keys are
         // selected by CPSlotMapper; the KVCM base block comes from CacheConfig.
         const auto        wire_block = cache_config_.seq_size_per_block;
