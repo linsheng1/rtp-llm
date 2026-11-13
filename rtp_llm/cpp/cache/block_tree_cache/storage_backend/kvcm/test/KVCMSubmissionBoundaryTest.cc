@@ -555,6 +555,52 @@ TEST_F(KVCMSubmissionBoundaryTest, LocalPeerUnknownRetainsOperationAndSourceWith
     });
 }
 
+TEST_F(KVCMSubmissionBoundaryTest, ProjectedWireSizeUsesRegisteredContractAndStillRejectsShortPayload) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    test::withDecodePublicationStartup([&] {
+        Fixture s(true); // Existing CP2 replicated fixture; no SDK call is submitted below.
+        const auto& groups = s.backend->impl_->group_policy_->groups();
+        ASSERT_EQ(groups.size(), 1u);
+        EXPECT_EQ(groups.begin()->second.tag, "default");
+        EXPECT_EQ(groups.begin()->second.block_size_bytes, 64u); // K+V, 8 tokens, head dimension 2, FP16.
+        const auto parts = environmentBuffers(s.env, 0, "default", s.env.block_id);
+        ASSERT_EQ(parts.size(), 2u);
+        for (const auto& part : parts) {
+            ASSERT_TRUE(part.is_cuda);
+            ASSERT_NE(part.addr, nullptr);
+            ASSERT_EQ(part.size_bytes, 32u);
+        }
+        RemoteOperationRequestPB request;
+        request.add_uris("pace://wire-size-check");
+        for (int peer : {0, 1}) {
+            kv_cache_manager::BlockBuffers buffers;
+            ASSERT_TRUE(s.backend->impl_->prepareBlockBuffers(
+                request, {"default"}, {s.env.block_id}, buffers, peer));
+            ASSERT_EQ(buffers.size(), 1u);
+            ASSERT_EQ(buffers.front().iovs.size(), parts.size());
+            for (size_t i = 0; i < parts.size(); ++i) {
+                EXPECT_EQ(buffers.front().iovs[i].type, kv_cache_manager::MemoryType::GPU);
+                EXPECT_EQ(buffers.front().iovs[i].base, parts[i].addr);
+                EXPECT_EQ(buffers.front().iovs[i].size, parts[i].size_bytes);
+            }
+        }
+        auto original = s.backend->impl_->file_resolver_;
+        block_tree_cache_detail::ScopeRollback restore([&] { s.backend->impl_->file_resolver_.swap(original); });
+        s.backend->impl_->file_resolver_ = [resolver = original](int layer, const std::string& tag, int block) {
+            auto parts = resolver(layer, tag, block);
+            // Remain nonempty/GPU/nonzero: force the wire-size guard itself.
+            if (!parts.empty() && parts.front().size_bytes > 1) --parts.front().size_bytes;
+            return parts;
+        };
+        kv_cache_manager::BlockBuffers short_payload;
+        EXPECT_FALSE(s.backend->impl_->prepareBlockBuffers(
+            request, {"default"}, {s.env.block_id}, short_payload, 0));
+        EXPECT_EQ(s.starts.load(), 0);
+        EXPECT_EQ(s.saves.load(), 0);
+        EXPECT_EQ(s.closes.load(), 0);
+    });
+}
+
 TEST_F(KVCMSubmissionBoundaryTest, OrdinaryFullPrefixIntersectsGroupsAndEndpointCannotBackOff) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     test::withDecodePublicationStartup([&] {

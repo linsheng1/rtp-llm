@@ -1286,7 +1286,14 @@ public:
                         bytes += part.size_bytes;
                     }
                 }
-                if (bytes != publicationWireBytes(tag)) {
+                // Reuse the registered native/MTP wire size, as the P path does.
+                const auto& groups = group_policy_->groups();
+                const auto group = std::find_if(groups.begin(), groups.end(), [&](const auto& entry) {
+                    return entry.second.tag == tag;
+                });
+                const size_t expected_bytes =
+                    group == groups.end() ? publicationWireBytes(tag) : group->second.block_size_bytes;
+                if (bytes != expected_bytes) {
                     RTP_LLM_LOG_WARNING("Decode wire size mismatch tag=%s", tag.c_str());
                     return false;
                 }
