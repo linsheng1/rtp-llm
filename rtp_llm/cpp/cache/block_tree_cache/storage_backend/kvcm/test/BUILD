@@ -113,6 +113,7 @@ cc_test_wrapper(
     deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + kvcm_backend_test_deps + [
         "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache:cache_core",
         "//rtp_llm/cpp/cache:device_block_pool_config_helper",
         "//rtp_llm/cpp/cache/test:block_pool_test_helper",
         "//rtp_llm/cpp/utils:async_profile_trace",

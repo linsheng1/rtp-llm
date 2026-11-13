@@ -8,6 +8,7 @@
 #include <csignal>
 #include <condition_variable>
 #include <cstdint>
+#include <map>
 #include <stdexcept>
 #include <tuple>
 #include <unistd.h>
@@ -16,11 +17,14 @@
 #include "kmonitor/client/KMonitorFactory.h"
 #include "kmonitor/client/core/MetricsData.h"
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/CacheConfigCreator.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/GroupPolicy.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventPublisher.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventReporter.h"
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/AsyncProfilingScope.h"
 #include "rtp_llm/cpp/utils/AsyncProfileTrace.h"
@@ -689,6 +693,143 @@ TEST(KVCMLocalTest, PrefillIdentityAndSpecsUseOwnGeometryWhileOnlyDecodeProjects
         EXPECT_EQ(instance(RoleType::PREFILL, 1, 2, 2), p12);
         EXPECT_EQ(instance(RoleType::DECODE, 1, 1, 2), p21);
         EXPECT_EQ(instance(RoleType::DECODE, 1, 2, 2), p21);
+    });
+}
+
+TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWireConfigs) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+    createDevice();
+    // Test-only mirror of build_v41_kv_cache_spec_descs, paired with the Python
+    // native-generator contract test. This does not execute a Python->C++ bridge,
+    // collective, model kernel or SDK transfer, or certify runtime topologies.
+    const auto model = [](bool bounded, bool draft) {
+        ModelConfig config;
+        config.model_type = "deepseek_v41";
+        config.num_layers = draft ? 3 : 5;
+        config.data_type = DataType::TYPE_BF16;
+        config.attn_config.head_num = 1;
+        config.attn_config.kv_head_num = 1;
+        config.attn_config.size_per_head = 512;
+        config.attn_config.use_mla = true;
+        config.attn_config.tokens_per_block = 256;
+        config.attn_config.kernel_tokens_per_block = 128;
+        config.attn_config.sliding_window = 128;
+        config.cache_min_replay_tokens = bounded ? 128 : 1;
+        config.cache_key_hash_seed = bounded ? 0x4453563431494231LL : 0x4453563431494631LL;
+        config.hybrid_attention_config.hybrid_attention_types.assign(config.num_layers, HybridAttentionType::NONE);
+        auto csa = test::makeDsv4Desc("csa_kv", "compressed_kv", 288, DataType::TYPE_UINT8, 2);
+        auto hca = test::makeDsv4Desc("hca_kv", "compressed_kv", 288, DataType::TYPE_UINT8, 1);
+        csa.block_stride_bytes_alignment = hca.block_stride_bytes_alignment = 4608;
+        auto indexer = test::makeDsv4Desc("indexer_kv", "compressed_kv", 68, DataType::TYPE_UINT8, 1);
+        auto state = test::makeDsv4Desc("csa_state", "fixed_state", 1024, DataType::TYPE_FP32);
+        state.compression_ratio = 2;
+        state.state_ring_overlap = 0;
+        auto swa = test::makeDsv4Desc("swa_kv", "sliding_window_kv", 528, DataType::TYPE_UINT8);
+        swa.block_stride_bytes_alignment = 16896;
+        auto decoder = swa; // Rename after inheriting the native SWA CP policies.
+        decoder.tag = "decoder_swa_kv";
+        decoder.reuse->enable_prefix_reuse = false;
+        for (int layer = 0; layer < config.num_layers; ++layer) {
+            std::vector<KVCacheSpecDesc> descs{bounded && (draft || layer >= 4) ? decoder : swa};
+            if (!draft && (layer == 1 || layer == 3)) {
+                descs.push_back(layer == 1 ? csa : hca);
+                descs.push_back(indexer);
+                if (layer == 1) descs.push_back(state);
+            }
+            config.kv_cache_spec_descs.push_back(std::move(descs));
+        }
+        return config;
+    };
+    struct Observation {
+        std::string identity;
+        kvcm::KVCMConfig::LocationSpecInfoMap infos;
+        kvcm::KVCMConfig::LocationSpecGroups groups;
+    };
+    const auto instance = [&](RoleType role, int cp, bool sharded, bool bounded, bool dspark) {
+        auto parallel = singleRankConfig();
+        parallel.role_type = role;
+        parallel.tp_size = role == RoleType::PREFILL ? cp : 1;
+        parallel.prefill_cp_config.prefill_cp_size = cp;
+        parallel.prefill_cp_config.kv_cache_sharded = sharded;
+        parallel.prefill_cp_config.method = cp == 1 ? CPRotateMethod::DISABLED :
+            (role == RoleType::PREFILL ? CPRotateMethod::ALL_GATHER : CPRotateMethod::PREFILL_CP);
+        KVCacheConfig settings;
+        settings.kvcm_server_address = "unused-test-address";
+        settings.kvcm_model_sdk_config = R"([{"type":"pace"}])";
+        SpeculativeExecutionConfig speculation;
+        speculation.type = dspark ? SP_TYPE_DSPARK : SP_TYPE_NONE;
+        speculation.gen_num_per_cycle = dspark ? 5 : 0; // Three draft layers, five proposals.
+        const auto target = model(bounded, false);
+        const auto draft = model(bounded, true);
+        BackendEnvironment environment;
+        auto& cache = environment.cache_config;
+        cache = CacheConfigCreator::createConfig(target, parallel, settings, speculation, dspark ? &draft : nullptr);
+        cache.finalizeBlockNums(4, RuntimeConfig{});
+        EXPECT_EQ(cache.seq_size_per_block, 256u);
+        EXPECT_EQ(cache.layer_all_num(), dspark ? 8u : 5u);
+        EXPECT_EQ(cache.mtp_sub_configs.size(), dspark ? 1u : 0u);
+        if (dspark) EXPECT_EQ(cache.mtp_sub_configs.front()->layer_num, 3u);
+        const size_t shards = sharded ? cp : 1;
+        // Independent literal wire sizes: two kernel pages per logical FULL
+        // block; STATE has 2 (+5 rounded to 8) FP32 entries, CP-aligned; SWA
+        // has 128 (+5 rounded/aligned) rows with 16896-byte stride alignment.
+        const size_t state_bytes = (dspark ? 32768 : (shards == 4 ? 16384 : 8192)) / shards;
+        const size_t swa_bytes = (dspark ? 84480 : 67584) / shards;
+        const std::map<std::string, size_t> expected_bytes{
+            {"csa_kv", 36864}, {"hca_kv", 73728}, {"indexer_kv", 34816},
+            {"csa_state", state_bytes}, {"swa_kv", swa_bytes * (bounded ? 4 : (dspark ? 8 : 5))}};
+        kvcm::KVCMConfig::LocationSpecInfoMap expected_infos;
+        for (const auto& [tag, bytes] : expected_bytes) {
+            const bool full = tag != "swa_kv" && tag != "csa_state";
+            const auto& group = cache.topology().group(tag);
+            EXPECT_EQ(group.seqSizePerBlock(), full ? 256u : 256u * shards);
+            EXPECT_EQ(cache.blockSizeBytesForGroup(tag),
+                      bytes * (role == RoleType::DECODE && !full ? shards : 1));
+            for (int rank = 0; rank < cp; ++rank)
+                expected_infos[kvcm::genLocationSpecName(rank, (full ? "F" : "L") + tag, "DeepSeekV41")] = bytes;
+        }
+        if (bounded) EXPECT_FALSE(cache.topology().group("decoder_swa_kv").policy.enable_prefix_reuse);
+        initializeEnvironmentPools(environment, "v41_native_contract", 4);
+        Observation observed;
+        auto client = std::make_shared<MockClientWrapper>();
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Invoke(
+            [&](const auto& configs, auto, const auto&, const auto&) {
+                observed.identity = configs.at("")->instance_id();
+                const auto fields = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
+                    autil::legacy::ToJson(configs.at("")));
+                autil::legacy::FromJson(observed.infos, fields.at("location_spec_infos"));
+                autil::legacy::FromJson(observed.groups, fields.at("location_spec_groups"));
+                return true;
+            }));
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        RuntimeConfig runtime;
+        runtime.model_name = "DeepSeekV41";
+        std::shared_ptr<BroadcastManager> broadcast;
+        if (role == RoleType::PREFILL && cp > 1)
+            broadcast = std::make_shared<BroadcastManager>(std::vector<std::string>(cp, "unused-contract-peer"));
+        BackendHandle backend(std::make_unique<KVCMStorageBackend>(cache, settings, runtime, parallel,
+            speculation, std::move(broadcast), true, nullptr, client));
+        EXPECT_TRUE(initSingleRank(*backend.backend, environment));
+        EXPECT_FALSE(observed.identity.empty());
+        EXPECT_EQ(observed.infos, expected_infos);
+        backend.backend->shutdown();
+        return observed;
+    };
+    for (bool bounded : {false, true}) for (bool dspark : {false, true}) for (int cp : {1, 2, 4}) {
+        std::string replicated_identity;
+        for (bool sharded : {false, true}) {
+            SCOPED_TRACE(::testing::PrintToString(std::make_tuple(bounded, dspark, cp, sharded)));
+            const auto p = instance(RoleType::PREFILL, cp, sharded, bounded, dspark);
+            const auto d = instance(RoleType::DECODE, cp, sharded, bounded, dspark);
+            EXPECT_EQ(p.identity, d.identity);
+            EXPECT_EQ(p.infos, d.infos);
+            EXPECT_EQ(p.groups, d.groups);
+            if (!sharded) replicated_identity = p.identity;
+            else if (cp > 1) EXPECT_NE(p.identity, replicated_identity);
+            else EXPECT_EQ(p.identity, replicated_identity);
+        }
+    }
     });
 }
 
