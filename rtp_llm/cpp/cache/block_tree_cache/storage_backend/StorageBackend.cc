@@ -66,7 +66,6 @@ struct StorageTaskState {
                 }
             }
             pins.clear();
-            request.completion_budget_lease.reset();
             request.completion_admission.reset();
             completion_resources.reset();
         });

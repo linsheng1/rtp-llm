@@ -244,6 +244,14 @@ TEST(ModelRpcProtoTest, GroupedCacheFieldsPreserveLegacyNumbers) {
 }
 
 TEST(ModelRpcProtoTest, RemoteCacheMetadataPreservesGdrStatusWireFormat) {
+    const auto* statuses = RemoteTransferStatusPB_descriptor();
+    ASSERT_NE(statuses, nullptr);
+    EXPECT_TRUE(statuses->IsReservedNumber(4));
+    EXPECT_TRUE(statuses->IsReservedNumber(5));
+    EXPECT_TRUE(statuses->IsReservedName("REMOTE_TRANSFER_STATUS_COMPLETION_UNKNOWN"));
+    EXPECT_TRUE(statuses->IsReservedName("REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE"));
+    EXPECT_EQ(statuses->FindValueByNumber(4), nullptr);
+    EXPECT_EQ(statuses->FindValueByNumber(5), nullptr);
     RemoteOperationResponsePB response;
     // Existing GDR workers encode TIMEOUT as field 3 with enum value 3.
     ASSERT_TRUE(response.ParseFromString(std::string("\x18\x03", 2)));

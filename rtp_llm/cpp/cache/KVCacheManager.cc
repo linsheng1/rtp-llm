@@ -602,7 +602,7 @@ std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
 #endif
         throw;
     }
-    RTP_LLM_LOG_INFO("DSV41_NATIVE_ENDPOINT H=%zu state_copies=0 source=original_pages", end);
+    RTP_LLM_LOG_DEBUG("DSV41_NATIVE_ENDPOINT H=%zu state_copies=0 source=original_pages", end);
     return endpoint;
 }
 

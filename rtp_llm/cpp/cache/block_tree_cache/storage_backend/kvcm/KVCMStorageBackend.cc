@@ -58,8 +58,8 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
-constexpr std::array<const char*, 5> kQuarantineReasons{
-    "sdk_timeout", "rpc_timeout", "rpc_error", "invalid_response", "sdk_error"};
+constexpr std::array<const char*, 4> kQuarantineReasons{
+    "sdk_timeout", "rpc_timeout", "rpc_error", "invalid_response"};
 
 class BufferSafeTransferFailure: public std::runtime_error {
 public:
@@ -775,7 +775,7 @@ public:
                 source_result.outcome =
                     collect_bindings && validated_source_keys == remote_blocks ? "validated" : "unknown_or_invalid";
                 reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(source_result);
-                RTP_LLM_LOG_INFO("DTOP_GPU read_source_bound_regions=%zu source_counts=awaiting_allocator_adoption",
+                RTP_LLM_LOG_DEBUG("DTOP_GPU read_source_bound_regions=%zu source_counts=awaiting_allocator_adoption",
                                  bound_regions);
             }
         };
@@ -1075,18 +1075,18 @@ public:
             broadcast_timer.run();
             publishWrite(request, publication, write_session_id, responses, key_indices);
             if (request.decode_completion) {
-                RTP_LLM_LOG_INFO(
+                RTP_LLM_LOG_DEBUG(
                     "DTOP_GPU committed computed_end=%zu canonical_keys=%zu new_locations=%zu bytes=%zu dp_rank=%ld",
                     request.published_tokens,
                     request.keys->size(),
                     write_location.locations.size(),
                     transferred_bytes,
                     parallelism_config_.dp_rank);
-                RTP_LLM_LOG_INFO("DTOP_GPU commit actual_computed_end=%zu published=%zu tail=%zu CPU_snapshot_bytes=0",
+                RTP_LLM_LOG_DEBUG("DTOP_GPU commit actual_computed_end=%zu published=%zu tail=%zu CPU_snapshot_bytes=0",
                                  request.computed_tokens,
                                  request.published_tokens,
                                  request.computed_tokens - request.published_tokens);
-                RTP_LLM_LOG_INFO("DTOP_GPU write_duration_us=%ld computed_end=%zu bytes=%zu",
+                RTP_LLM_LOG_DEBUG("DTOP_GPU write_duration_us=%ld computed_end=%zu bytes=%zu",
                                  autil::TimeUtility::currentTimeInMicroSeconds() - write_started_us,
                                  request.published_tokens,
                                  transferred_bytes);
@@ -1183,7 +1183,7 @@ public:
             lease->recordOutcome("committed", /*acknowledged=*/true);
         if (request.decode_completion) {
             // Older Managers may acknowledge the write without persisting origin metadata.
-            RTP_LLM_LOG_INFO("DTOP_GPU source origin_requested=%d origin_persistence=unconfirmed",
+            RTP_LLM_LOG_DEBUG("DTOP_GPU source origin_requested=%d origin_persistence=unconfirmed",
                              source_metadata.has_value());
         }
     }
@@ -1540,9 +1540,6 @@ public:
                 break;
             case StorageQuarantineReason::INVALID_RESPONSE:
                 collector.reason = "invalid_response";
-                break;
-            case StorageQuarantineReason::SDK_ERROR:
-                collector.reason = "sdk_error";
                 break;
         }
         reportRemoteMetrics<RtpLLMRemoteCacheQuarantineMetrics>(collector);
@@ -2795,7 +2792,7 @@ bool KVCMStorageBackend::captureCompletedDecode(const BatchKVCacheResource& reso
             if (!task) return false;
             const bool admitted = write(std::move(task));
             if (admitted) resource.decodeCompletionSubmitted() = true; // Before fallible logging after admission.
-            RTP_LLM_LOG_INFO("DTOP_GPU EOS_queued=%d computed_end=%zu", static_cast<int>(admitted), end);
+            RTP_LLM_LOG_DEBUG("DTOP_GPU EOS_queued=%d computed_end=%zu", static_cast<int>(admitted), end);
             return admitted;
         });
     } catch (const std::exception& error) {

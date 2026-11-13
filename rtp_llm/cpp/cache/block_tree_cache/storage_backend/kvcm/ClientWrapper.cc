@@ -395,28 +395,13 @@ ClientWrapper::getWriteLocation(const std::string&              unique_id,
                                 const std::vector<std::string>& location_spec_group_names,
                                 int64_t                         write_timeout_seconds,
                                 int32_t                         min_replica_count) {
-    auto result = getWriteLocationWithDisposition(unique_id, trace_id, keys, tokens, location_spec_group_names,
-                                                   write_timeout_seconds, min_replica_count, nullptr);
-    if (!result.first) return {false, {}};  // Preserve the legacy bool/result contract.
-    return result;
-}
-
-std::pair<bool, kv_cache_manager::WriteLocation> ClientWrapper::getWriteLocationWithDisposition(
-    const std::string& unique_id, const std::string& trace_id, const std::vector<int64_t>& keys,
-    const std::vector<int64_t>& tokens, const std::vector<std::string>& location_spec_group_names,
-    int64_t write_timeout_seconds, int32_t min_replica_count, MetadataCallDisposition* disposition) {
-    MetadataCallDisposition local;
-    auto& status = disposition ? *disposition : local;
-    status = MetadataCallDisposition::NOT_SENT;
     CHECK_INIT2(unique_id);
-    status = MetadataCallDisposition::UNKNOWN;
     auto [ec, result] = client->StartWrite(trace_id, keys, tokens, location_spec_group_names,
                                           write_timeout_seconds, min_replica_count);
     if (!checkError(ec, client)) {
         RTP_LLM_LOG_WARNING("StartWrite fail, ec [%d]", ec);
-        return {false, std::move(result)};  // An error reply may still identify its allocation.
+        return {false, {}};
     }
-    status = MetadataCallDisposition::ACKNOWLEDGED;
     return {true, std::move(result)};
 }
 
@@ -496,23 +481,12 @@ bool ClientWrapper::finishWrite(const std::string&                 unique_id,
                                 const std::string&                 write_session_id,
                                 const kv_cache_manager::BlockMask& block_mask,
                                 const kv_cache_manager::Locations& locations) {
-    return finishWriteWithDisposition(unique_id, trace_id, write_session_id, block_mask, locations, nullptr);
-}
-
-bool ClientWrapper::finishWriteWithDisposition(const std::string& unique_id, const std::string& trace_id,
-    const std::string& write_session_id, const kv_cache_manager::BlockMask& block_mask,
-    const kv_cache_manager::Locations& locations, MetadataCallDisposition* disposition) {
-    MetadataCallDisposition local;
-    auto& status = disposition ? *disposition : local;
-    status = MetadataCallDisposition::NOT_SENT;
     CHECK_INIT1(unique_id);
-    status = MetadataCallDisposition::UNKNOWN;
     auto ec = client->FinishWrite(trace_id, write_session_id, block_mask, locations);
     if (!checkError(ec, client)) {
         RTP_LLM_LOG_WARNING("FinishWrite fail, ec [%d]", ec);
         return false;
     }
-    status = MetadataCallDisposition::ACKNOWLEDGED;
     return true;
 }
 
@@ -523,8 +497,7 @@ bool ClientWrapper::abortWrite(const std::string& unique_id, const std::string& 
     }
     // Finish(0) may already have executed when its ACK is lost. Never replay it.
     try {
-        return finishWriteWithDisposition(unique_id, trace_id, write_session_id,
-                                           kv_cache_manager::BlockMaskOffset{0}, {}, nullptr);
+        return finishWrite(unique_id, trace_id, write_session_id, kv_cache_manager::BlockMaskOffset{0}, {});
     } catch (...) { return false; }
 }
 
@@ -810,7 +783,7 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
         }
         const auto us =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
-        RTP_LLM_LOG_INFO("KV_SDK_CHUNK op=read pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
+        RTP_LLM_LOG_DEBUG("KV_SDK_CHUNK op=read pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
                          static_cast<int>(getpid()),
                          tag.c_str(),
                          uris.size(),
@@ -831,7 +804,7 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
             io_bytes += iov.size;
         }
     }
-    RTP_LLM_LOG_INFO("KV_IO op=read pid=%d tag=%s blocks=%zu bytes=%zu duration_us=%ld ec=%d",
+    RTP_LLM_LOG_DEBUG("KV_IO op=read pid=%d tag=%s blocks=%zu bytes=%zu duration_us=%ld ec=%d",
                      static_cast<int>(getpid()),
                      tag.c_str(),
                      uri_str_vec.size(),
@@ -942,7 +915,7 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
         }
         const auto us =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
-        RTP_LLM_LOG_INFO("KV_SDK_CHUNK op=write pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
+        RTP_LLM_LOG_DEBUG("KV_SDK_CHUNK op=write pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
                          static_cast<int>(getpid()),
                          tag.c_str(),
                          uris.size(),
@@ -971,7 +944,7 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
             io_bytes += iov.size;
         }
     }
-    RTP_LLM_LOG_INFO("KV_IO op=write pid=%d tag=%s blocks=%zu bytes=%zu duration_us=%ld ec=%d",
+    RTP_LLM_LOG_DEBUG("KV_IO op=write pid=%d tag=%s blocks=%zu bytes=%zu duration_us=%ld ec=%d",
                      static_cast<int>(getpid()),
                      tag.c_str(),
                      uri_str_vec.size(),

@@ -267,7 +267,7 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
         if (endpoint) return {}; // Never relabel one endpoint's STATE/SWA as a different H.
     }
     if (end == 0) {
-        RTP_LLM_LOG_INFO("DTOP_GPU no_complete_checkpoint computed=%zu", computed_end);
+        RTP_LLM_LOG_DEBUG("DTOP_GPU no_complete_checkpoint computed=%zu", computed_end);
         return request;
     }
     if (const auto& handoff = lifecycle.prefillComputedEnd(); handoff && *handoff >= 0
@@ -342,7 +342,7 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
     // task cannot outlive source ownership until prepareWrite has pinned it.
     setCudaDevice();
     check_cuda_value(cudaDeviceSynchronize());
-    RTP_LLM_LOG_INFO(
+    RTP_LLM_LOG_DEBUG(
         "DTOP_GPU retained_plan computed=%zu published=%zu tail=%zu pages=%zu bytes=%zu CPU_snapshot_bytes=0",
         computed_end,
         end,
