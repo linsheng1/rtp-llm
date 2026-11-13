@@ -44,6 +44,7 @@ std::shared_ptr<const CacheTopology> warmupCacheTopology() {
 }  // namespace
 
 void StreamCacheResource::init(int batch_size) {
+    publication_key_tokens_ = 0;
     batch_kv_cache_resource_->resetBatchSize(batch_size);
     // cache manager is null when warmup
     const auto topology = resource_context_.cache_manager ?
@@ -100,16 +101,35 @@ void StreamCacheResource::releaseResource() {
     resource_released_ = true;
 }
 
+bool StreamCacheResource::publicationKeysFresh() const {
+    const auto& resource = *batch_kv_cache_resource_;
+    const size_t tokens = publication_key_tokens_;
+    const size_t block = resource_context_.cache_manager->cacheConfig().seq_size_per_block;
+    // Multi-row/beam selection can replace same-shaped keys. Keep its original
+    // refresh behavior even if the current resource has temporarily one row.
+    return tokens && block && stream_->maxBatchSize() == 1 && resource.batchSize() == 1
+           && resource.cacheKeysInitialized()
+           && static_cast<size_t>(stream_->completeTokenIdsPtr()->seqLength()) == tokens
+           && resource.cacheKeys(0).size() == tokens / block + (tokens % block != 0)
+           && resource.lastBlockAligned() == (tokens % block == 0);
+}
+
 void StreamCacheResource::publishCompletedDecode(size_t computed_end) {
     if (!remoteCacheDecodePublicationEnabled() || resource_context_.role_type != RoleType::DECODE
         || !resource_context_.cache_manager || !reuseCache() || stream_->hasErrorWithoutLock() || !computed_end
         || !stream_->hasEventWithoutLock(StreamEvents::GenerateDone)) return;
+    const auto& resource = *batch_kv_cache_resource_;
+    if (!resource.decodeCompletionLifecycle().mayAttempt(resource.decodeCompletionSubmitted())
+        && publicationKeysFresh()) return;
     const auto& config = resource_context_.cache_manager->cacheConfig();
     try {
-    // Use final retained tokens; old per-round rolling keys can lag an EOS packet.
-    initCacheKeys(batch_kv_cache_resource_, stream_->completeTokenIdsPtr(),
-                  config.seq_size_per_block, config.cache_key_hash_seed);
-    (void)resource_context_.cache_manager->captureCompletedDecode(*batch_kv_cache_resource_, computed_end, true);
+        // Release-time local insertion still needs refreshed final keys after
+        // a token-length or partial-key shape change, even if admission is over.
+        initCacheKeys(batch_kv_cache_resource_, stream_->completeTokenIdsPtr(),
+                      config.seq_size_per_block, config.cache_key_hash_seed);
+        publication_key_tokens_ = resource.batchSize() == 1 && stream_->maxBatchSize() == 1 ?
+                                      stream_->completeTokenIdsPtr()->seqLength() : 0;
+        (void)resource_context_.cache_manager->captureCompletedDecode(resource, computed_end, true);
     } catch (const std::exception& error) {
         RTP_LLM_LOG_WARNING("optional D publication failed before submission: %s", error.what());
     }

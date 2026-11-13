@@ -760,6 +760,19 @@ TEST(KVCMLocalTest, DsparkAdmitsNativeCacheTagsAndRejectsIncompleteDraftConfigur
             BackendHandle backend(std::make_unique<KVCMStorageBackend>(target, config, runtime, parallel,
                 speculation, nullptr, true, nullptr, client));
             EXPECT_EQ(initSingleRank(*backend.backend, environment), invalid == 0);
+            if (invalid == 0 && role == RoleType::DECODE) {
+                BatchKVCacheResource resource;
+                resource.resetBatchSize(1);
+                resource.initGroups(target.topologyPtr());
+                EXPECT_FALSE(resource.decode_endpoint);
+                EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, _)).Times(0);
+                EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(0);
+                for (size_t attempt = 1; attempt <= 3; ++attempt) {
+                    EXPECT_TRUE(backend.backend->captureCompletedDecode(resource, 8));
+                    EXPECT_EQ(resource.decodeCompletionLifecycle().admissionAttempts(), std::min(attempt, size_t{2}));
+                    EXPECT_FALSE(resource.decodeCompletionSubmitted());
+                }
+            }
         }
     }
     });

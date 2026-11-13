@@ -38,6 +38,12 @@ public:
             throw;
         }
     }
+    // Stream-owned query only. tryAdmit remains authoritative and consumes
+    // attempts; this never reserves an attempt or changes the EOS deadline.
+    bool mayAttempt(bool submitted, Clock::time_point now = Clock::now()) const {
+        return !submitted && !preparing_ && admission_attempts_ < max_admission_attempts_
+               && (!admission_deadline_ || now < *admission_deadline_);
+    }
     size_t admissionAttempts() const {
         return admission_attempts_;
     }

@@ -58,6 +58,31 @@ TEST(DecodePublicationLifecycleTest, AcceptedResourceRemainsSubmittedIfPostAdmis
     EXPECT_EQ(state.admissionAttempts(), 1u);
 }
 
+TEST(DecodePublicationLifecycleTest, MayAttemptQueryNeverSpendsOrRestartsAdmission) {
+    DecodePublicationLifecycle state;
+    bool submitted = false;
+    using A = DecodePublicationLifecycle::Admission;
+    const auto now = DecodePublicationLifecycle::Clock::now();
+    EXPECT_TRUE(state.mayAttempt(submitted, now));
+    EXPECT_EQ(state.admissionAttempts(), 0u);
+    EXPECT_FALSE(state.mayAttempt(true, now));
+    EXPECT_EQ(state.tryAdmit(submitted, [&] {
+        EXPECT_FALSE(state.mayAttempt(submitted, now)); // Reentrant preparation.
+        return false;
+    }, now), A::DECLINED);
+    EXPECT_TRUE(state.mayAttempt(submitted, now));
+    EXPECT_EQ(state.tryAdmit(submitted, [] { return false; }, now), A::DECLINED);
+    EXPECT_FALSE(state.mayAttempt(submitted, now));
+    EXPECT_EQ(state.admissionAttempts(), 2u);
+    state.reset();
+    state.recordEos(now);
+    const auto deadline = state.admissionDeadline(std::chrono::milliseconds(10), now);
+    EXPECT_TRUE(state.mayAttempt(submitted, now));
+    EXPECT_FALSE(state.mayAttempt(submitted, deadline));
+    EXPECT_EQ(state.admissionAttempts(), 0u);
+    EXPECT_EQ(state.admissionDeadline(std::chrono::milliseconds(99), deadline), deadline);
+}
+
 TEST(DecodePublicationLifecycleTest, ReentryExceptionAndDeadlineKeepOriginalAdmissionBudget) {
     DecodePublicationLifecycle state;
     bool submitted = false;

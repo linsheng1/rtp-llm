@@ -282,7 +282,8 @@ protected:
                                         const std::vector<int>& input_tokens,
                                         bool                    reuse_cache,
                                         RoleType                role_type,
-                                        const KVCacheConfig&    kv_cache_config = {}) {
+                                        const KVCacheConfig&    kv_cache_config = {},
+                                        int                     return_sequences = 2) {
         PDSepConfig pd_sep_config;
         pd_sep_config.role_type = role_type;
         cache_manager_          = std::make_shared<KVCacheManager>(cache_config,
@@ -306,7 +307,7 @@ protected:
 
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
-        generate_config->num_return_sequences = 2;
+        generate_config->num_return_sequences = return_sequences;
         generate_input->input_ids =
             torch::tensor(std::vector<int32_t>(input_tokens.begin(), input_tokens.end()), torch::kInt32);
         generate_input->generate_config = generate_config;
@@ -325,7 +326,9 @@ protected:
                                   RoleType                  role_type         = RoleType::PDFUSION,
                                   bool                      seed_resident     = false,
                                   std::chrono::milliseconds timeout           = std::chrono::seconds(10),
-                                  int                       min_replica_count = 0) {
+                                  int                       min_replica_count = 0,
+                                  int                       return_sequences  = 2,
+                                  const std::vector<int>&    input_tokens      = {1, 2, 3, 4, 5, 6}) {
         KVCacheConfig kv_cache_config;
         kv_cache_config.enable_remote_cache    = true;
         kv_cache_config.kvcm_min_replica_count = min_replica_count;
@@ -336,7 +339,7 @@ protected:
         // replaces its BlockTreeCache with the controllable fake backend.
         manager_kv_cache_config.enable_remote_cache = false;
         prepareResourceWithCacheConfig(
-            init_config(), {1, 2, 3, 4, 5, 6}, /*reuse_cache=*/true, role_type, manager_kv_cache_config);
+            init_config(), input_tokens, /*reuse_cache=*/true, role_type, manager_kv_cache_config, return_sequences);
 
         auto backend = std::make_shared<StreamReadStorageBackend>(timeout);
         if (block_matches) {
@@ -1234,6 +1237,88 @@ TEST_F(StreamCacheResourceTest, RequestFinishFiltersRemoteReuseOnlyForSingleRepl
             EXPECT_TRUE(resource.isResourceReleased());
         }
     }
+    }, [&] { TearDown(); stream_.reset(); cache_manager_.reset(); });
+}
+
+TEST_F(StreamCacheResourceTest, CompletedPublicationRefreshesChangedKeysBeforeLocalInsert) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        auto backend = prepareStorageBackendResource(false, false, RoleType::DECODE, false,
+                                                       std::chrono::seconds(10), 0, 1, {1, 2, 3, 4, 5});
+        auto& resource = stream_->streamCacheResource();
+        ASSERT_TRUE(resource.initKVBlock().ok());
+        ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
+        ASSERT_EQ(stream_->seqLength(), 5); // Final retained history has a partial key.
+        stream_->reportEventWithoutLock(StreamEvents::GenerateDone);
+        EXPECT_FALSE(resource.publicationKeysFresh());
+        resource.publishCompletedDecode(4);
+        EXPECT_EQ(resource.publication_key_tokens_, 5u);
+        ASSERT_TRUE(resource.publicationKeysFresh());
+        const auto partial_keys = resource.cacheKeys(0);
+        ASSERT_EQ(partial_keys.size(), 3u);
+        ASSERT_FALSE(resource.batch_kv_cache_resource_->lastBlockAligned());
+        resource.batch_kv_cache_resource_->decodeCompletionSubmitted() = true;
+        resource.publishCompletedDecode(4);
+        EXPECT_EQ(resource.cacheKeys(0), partial_keys); // Same final history, same insert keys.
+
+        // A malloc/update can drop the partial key without changing token length
+        // or initialized=true. Length-only caching would wrongly skip refresh.
+        updateCacheKeys(resource.batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), 2,
+                        cache_manager_->cacheConfig().cache_key_hash_seed);
+        ASSERT_TRUE(resource.batch_kv_cache_resource_->cacheKeysInitialized());
+        ASSERT_EQ(resource.cacheKeys(0).size(), 2u);
+        EXPECT_FALSE(resource.publicationKeysFresh());
+        resource.publishCompletedDecode(4);
+        EXPECT_EQ(resource.cacheKeys(0), partial_keys);
+        EXPECT_TRUE(resource.publicationKeysFresh());
+
+        // The public forced-update path can append after GenerateDone. It must
+        // refresh keys despite permanent publication admission, not publish twice.
+        stream_->vocab_size_ = 1000;
+        stream_->generate_status_->status = StreamState::FINISHED;
+        stream_->fillSubGenerateStatus(StreamState::FINISHED);
+        StreamUpdateInfo update{torch::tensor(std::vector<int32_t>{7}, torch::kInt32).reshape({1, 1}), 1};
+        update.force_update_info = true;
+        stream_->update(update);
+        ASSERT_EQ(stream_->seqLength(), 6);
+        EXPECT_TRUE(resource.batch_kv_cache_resource_->decodeCompletionSubmitted());
+        EXPECT_EQ(resource.publication_key_tokens_, 6u);
+        ASSERT_TRUE(resource.publicationKeysFresh());
+        auto expected = std::make_shared<BatchKVCacheResource>();
+        expected->resetBatchSize(1);
+        initCacheKeys(expected, stream_->completeTokenIdsPtr(), 2, cache_manager_->cacheConfig().cache_key_hash_seed);
+        EXPECT_EQ(resource.cacheKeys(0), expected->cacheKeys());
+        stream_->releaseResource();
+        backend->shutdown();
+        EXPECT_EQ(backend->writtenKeyValues(), expected->cacheKeys());
+    }, [&] { TearDown(); stream_.reset(); cache_manager_.reset(); });
+}
+
+TEST_F(StreamCacheResourceTest, PublicationFreshnessRequiresSingleRowAndExistingAdmissionBudget) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        prepareResourceWithCacheConfig(init_config(), {1, 2, 3, 4, 5}, true, RoleType::DECODE, {}, 1);
+        auto& resource = stream_->streamCacheResource();
+        stream_->reportEventWithoutLock(StreamEvents::GenerateDone);
+        const auto& lifecycle = resource.batch_kv_cache_resource_->decodeCompletionLifecycle();
+        bool& submitted = resource.batch_kv_cache_resource_->decodeCompletionSubmitted();
+        EXPECT_EQ(lifecycle.tryAdmit(submitted, [] { return false; }), DecodePublicationLifecycle::Admission::DECLINED);
+        EXPECT_EQ(lifecycle.tryAdmit(submitted, [] { return false; }), DecodePublicationLifecycle::Admission::DECLINED);
+        resource.publishCompletedDecode(4); // No prior prepared keys: still refresh for local insertion.
+        ASSERT_TRUE(resource.publicationKeysFresh());
+        EXPECT_FALSE(lifecycle.mayAttempt(submitted));
+        EXPECT_EQ(lifecycle.admissionAttempts(), 2u);
+        resource.publishCompletedDecode(4);
+        EXPECT_EQ(lifecycle.admissionAttempts(), 2u);
+        resource.batch_kv_cache_resource_->clearCacheKeys();
+        EXPECT_FALSE(resource.publicationKeysFresh());
+        resource.publishCompletedDecode(4);
+        EXPECT_TRUE(resource.publicationKeysFresh());
+        // Even a temporary one-row resource may have come from multi-row history.
+        stream_->generateConfig()->num_return_sequences = 2;
+        EXPECT_FALSE(resource.publicationKeysFresh());
+        resource.init(1);
+        EXPECT_EQ(resource.publication_key_tokens_, 0u);
     }, [&] { TearDown(); stream_.reset(); cache_manager_.reset(); });
 }
 
