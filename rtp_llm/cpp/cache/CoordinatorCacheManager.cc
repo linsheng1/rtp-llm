@@ -963,10 +963,17 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
             continue;
         }
         CacheKeysType insert_keys = cp_active ? cpCanonicalCacheKeys(cp_mapper, full_keys) : full_keys;
-        const size_t endpoint_key_unit = endpoint ?
+        const bool cap_computed_end = native_decode && !endpoint && insert_info.complete_token_ids;
+        const size_t endpoint_key_unit = (endpoint || cap_computed_end) ?
             (cp_active ? cp_mapper->reuseBlockTokens(config_) : config_.seq_size_per_block) : 0;
         if (endpoint) {
             insert_keys.resize(std::min(insert_keys.size(), endpoint->end / endpoint_key_unit));
+        } else if (cap_computed_end) {
+            // Final publication refreshes keys after sampling. The last token
+            // has no KV yet, even if the refreshed key is block-aligned.
+            const auto seq_len = insert_info.complete_token_ids->seqLength();
+            const size_t computed_end = seq_len > 0 ? static_cast<size_t>(seq_len - 1) : 0;
+            insert_keys.resize(std::min(insert_keys.size(), computed_end / endpoint_key_unit));
         }
         if (insert_keys.empty()) {
             continue;

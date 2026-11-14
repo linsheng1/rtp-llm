@@ -283,6 +283,7 @@ cc_test(
     deps = test_deps + [
         ":block_pool_test_helper",
         ":block_tree_cache_allocator_test_helper",
+        "//rtp_llm/cpp/utils:decode_publication_test_support",
         "//rtp_llm/cpp/cache/block_tree_cache",
         "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
     ],
