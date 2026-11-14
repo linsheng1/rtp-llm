@@ -459,7 +459,6 @@ private:
                 gpu_context_->memory, static_cast<unsigned char*>(gpu_context_->memory.get()) + offset + offsets[i]);
             operation->buffers[i].iovs.push_back({staging_type_, operation->bytes[i].get(), sizes[i], false});
         }
-        const auto& ranges = write ? operation->write_ranges : operation->read_ranges;
         auto& calls = write ? operation->write_calls : operation->calls;
         calls.reserve(ranges.size());
         for (const auto& range : ranges) {
