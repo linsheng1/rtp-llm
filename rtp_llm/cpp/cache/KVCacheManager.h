@@ -66,9 +66,11 @@ public:
     bool captureCompletedDecode(const BatchKVCacheResource& resource, size_t computed_end, bool finished = true) const;
 
     size_t decodePublicationUnit() const;
+    // writer_already_fenced is only for later captures in the same caller-thread
+    // round, with no intervening writer submission and request pages still held.
     std::shared_ptr<const DecodeEndpoint> retainDecodeEndpoint(const torch::Tensor& physical_ids,
         const std::vector<std::string>& tags, size_t row, size_t end,
-        const std::shared_ptr<const DecodeEndpoint>& previous = {}) const;
+        const std::shared_ptr<const DecodeEndpoint>& previous = {}, bool writer_already_fenced = false) const;
 
     // Decode-side P/D admission allocates destination blocks before cache handoff.  When pools are
     // temporarily full, waiters use this generation instead of polling malloc in a tight loop.

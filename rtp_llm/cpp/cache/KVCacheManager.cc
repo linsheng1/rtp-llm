@@ -539,7 +539,7 @@ size_t KVCacheManager::decodePublicationUnit() const {
 
 std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
     const torch::Tensor& physical_ids, const std::vector<std::string>& tags, size_t row, size_t end,
-    const std::shared_ptr<const DecodeEndpoint>& previous) const {
+    const std::shared_ptr<const DecodeEndpoint>& previous, bool writer_already_fenced) const {
     // Decode owns the native pages locally; the existing D->P projection
     // performs the actual target-CP slicing at publication time.
     if (decode_capture_stopped_.load() || !isAllocatorOwner() || !coordinator_manager_ || !end) return {};
@@ -596,7 +596,8 @@ std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
 #if USING_CUDA
         // Pin prevents recycling, not an unfinished writer. Fence the actual
         // writer stream before exposing this native endpoint; no payload copy.
-        check_cuda_value(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream().stream()));
+        if (!writer_already_fenced)
+            check_cuda_value(cudaStreamSynchronize(at::cuda::getCurrentCUDAStream().stream()));
 #endif
     } catch (...) {
 #if USING_CUDA

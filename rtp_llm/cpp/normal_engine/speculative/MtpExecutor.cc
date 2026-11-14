@@ -89,6 +89,10 @@ void MtpExecutor::retainDecodePublicationPages(const StreamGroups& streams, cons
     auto ids = target.kv_cache_block_id.to(torch::kCPU).to(torch::kInt32).contiguous();
     if (is_dspark_ && (!draft.last_hidden_states.defined() || draft.last_hidden_states.numel() == 0)) return;
     size_t row = 0;
+    // All target/draft writers precede this loop on the caller's stream.
+    // Between captures we only read CPU metadata and hold native request pages;
+    // the next round and its bookkeeping dispatch cannot start in this loop.
+    bool writer_ready = false;
     for (const auto& stream : streams.allStreams()) {
         std::vector<std::shared_ptr<const DecodeEndpoint>> endpoints;
         try {
@@ -108,8 +112,10 @@ void MtpExecutor::retainDecodePublicationPages(const StreamGroups& streams, cons
             // EOS/stop can subsequently trim it to an earlier candidate.
             auto previous = stream->latestDecodePublicationEndpoint();
             for (size_t h = (static_cast<size_t>(prefix) / unit + 1) * unit; h <= end; h += unit) {
-                auto endpoint = cache_manager_->retainDecodeEndpoint(ids, target.kv_cache_group_tags, row, h, previous);
+                auto endpoint = cache_manager_->retainDecodeEndpoint(
+                    ids, target.kv_cache_group_tags, row, h, previous, writer_ready);
                 if (endpoint) {
+                    writer_ready = true; // Only a successful capture proves the first fence completed.
                     previous = endpoint;
                     endpoints.push_back(std::move(endpoint));
                 }
