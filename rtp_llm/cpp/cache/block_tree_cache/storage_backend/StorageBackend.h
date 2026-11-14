@@ -19,7 +19,6 @@
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
-#include "rtp_llm/cpp/cache/DecodeReuseSources.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageCompletionAdmission.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
@@ -44,7 +43,6 @@ struct StorageBlockHandle {
 
 struct StorageBackendMatchMeta {
     virtual ~StorageBackendMatchMeta() = default;
-    DecodeReuseSourcesPtr decode_sources;
 };
 
 enum class StorageQuarantineReason {

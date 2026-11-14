@@ -45,7 +45,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PublicationSettlement.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/GroupPolicy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DecodePublicationAccounting.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DtopOriginMetadata.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/WorkerPayloadProof.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
@@ -227,18 +226,6 @@ public:
                 other_group_tags.push_back(group.tag);
             }
             group_block_size_bytes.emplace(group.tag, publicationWireBytes(group.tag));
-        }
-        if (decode_publication_enabled_ && parallelism_config_.role_type == RoleType::PREFILL
-            && parallelism_config_.tp_rank == 0) {
-            for (const auto& group : groups) {
-                if (!group.policy.enable_prefix_reuse)
-                    continue;
-                const auto& pool = pool_resolver(group.tag);
-                // Enabling is idempotent, including shared packed pools. Avoid
-                // a separate allocating dedup table for optional provenance.
-                if (pool && !pool->enableDecodeOriginTracking())
-                    RTP_LLM_LOG_WARNING("KVCM physical source tracking unavailable; cache data remains usable");
-            }
         }
         if (other_group_tags.empty()) {
             group_policy_ = std::make_unique<kvcm::FullLayerGroupPolicy>(
@@ -621,49 +608,8 @@ public:
         const auto&                    spec_info = group_policy_->spec_info_map();
         const std::string              trace_id  = nextTraceId("read", read_trace_sequence_);
         initializeRequests(requests, REMOTE_OPERATION_READ, trace_id);
-        struct OriginBinding {
-            size_t                        key;
-            DeviceBlockPoolPtr            pool;
-            BlockIdxType                  block;
-            uint64_t                      incarnation;
-            std::string                   tag;
-            PhysicalDecodeOrigins::Origin origin;
-        };
-        std::vector<OriginBinding> origin_bindings;
-        const bool track_origins    = decode_publication_enabled_ && parallelism_config_.role_type == RoleType::PREFILL;
-        bool       collect_bindings = track_origins;
-        size_t     validated_source_keys = 0;
-        if (collect_bindings) {
-            try {
-                size_t count = 0;
-                for (const auto& row : locations_view) {
-                    for (const auto& spec : row) {
-                        const auto info = spec_info.find(spec.spec_name);
-                        if (info != spec_info.end()) {
-                            ++count;
-                        }
-                    }
-                }
-                origin_bindings.reserve(count);
-            } catch (const std::bad_alloc&) {
-                collect_bindings = false;
-            }
-        }
         for (size_t location_idx = 0; location_idx < locations_view.size(); ++location_idx) {
             const size_t key_idx = request.local_matched_blocks_num + location_idx;
-            PhysicalDecodeOrigins::Origin origin;
-            if (collect_bindings) {
-                try {
-                    auto source = kvcm::readDtopOriginMetadata(
-                        locations_view[location_idx], key_idx, topology_->groups().front().cacheKeyTokenStride());
-                    if (source) {
-                        origin = std::make_shared<const DecodeCacheOrigin>(std::move(*source));
-                        ++validated_source_keys;
-                    }
-                } catch (const std::bad_alloc&) {
-                    // Unknown provenance never rejects an otherwise valid load.
-                }
-            }
             for (const auto& location_spec : locations_view[location_idx]) {
                 const auto        info = spec_info.find(location_spec.spec_name);
                 const std::string spec_name(location_spec.spec_name);
@@ -680,22 +626,6 @@ public:
                                         group.tag.c_str());
                 remote->add_group_tags(group.tag);
                 remote->add_block_ids(handle->block);
-                if (track_origins && info->second.tp_rank == parallelism_config_.tp_rank) {
-                    const auto& pool        = pools_by_tag_.at(group.tag);
-                    // A destination overwrite must not retain its previous
-                    // source, including a legacy or failed remote read. This
-                    // does not invalidate siblings sharing the physical page.
-                    const auto incarnation = pool->clearDecodeOrigin(handle->block, group.tag);
-                    if (origin && incarnation != 0) {
-                        try {
-                            origin_bindings.push_back({key_idx, pool, handle->block, incarnation, group.tag, origin});
-                        } catch (const std::bad_alloc&) {
-                            origin_bindings.clear();
-                            collect_bindings = false;
-                            origin.reset();
-                        }
-                    }
-                }
             }
         }
         // Rank 0 admits the whole fanout. Workers must finish an admitted
@@ -709,82 +639,10 @@ public:
             read_outcome = "disabled";
             throw StorageOperationBufferSafeFailure("remote cache disabled by KVCM before read submission");
         }
-        // Both completion paths publish the same validated origin bindings.
-        // The business completion retains destination pins until this returns.
-        auto bind_origins = [this, meta, origin_bindings = std::move(origin_bindings), track_origins,
-                             collect_bindings, validated_source_keys, remote_blocks,
-                             handle_count = request.handles.size()] {
-            // StorageBackend's task still owns the destination pins here. Publish
-            // provenance only after every required rank has completed its actual
-            // GPU read. A stale bind can never clear a newer allocation's source.
-            size_t                              bound_regions = 0;
-            std::shared_ptr<DecodeReuseSources> restored_sources;
-            if (track_origins && collect_bindings) {
-                try {
-                    restored_sources = std::make_shared<DecodeReuseSources>();
-                    restored_sources->reserve(remote_blocks);
-                } catch (const std::bad_alloc&) {
-                    restored_sources.reset();
-                }
-            }
-            for (size_t begin = 0; begin < origin_bindings.size();) {
-                size_t end = begin + 1;
-                while (end < origin_bindings.size() && origin_bindings[end].key == origin_bindings[begin].key)
-                    ++end;
-                bool bound = true;
-                for (size_t i = begin; i < end; ++i) {
-                    const auto& value = origin_bindings[i];
-                    bound = value.pool->bindDecodeOrigin(value.block, value.incarnation, value.tag, value.origin) && bound;
-                }
-                if (!bound) {
-                    for (size_t i = begin; i < end; ++i) {
-                        const auto& value = origin_bindings[i];
-                        value.pool->bindDecodeOrigin(value.block, value.incarnation, value.tag, nullptr);
-                    }
-                } else {
-                    bound_regions += end - begin;
-                    if (restored_sources)
-                        restored_sources->push_back({origin_bindings[begin].origin, Tier::REMOTE});
-                }
-                begin = end;
-            }
-            meta->decode_sources =
-                restored_sources && !restored_sources->empty() ? std::move(restored_sources) : DecodeReuseSourcesPtr{};
-            if (meta->decode_sources) {
-                try {
-                    const auto unit = topology_->groups().front().cacheKeyTokenStride();
-                    const auto adopted_end =
-                        unit != 0
-                                && handle_count
-                                       <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()) / unit ?
-                            static_cast<int64_t>(handle_count * unit) :
-                            int64_t{0};
-                    const auto counts = countDecodeReuse(*meta->decode_sources, adopted_end);
-                    if (counts.total() > 0) {
-                        RtpLLMDecodeCacheTokenMetricsCollector restored;
-                        restored.stage          = "restored";
-                        restored.logical_tokens = counts.total();
-                        reportRemoteMetrics<RtpLLMDecodeCacheTokenMetrics>(restored);
-                    }
-                } catch (const std::bad_alloc&) {
-                    // Attribution does not change the completed payload result.
-                }
-            }
-            if (track_origins) {
-                RtpLLMRemoteCacheOutcomeMetricsCollector source_result;
-                source_result.stage = "read_source";
-                source_result.outcome =
-                    collect_bindings && validated_source_keys == remote_blocks ? "validated" : "unknown_or_invalid";
-                reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(source_result);
-                RTP_LLM_LOG_DEBUG("DTOP_GPU read_source_bound_regions=%zu source_counts=awaiting_allocator_adoption",
-                                 bound_regions);
-            }
-        };
         if (done) {
             auto prepare_completion = [&](auto collect) {
                 Task finish = [this,
                                collect = std::move(collect),
-                               bind_origins = std::move(bind_origins),
                                deadline = request.transfer_task->deadline(),
                                collector,
                                start,
@@ -801,7 +659,6 @@ public:
                         if (Clock::now() >= deadline) {
                             throw StorageOperationBufferSafeFailure("KVCM task deadline exceeded: after read");
                         }
-                        bind_origins();
                         collector.remote_read_token_num = static_cast<int64_t>(tokens);
                         collector.remote_read_fail_qps  = false;
                     } catch (const StorageOperationBufferSafeFailure&) {
@@ -821,7 +678,6 @@ public:
         (void)dispatchRequests(requests, request, source_may_be_touched, sdk_failed);
         source_may_be_touched = false;
         (void)remainingTimeout(request, "after read");
-        bind_origins();
         // A canonical CP key already covers every shard. Do not multiply this
         // logical token count by the number of TP ranks or payload groups.
         collector.remote_read_token_num =
@@ -1130,27 +986,7 @@ public:
                 }
             }
         }
-        std::optional<kvcm::DtopOriginMetadata> source_metadata;
-        if (request.decode_completion && request.prefill_computed_tokens) {
-            try {
-                source_metadata = kvcm::makeDtopOriginMetadata(write_location.locations,
-                                                               write_session_id,
-                                                               key_indices,
-                                                               static_cast<size_t>(cache_config_.seq_size_per_block)
-                                                                   * target_physical_shards_,
-                                                               request.published_tokens,
-                                                               request.computed_tokens,
-                                                               *request.prefill_computed_tokens);
-            } catch (const std::bad_alloc&) {
-                // Source attribution is optional metadata. A completed GPU
-                // payload must not fail because its source could not be stored.
-            }
-            if (!source_metadata)
-                RTP_LLM_LOG_WARNING("DTOP source metadata unavailable; retaining ordinary payload publication");
-        }
-        const auto& actual_locations = source_metadata ? source_metadata->locations :
-                                       has_actual_uri  ? write_location.locations :
-                                                         empty_locations;
+        const auto& actual_locations = has_actual_uri ? write_location.locations : empty_locations;
         (void)remainingTimeout(request, "before FinishWrite");
         {
             const auto                             stage_start = Clock::now();
@@ -1165,11 +1001,6 @@ public:
         if (const auto lease =
                 std::dynamic_pointer_cast<kvcm::DecodePublicationAccounting::Lease>(request.completion_admission))
             lease->recordOutcome("committed", /*acknowledged=*/true);
-        if (request.decode_completion) {
-            // Older Managers may acknowledge the write without persisting origin metadata.
-            RTP_LLM_LOG_DEBUG("DTOP_GPU source origin_requested=%d origin_persistence=unconfirmed",
-                             source_metadata.has_value());
-        }
     }
 
     bool finishSession(WritePublication& write,

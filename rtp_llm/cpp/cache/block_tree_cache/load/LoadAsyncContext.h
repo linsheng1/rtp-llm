@@ -102,11 +102,6 @@ public:
     bool deadlineExceeded() const {
         return backend_deadline_state_.load() == State::FAILED;
     }
-    void                               setLocalDecodeSources(DecodeReuseSourcesPtr sources,
-                                                             DecodeReuseSourcesPtr device_sources      = {},
-                                                             DecodeReuseSourcesPtr device_host_sources = {});
-    // Local-only sources are validated against the actual ready prefix's group windows.
-    DecodeReuseSourcesPtr decodeSources(bool local_only = false) const;
     bool                  settle(bool success, bool host_success = false);
     bool                  onTaskFail();
     void                  waitDone() override;
@@ -121,7 +116,7 @@ private:
     void markAborted();
     void rebuildMatchedBlocksByTier();
     void onBackendMatch(size_t matched_blocks_num, std::shared_ptr<StorageBackendMatchMeta> match_meta, bool success);
-    void onBackendRead(ErrorInfo error, DecodeReuseSourcesPtr sources = {});
+    void onBackendRead(ErrorInfo error);
     void failBeforeCommit();
     void failCommit();
     void finishIfReadyLocked(bool& notify, SettlementReadyCallback& settlement_ready_callback);
@@ -170,11 +165,6 @@ private:
     ErrorInfo                                             backend_error_{ErrorInfo::OkStatus()};
     ErrorInfo                                             error_info_{ErrorInfo::OkStatus()};
     bool                                                  settlement_ready_{false};
-    const bool                                            track_remote_restore_{false};
-    DecodeReuseSourcesPtr                                 local_decode_sources_;
-    DecodeReuseSourcesPtr                                 device_decode_sources_;
-    DecodeReuseSourcesPtr                                 device_host_decode_sources_;
-    DecodeReuseSourcesPtr                                 remote_decode_sources_;
     SettlementReadyCallback                               settlement_ready_callback_;
     std::vector<DoneCallback>                             callbacks_;
 

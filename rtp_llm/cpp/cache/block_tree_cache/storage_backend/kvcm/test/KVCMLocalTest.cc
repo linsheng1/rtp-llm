@@ -1165,9 +1165,7 @@ TEST(KVCMLocalTest, PrefillLoadsDecoratedOrPlainUriWithoutEnablingDecodeProvenan
                 }
                 return true;
             }));
-        auto source_meta = observation.match_meta;
         EXPECT_TRUE(read(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta)));
-        EXPECT_FALSE(source_meta->decode_sources);
         EXPECT_FALSE(environment.device_pool->decodeOrigin(environment.block_id, "default"));
         EXPECT_EQ(environment.device_pool->decodeOriginIncarnation(environment.block_id), uint64_t{0});
         });

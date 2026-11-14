@@ -13,7 +13,6 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
-#include "rtp_llm/cpp/cache/DecodeReuseSources.h"
 
 namespace rtp_llm {
 
@@ -120,10 +119,6 @@ public:
     bool enableCacheLookup() const;
     Tier storeTarget() const;
     void reportCacheReuseMetrics();
-    bool hasPendingDecodeReuse() const {
-        return decode_reuse_use_state_.pending();
-    }
-    void reportDecodeCacheUse(bool gpu_ready);
 
     void holdKVCacheForPDSep();
     void releaseKVCacheForPDSep();
@@ -147,7 +142,6 @@ private:
     absl::Status finalizeAllocatorLoad();
     bool         deferAllocatorLoadRelease();
     void         publishAllocatorReuse(const LoadAsyncContext& context, bool local_only);
-    void         adoptDecodeReuse(DecodeReuseSourcesPtr sources, int64_t adopted_end);
 
     GenerateStream*                stream_;
     BatchKVCacheResourcePtr        batch_kv_cache_resource_;
@@ -166,7 +160,6 @@ private:
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
     int64_t                          malloc_begin_time_us_    = 0;
     int64_t                          load_wait_begin_time_us_ = 0;
-    DecodeReuseUseState                                   decode_reuse_use_state_;
 
     // Physical block pins held for PD separation.
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;

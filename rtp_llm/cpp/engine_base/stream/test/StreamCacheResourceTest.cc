@@ -2284,7 +2284,7 @@ TEST_F(StreamCacheResourceTest, HostSuccessDiskFailureUsesJointPrefixWithCpReuse
     EXPECT_EQ(stream_->diskReuseLength(), 0);
 }
 
-TEST_F(StreamCacheResourceTest, PartialLoadFailureRetainsDecodeSourcesOnlyForReadyPrefix) {
+TEST_F(StreamCacheResourceTest, PartialLoadFailureKeepsOnlyReadyPrefixAcrossCompletionOrder) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
     for (const bool host_first : {false, true}) {
@@ -2298,28 +2298,9 @@ TEST_F(StreamCacheResourceTest, PartialLoadFailureRetainsDecodeSourcesOnlyForRea
             kmonitor::MetricsTags tags;
             stream_->setMetricsReporter(std::make_shared<kmonitor::MetricsReporter>("", "", tags));
             const std::vector<Tier> tiers{Tier::DEVICE, Tier::HOST, Tier::DISK, Tier::HOST};
-            auto                    sources = std::make_shared<DecodeReuseSources>();
-            for (size_t i = 0; i < tiers.size(); ++i) {
-                auto origin =
-                    std::make_shared<const DecodeCacheOrigin>(DecodeCacheOrigin{std::string(32, 'a'),
-                                                                                0,
-                                                                                static_cast<int64_t>(i * unit),
-                                                                                static_cast<int64_t>((i + 1) * unit),
-                                                                                4 * unit,
-                                                                                4 * unit + 1});
-                sources->push_back({std::move(origin), tiers[i]});
-            }
             stream_->setReuseLength(unit);
-            const auto device_sources =
-                std::make_shared<const DecodeReuseSources>(DecodeReuseSources{sources->front()});
-            const auto device_host_sources =
-                std::make_shared<const DecodeReuseSources>(sources->begin(), sources->begin() + 2);
-            resource.adoptDecodeReuse(device_sources, unit);
-            ASSERT_TRUE(resource.hasPendingDecodeReuse());
             auto context = makeAllocatorLoadContext(4, tiers, false);
             context->setLocalMatchLengths(1, 2);
-            context->setLocalDecodeSources(sources, device_sources, device_host_sources);
-            EXPECT_FALSE(context->decodeSources(true));
             ASSERT_TRUE(context->commit());
             const auto complete_host = [&] { ASSERT_TRUE(context->completeTransfers(2, host_success, Tier::HOST)); };
             const auto complete_disk = [&] { ASSERT_TRUE(context->completeTransfers(1, false, Tier::DISK)); };
@@ -2333,20 +2314,9 @@ TEST_F(StreamCacheResourceTest, PartialLoadFailureRetainsDecodeSourcesOnlyForRea
                 complete_host();
             }
             EXPECT_FALSE(context->success());
-            EXPECT_FALSE(context->decodeSources());
             resource.allocator_load_context_ = context;
             ASSERT_TRUE(resource.waitForAllocatorLoad().ok());
             EXPECT_EQ(stream_->reuseLength(), (host_success ? 2 : 1) * unit);
-            ASSERT_TRUE(resource.hasPendingDecodeReuse());
-            EXPECT_FALSE(resource.decode_reuse_use_state_.consume(false));
-            const auto counts = resource.decode_reuse_use_state_.consume(true);
-            ASSERT_TRUE(counts);
-            EXPECT_EQ(counts->by_tier[static_cast<size_t>(Tier::DEVICE)], unit);
-            EXPECT_EQ(counts->by_tier[static_cast<size_t>(Tier::HOST)], host_success ? unit : 0);
-            EXPECT_EQ(counts->by_tier[static_cast<size_t>(Tier::DISK)], 0);
-            EXPECT_EQ(counts->by_tier[static_cast<size_t>(Tier::REMOTE)], 0);
-            EXPECT_EQ(counts->total(), (host_success ? 2 : 1) * unit);
-            EXPECT_FALSE(resource.decode_reuse_use_state_.consume(true));
         }
     }
     }, [&] { TearDown(); stream_.reset(); cache_manager_.reset(); });
