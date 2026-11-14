@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/utils/DecodePublicationTest.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include <cuda_runtime_api.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <torch/torch.h>
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PayloadDispatchProof.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PublicationSettlement.h"
@@ -16,6 +18,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PackedSsdTransferClient.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 
@@ -1756,6 +1760,161 @@ protected:
         }
     };
 };
+
+TEST(NativeEndpointPublicationTest, CapturedDsparkEndpointOwnsPagesThroughEosTransfer) {
+    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    autil::EnvGuard budget("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB", "1");
+    test::withDecodePublicationStartup([&] {
+        createDevice();
+        CacheConfig cache;
+        cache.dtype = DataType::TYPE_FP16;
+        cache.layer_num = 2;
+        cache.seq_size_per_block = 8;
+        const auto full = test::makeMhaSpec("csa_kv", 8, cache.dtype, 1, 2);
+        const auto state = test::makeResolvedOpaqueSpec(true, "csa_state", DataType::TYPE_FP32, 32, 8);
+        const auto swa = test::makeResolvedOpaqueSpec(true, "swa_kv", cache.dtype, 32, 8);
+        const auto decoder = test::makeResolvedOpaqueSpec(true, "decoder_swa_kv", cache.dtype, 32, 8);
+        const auto full_policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        auto tail_policy = defaultCacheGroupPolicy(CacheGroupType::SWA);
+        tail_policy.enable_prefix_reuse = true;
+        auto decoder_policy = tail_policy;
+        decoder_policy.enable_prefix_reuse = false;
+        cache.fromGroupedSpecs({full, state, swa, decoder}, {{0}, {0}, {0}, {1}},
+            {CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::SWA, CacheGroupType::SWA},
+            {"csa_kv", "csa_state", "swa_kv", "decoder_swa_kv"},
+            {full_policy, tail_policy, tail_policy, decoder_policy});
+        CacheConfig draft;
+        draft.dtype = cache.dtype;
+        draft.layer_num = 3;
+        draft.seq_size_per_block = 8;
+        draft.fromGroupedSpecs({decoder}, {{0, 1, 2}}, {CacheGroupType::SWA},
+                               {"decoder_swa_kv"}, {decoder_policy});
+        cache.mtp_sub_configs.push_back(cache.mergeMTPModule(draft, 0, cache.layer_num));
+        cache.finalizeBlockNums(16, RuntimeConfig{});
+        auto parallel = singleRankConfig();
+        parallel.role_type = RoleType::DECODE;
+        parallel.prefill_cp_config.prefill_cp_size = 1;
+        auto manager = std::make_shared<KVCacheManager>(cache, false, nullptr, KVCacheConfig{}, parallel);
+        ASSERT_TRUE(manager->init());
+        BackendEnvironment env;
+        env.cache_config = manager->cacheConfig();
+        const auto& tags = env.cache_config.groupTags();
+        const auto& pools = manager->coordinator_manager_->groupBlockPools();
+        ASSERT_EQ(tags.size(), pools.size());
+        for (size_t group = 0; group < tags.size(); ++group)
+            env.pools_by_tag.emplace(tags[group], pools[group]);
+        auto pages = std::make_unique<ScopedReferencedBlocks>(env, 3);
+        const auto blocks = pages->get();
+        BatchKVCacheResource resource;
+        resource.resetBatchSize(1);
+        resource.initGroups(env.cache_config.topologyPtr());
+        resource.setBatchCacheKeys(0, {101, 102, 103});
+        auto ids = torch::full({static_cast<int64_t>(tags.size()), 1, 3}, NULL_BLOCK_IDX, torch::kInt32);
+        std::map<std::string, unsigned char> expected_bytes;
+        for (size_t group = 0; group < tags.size(); ++group) {
+            resource.setBatchBlocks(0, tags[group], blocks);
+            for (size_t slot = 0; slot < blocks.size(); ++slot) {
+                ids.data_ptr<int32_t>()[group * 3 + slot] = blocks[slot];
+                const unsigned char value = 0x40 + 4 * group + slot;
+                expected_bytes.emplace("pace://endpoint/" + tags[group] + "/" + std::to_string(slot), value);
+                for (int layer : env.cache_config.layerIdsForGroup(tags[group]))
+                    for (const auto& part : environmentBuffers(env, layer, tags[group], blocks[slot]))
+                        ASSERT_EQ(cudaMemsetAsync(part.addr, value, part.size_bytes,
+                            at::cuda::getCurrentCUDAStream().stream()), cudaSuccess);
+            }
+        }
+        // Real capture owns/fences these synthetic writers. This is not a
+        // model-kernel, CUDA-call-count, probe-error or performance test.
+        resource.decode_endpoint = manager->retainDecodeEndpoint(ids, tags, 0, 16);
+        ASSERT_TRUE(resource.decode_endpoint);
+        std::weak_ptr<const DecodeEndpoint> endpoint = resource.decode_endpoint;
+        block_tree_cache_test::CallbackBarrier barrier;
+        std::map<std::string, std::string> specs;
+        auto client = std::make_shared<MockClientWrapper>();
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Invoke(
+            [&](const auto&, auto, const auto& registrations, const auto& registered_tags) {
+                for (size_t i = 0; i < registered_tags.size(); ++i)
+                    specs.emplace(registered_tags[i], registrations[i].location_spec_name);
+                return true;
+            }));
+        EXPECT_CALL(*client, shutdown()).Times(1);
+        EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, _)).WillOnce(Invoke(
+            [&](const auto&, const auto&, const auto& keys, const auto&, const auto&, auto, auto) {
+                EXPECT_EQ(keys, (CacheKeysType{101, 102}));
+                barrier.enterAndWait();
+                kv_cache_manager::WriteLocation location;
+                location.write_session_id = "captured-endpoint";
+                location.block_mask = kv_cache_manager::BlockMaskOffset{0};
+                for (size_t key = 0; key < keys.size(); ++key) {
+                    kv_cache_manager::Location row;
+                    for (const auto& group : env.cache_config.topology().groups()) {
+                        if (!group.policy.enable_prefix_reuse) continue;
+                        row.push_back({specs.at(group.tag + "#cp0"),
+                            "pace://endpoint/" + group.tag + "/" + std::to_string(key)});
+                    }
+                    location.locations.push_back(std::move(row));
+                }
+                return std::make_pair(true, location);
+            }));
+        std::atomic<size_t> saved{0}, finished{0};
+        EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).WillRepeatedly(Invoke(
+            [&](const auto&, const auto& uris, const auto& buffers, const auto&) {
+                EXPECT_FALSE(endpoint.expired());
+                EXPECT_EQ(uris.size(), buffers.size());
+                kv_cache_manager::UriStrVec actual;
+                for (size_t i = 0; i < uris.size(); ++i) {
+                    const auto uri = uris[i].substr(0, uris[i].find('?'));
+                    for (const auto& iov : buffers[i].iovs) {
+                        EXPECT_EQ(iov.type, kv_cache_manager::MemoryType::GPU);
+                        std::vector<unsigned char> bytes(iov.size);
+                        EXPECT_EQ(cudaMemcpy(bytes.data(), iov.base, iov.size, cudaMemcpyDeviceToHost), cudaSuccess);
+                        EXPECT_TRUE(std::all_of(bytes.begin(), bytes.end(),
+                            [&](auto byte) { return byte == expected_bytes.at(uri); }));
+                    }
+                    actual.push_back("actual_" + uris[i]);
+                }
+                saved += uris.size();
+                return std::make_pair(true, actual);
+            }));
+        EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).WillOnce(Invoke(
+            [&](const auto&, const auto&, const auto&, const auto& mask, const auto& locations) {
+                EXPECT_EQ(std::get<kv_cache_manager::BlockMaskOffset>(mask), 2u);
+                EXPECT_EQ(locations.size(), 2u);
+                for (const auto& row : locations)
+                    for (const auto& item : row) EXPECT_EQ(item.uri.rfind("actual_", 0), 0u);
+                ++finished;
+                return true;
+            }));
+        EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
+        KVCacheConfig settings;
+        settings.kvcm_server_address = "unused-test-address";
+        settings.kvcm_model_sdk_config = R"([{"type":"pace"}])";
+        RuntimeConfig runtime;
+        runtime.model_name = "DeepSeekV41";
+        SpeculativeExecutionConfig speculation;
+        speculation.type = SP_TYPE_DSPARK;
+        BackendHandle backend(std::make_unique<MockQuiescentKVCMBackend>(
+            env.cache_config, settings, runtime, parallel, speculation, nullptr, true, nullptr, client));
+        block_tree_cache_detail::ScopeRollback unblock([&] { barrier.release(); });
+        ASSERT_TRUE(initSingleRank(*backend.backend, env));
+        ASSERT_TRUE(backend->captureCompletedDecode(resource, 19, true));
+        ASSERT_TRUE(barrier.waitUntilEnteredFor(1, std::chrono::seconds(5)));
+        resource.clearBlocks();
+        pages.reset();
+        EXPECT_FALSE(endpoint.expired()); // Only the actual publication task owns the endpoint now.
+        barrier.release();
+        ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+        backend->shutdown(); // Joins callbacks before checking final owner/ref release.
+        EXPECT_EQ(saved.load(), 6u);
+        EXPECT_EQ(finished.load(), 1u);
+        EXPECT_TRUE(endpoint.expired());
+        for (const auto& [tag, pool] : env.pools_by_tag) {
+            EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u) << tag;
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u) << tag;
+            EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u) << tag;
+        }
+    });
+}
 
 TEST_P(EosGpuCompletionTest, DisabledAtInitializationDoesNotPublishPinOrChangeNativePages) {
     for (const bool unset : {false, true}) {

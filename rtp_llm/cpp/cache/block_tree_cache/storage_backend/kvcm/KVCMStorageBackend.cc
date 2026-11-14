@@ -31,6 +31,10 @@
 #include <variant>
 #include <unistd.h>
 
+#if USING_CUDA
+#include <ATen/cuda/CUDAContext.h>
+#endif
+
 #include "autil/EnvUtil.h"
 #include "autil/legacy/jsonizable.h"
 #include "kvcm_client/HostCacheStateCompat.h"

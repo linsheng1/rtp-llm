@@ -213,8 +213,8 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
     if (!cache_config_.mtp_sub_configs.empty()) {
         if (!endpoint || endpoint->end > computed_end) return request;
         computed_end = endpoint->end;
-        request.source_owner = endpoint;
     }
+    if (endpoint) request.source_owner = endpoint;
     const auto& source_blocks = [&](const std::string& tag) -> const BlockIndicesType& {
         return endpoint ? endpoint->blocks.at(tag) : resource.blocks(0, tag);
     };
@@ -351,10 +351,21 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
                             pending.jobs);
         return {};
     }
-    // One fence at successful EOS. No decode-step fence or CPU capture. The
-    // task cannot outlive source ownership until prepareWrite has pinned it.
+    // Endpoint writers were fenced at capture and their pages remain pinned.
+    // Probe already-reported faults without draining unrelated later work; this
+    // is not a quiescence proof or a wait for faults in still-running kernels.
+    // Ordinary live-table sources still need their EOS writer fence below.
     setCudaDevice();
-    check_cuda_value(cudaDeviceSynchronize());
+#if USING_CUDA
+    if (!cache_config_.mtp_sub_configs.empty()) {
+        const auto status = cudaStreamQuery(at::cuda::getCurrentCUDAStream().stream());
+        if (status != cudaSuccess && status != cudaErrorNotReady)
+            check_cuda_value(status);
+    } else
+#endif
+    {
+        check_cuda_value(cudaDeviceSynchronize());
+    }
     RTP_LLM_LOG_DEBUG(
         "DTOP_GPU retained_plan computed=%zu published=%zu tail=%zu pages=%zu bytes=%zu CPU_snapshot_bytes=0",
         computed_end,
