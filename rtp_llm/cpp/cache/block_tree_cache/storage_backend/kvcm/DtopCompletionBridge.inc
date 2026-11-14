@@ -11,8 +11,10 @@ bool configureDecodePublication(const CacheTopology&                            
         }
         RTP_LLM_LOG_WARNING("ENABLE_DECODE_PUBLISH is invalid; publication stays disabled on this non-Decode role");
     }
-    decode_publication_enabled_ = remoteCacheDecodePublicationEnabled();
-    // Off must preserve the upstream Prefill backend contract. In particular,
+    is_decode_role_ = parallelism_config_.role_type == RoleType::DECODE;
+    decode_publication_enabled_ = remoteCacheDecodePublicationEnabled() && is_decode_role_;
+    // P/PDFUSION always use their original backend contract, independent of
+    // the Decode switch. In particular,
     // do not validate Decode-only backend/layout/budget settings, retain its
     // resolver, or allocate publication accounting for an ordinary P cache.
     if (!decode_publication_enabled_)
@@ -44,8 +46,6 @@ bool configureDecodePublication(const CacheTopology&                            
         RTP_LLM_LOG_ERROR("PACE SSD requires backend9/pace_ssd and GDR; DRAM cannot use backend9");
         return false;
     }
-    is_decode_role_         = parallelism_config_.role_type == RoleType::DECODE;
-    const bool  prefill     = parallelism_config_.role_type == RoleType::PREFILL;
     const auto& cp          = parallelism_config_.prefill_cp_config;
     target_prefill_cp_      = cp.prefill_cp_size;
     target_prefill_tp_      = target_prefill_cp_;
@@ -61,7 +61,7 @@ bool configureDecodePublication(const CacheTopology&                            
     const bool supported_speculation = dsv41 && sp_config_.type == SP_TYPE_DSPARK
         && cache_config_.mtp_sub_configs.size() == 1 && cache_config_.mtp_sub_configs.front()
         && cache_config_.mtp_sub_configs.front()->layer_num > 0;
-    if (!pace_backend_ || (!is_decode_role_ && !prefill) || target_prefill_cp_ < 1
+    if (!pace_backend_ || target_prefill_cp_ < 1
         || cache_config_.seq_size_per_block < 1
         || static_cast<size_t>(target_prefill_cp_)
                > static_cast<size_t>(std::numeric_limits<int>::max()) / cache_config_.seq_size_per_block

@@ -867,6 +867,8 @@ public:
     }
 
     [[noreturn]] void rethrowPayloadFailure(bool source_may_be_touched) const {
+        if (!decode_publication_enabled_)
+            throw; // Original P failure classes determine task-local freezing.
         try {
             throw;
         } catch (const StorageOperationBufferSafeFailure&) {
@@ -1083,6 +1085,12 @@ public:
     }
 
     void settleWriteFailure(const StorageRequest& request, WritePublication& write, bool source_may_be_touched) {
+        if (!decode_publication_enabled_) {
+            // Preserve the original P best-effort zero-mask close on failure.
+            // This legacy policy is not a proof of destination quiescence.
+            closeUnusedWrite(write, /*require_not_started=*/false);
+            return;
+        }
         (void)source_may_be_touched;  // Source safety is not proof that the destination was never touched.
         const auto action = kvcm::failedPublicationAction(!write.dispatch_proof->neverStarted(), write.finish_attempted);
         if (action == kvcm::FailedPublicationAction::RETAIN_SESSION) {
@@ -1181,8 +1189,9 @@ public:
         return client_wrapper_->finishWrite("", trace, write.sessionId(), mask, locations);
     }
 
-    void closeUnusedWrite(WritePublication& write) {
-        if (!write.start_acknowledged || !write.dispatch_proof->neverStarted() || write.finish_attempted) {
+    void closeUnusedWrite(WritePublication& write, bool require_not_started = true) {
+        if (!write.start_acknowledged || write.finish_attempted
+            || (require_not_started && !write.dispatch_proof->neverStarted())) {
             return;
         }
         const auto                             stage_start = Clock::now();
@@ -2487,6 +2496,31 @@ private:
         if (responses.size() != expected) {
             throw StorageOperationCompletionUnknown("KVCM worker response count mismatch",
                                                     StorageQuarantineReason::INVALID_RESPONSE);
+        }
+        if (!decode_publication_enabled_) {
+            bool failed = false;
+            for (const auto& response : responses) {
+                if (!response.has_remote_response()) {
+                    throw StorageOperationCompletionUnknown("KVCM worker returned no transfer response",
+                                                            StorageQuarantineReason::INVALID_RESPONSE);
+                }
+                switch (response.remote_response().transfer_status()) {
+                    case REMOTE_TRANSFER_STATUS_UNSPECIFIED: // successful legacy worker
+                    case REMOTE_TRANSFER_STATUS_SUCCESS:
+                        break;
+                    case REMOTE_TRANSFER_STATUS_FAILED:
+                        failed = true;
+                        break;
+                    case REMOTE_TRANSFER_STATUS_TIMEOUT:
+                        throw StorageOperationTimeout("KVCM transfer timed out", StorageQuarantineReason::SDK_TIMEOUT);
+                    default:
+                        throw StorageOperationCompletionUnknown("KVCM transfer completion is unknown",
+                                                                StorageQuarantineReason::INVALID_RESPONSE);
+                }
+            }
+            if (failed)
+                throw std::runtime_error("KVCM transfer failed");
+            return responses;
         }
         kvcm::WorkerPayloadProof proof;
         bool                     any_timeout = false;

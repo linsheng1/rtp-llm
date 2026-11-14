@@ -13,6 +13,7 @@
 #include <exception>
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -244,7 +245,7 @@ protected:
                 std::this_thread::sleep_until(deadline + std::chrono::milliseconds(1));
             };
             ASSERT_TRUE(s.submit(std::move(request)));
-            ASSERT_NO_FATAL_FAILURE(s.expectSettled(partial, partial));
+            ASSERT_NO_FATAL_FAILURE(s.expectSettled(false, partial));
             ASSERT_NE(broadcast->observed, nullptr);
             EXPECT_TRUE(broadcast->observed->done());
             EXPECT_FALSE(broadcast->observed->success());
@@ -552,6 +553,35 @@ TEST_F(KVCMSubmissionBoundaryTest, LocalPeerUnknownRetainsOperationAndSourceWith
         ASSERT_TRUE(s.backend->impl_->completion_resources_->operations);
         EXPECT_EQ(s.backend->impl_->completion_resources_->operations->client, s.client);
         EXPECT_FALSE(s.backend->impl_->completion_resources_->operations->buffers.empty());
+    });
+}
+
+template<typename Code>
+std::vector<std::pair<Code, bool>> projectedSdkFailures() {
+    std::vector<std::pair<Code, bool>> cases{{Code::ER_SDKWRITE_ERROR, false},
+                                            {Code::ER_INVALID_PARAMS, false},
+                                            {Code::ER_SDK_TIMEOUT, false}};
+    if constexpr (kvcm::detail::HasExplicitBufferSafeCodes<Code>::value) {
+        cases.emplace_back(Code::ER_SDK_TIMEOUT_BUFFER_SAFE, true);
+        cases.emplace_back(Code::ER_SDK_ERROR_BUFFER_SAFE, true);
+    }
+    return cases;
+}
+
+TEST_F(KVCMSubmissionBoundaryTest, DecodeSdkFailuresKeepDestinationAndRetainOnlyUnprovenSources) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    test::withDecodePublicationStartup([&] {
+        for (const auto& [code, source_safe] : projectedSdkFailures<kv_cache_manager::ClientErrorCode>()) {
+            SCOPED_TRACE(static_cast<int>(code));
+            Fixture s(true);
+            // Typed mock SDK boundary: no real DMA. Exercise the actual D
+            // projection, peer dispatch, completion and source-owner settlement.
+            s.client->save_status = code;
+            ASSERT_TRUE(s.submit(s.request(true)));
+            ASSERT_NO_FATAL_FAILURE(s.expectSettled(/*retained=*/true, /*source_unknown=*/!source_safe));
+            EXPECT_EQ(s.backend->impl_->completion_resources_->unresolved.load(), source_safe ? 0u : 1u);
+            EXPECT_EQ(s.closes.load(), 0); // Source-safe failure still cannot close a started destination.
+        }
     });
 }
 

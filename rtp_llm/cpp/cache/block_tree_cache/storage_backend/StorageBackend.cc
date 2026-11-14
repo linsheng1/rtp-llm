@@ -92,7 +92,7 @@ auto makeIoCompletion(std::shared_ptr<StorageBackendExecutor> executor,
     // One pre-I/O allocation holds both the settlement and its terminal result.
     auto continuation = std::make_shared<Continuation>(std::move(settle));
     std::shared_ptr<BlockTreeTaskPool::Completion> reservation;
-    if (executor->hasCompletionReservations()) {
+    if (state->request.decode_completion && executor->hasCompletionReservations()) {
         reservation = executor->reserveCompletion([continuation]() mutable {
             continuation->settle(std::move(continuation->result), true, false, std::move(continuation->error));
         }, task_class);

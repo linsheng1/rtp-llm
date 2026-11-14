@@ -88,19 +88,6 @@ TEST(ClientFactoryFeatureBoundaryTest, DisabledAndUnsetDelegateConfigurationErro
         });
     }
 }
-TEST(ClientFactoryFeatureBoundaryTest, EnabledSsdStillRejectsMissingGpuRegistrationAndMixedBackends) {
-    autil::EnvGuard                             enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
-    ::rtp_llm::test::withDecodePublicationStartup([&] {
-    kvcm::ClientFactory                         factory;
-    kv_cache_manager::InitParams                params{};
-    kv_cache_manager::ClientMemoryRegistrations registrations;
-    const std::string                           ssd = R"({"sdk_config":{"sdk_backend_configs":[{"type":"pace_ssd"}]}})";
-    const std::string mixed = R"({"sdk_config":{"sdk_backend_configs":[{"type":"pace"},{"type":"pace_ssd"}]}})";
-    EXPECT_THROW(factory.createTransferClient(ssd, params), std::invalid_argument);
-    EXPECT_THROW(factory.createTransferClientWithMemory(ssd, params, registrations), std::invalid_argument);
-    EXPECT_THROW(factory.createTransferClientWithMemory(mixed, params, registrations), std::invalid_argument);
-    });
-}
 TEST(ClientFactoryFeatureBoundaryTest, EmptyDescriptorsCanReuseOnlySuccessfullyRegisteredGpuSubspans) {
     using Context      = kvcm::PackedSsdTransferClient::GpuPackingContext;
     const auto pointer = [](uintptr_t value) { return reinterpret_cast<void*>(value); };

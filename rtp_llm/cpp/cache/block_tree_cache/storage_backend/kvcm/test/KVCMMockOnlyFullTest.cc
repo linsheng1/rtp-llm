@@ -164,6 +164,9 @@ TEST(KVCMMockOnlyFullTest, RejectsLegacyDsv41CustomLocationSpecNames) {
 }
 
 TEST(KVCMMockOnlyFullTest, CustomConfigExcludesDisabledStateAndKeepsActiveAliases) {
+    for (const bool enabled : {false, true}) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+    test::withDecodePublicationStartup([&] {
     BackendEnvironment environment;
     environment.cache_config.dtype = DataType::TYPE_FP16;
     environment.cache_config.layer_num = 2;
@@ -206,8 +209,10 @@ TEST(KVCMMockOnlyFullTest, CustomConfigExcludesDisabledStateAndKeepsActiveAliase
     config.kvcm_client_config = autil::legacy::ToJsonString(kvcm::ClientWrapper::ConfigMap{{"custom", custom}});
     RuntimeConfig runtime;
     runtime.model_name = "kvcm_test_model";
+    auto parallel = singleRankConfig();
+    parallel.role_type = RoleType::PREFILL;
     BackendHandle backend(std::make_unique<KVCMStorageBackend>(environment.cache_config, config, runtime,
-        singleRankConfig(), SpeculativeExecutionConfig{}, nullptr, false, nullptr, client));
+        parallel, SpeculativeExecutionConfig{}, nullptr, false, nullptr, client));
     ASSERT_TRUE(initSingleRank(*backend.backend, environment));
     const kv_cache_manager::Locations locations{{{"tp0_Ffull0", "full_101"}}};
     EXPECT_CALL(*client, match(_, _, kv_cache_manager::QueryType::QT_PREFIX_MATCH,
@@ -216,6 +221,8 @@ TEST(KVCMMockOnlyFullTest, CustomConfigExcludesDisabledStateAndKeepsActiveAliase
     auto result = match(*backend.backend, makeStorageRequest(environment));
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.matched_blocks_num, 1u);
+    });
+    }
 }
 
 TEST(KVCMMockOnlyFullTest, SwaPayloadMatchUsesBatchLocationsForFullPrefix) {

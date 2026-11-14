@@ -1081,8 +1081,11 @@ TEST(StorageBackendTest, PeerProjectionRejectedForReadsAndOrdinaryWritesBeforePi
     backend.shutdown();
 }
 
-TEST(StorageBackendTest, CompletionPreparationFailureReleasesReadAndWriteWithoutUnknown) {
+TEST(StorageBackendTest, PrefillBypassesReservationWhileDecodePreIoFailureReleasesResources) {
+    for (const bool decode : {false, true}) {
     for (const bool read : {false, true}) {
+        if (decode && read)
+            continue; // Decode publication is write-only; read cases exercise P.
         for (const bool bad_alloc : {false, true}) {
             auto pool = std::make_shared<TestBlockPool>();
             const auto block = pool->malloc().value();
@@ -1103,8 +1106,8 @@ TEST(StorageBackendTest, CompletionPreparationFailureReleasesReadAndWriteWithout
             backend.write_action = [&] { ++io_calls; };
             auto budget = std::make_shared<kvcm::DecodePublicationAccounting>(16, 1);
             auto request = makeRequest(block);
-            request.decode_completion = !read;
-            if (!read) {
+            request.decode_completion = decode;
+            if (!read && decode) {
                 request.completion_admission = budget->tryAcquire(16, std::nullopt);
                 ASSERT_TRUE(request.completion_admission);
             }
@@ -1113,15 +1116,15 @@ TEST(StorageBackendTest, CompletionPreparationFailureReleasesReadAndWriteWithout
             if (read) {
                 backend.read(std::move(request), nullptr, [&](ErrorInfo error) {
                     ++read_callbacks;
-                    EXPECT_FALSE(error.ok());
+                    EXPECT_EQ(error.ok(), !decode);
                 });
             } else {
                 ASSERT_TRUE(backend.write(backend.prepareWrite(std::move(request))));
             }
             backend.resources.reset();
             ASSERT_EQ(executor->runAll(), 1u);
-            EXPECT_EQ(executor->reserve_calls, 1u);
-            EXPECT_EQ(io_calls, 0u);
+            EXPECT_EQ(executor->reserve_calls, decode ? 1u : 0u);
+            EXPECT_EQ(io_calls, decode ? 0u : 1u);
             EXPECT_EQ(read_callbacks, read ? 1u : 0u);
             EXPECT_EQ(backend.quarantine_events, 0u);
             EXPECT_EQ(backend.quarantined_tasks, 0u);
@@ -1132,6 +1135,7 @@ TEST(StorageBackendTest, CompletionPreparationFailureReleasesReadAndWriteWithout
             EXPECT_EQ(budget->snapshot().jobs, 0u);
             EXPECT_EQ(executor->runAll(), 0u); // No second completion was queued.
         }
+    }
     }
 }
 
