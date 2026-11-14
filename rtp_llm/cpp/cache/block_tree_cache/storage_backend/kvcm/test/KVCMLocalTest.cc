@@ -869,6 +869,19 @@ TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWire
         EXPECT_TRUE(initSingleRank(*backend.backend, environment));
         EXPECT_FALSE(observed.identity.empty());
         EXPECT_EQ(observed.infos, expected_infos);
+        // Location groups retain the original full tag names, independently
+        // of the compact KVCacheEvent schema used by the existing publisher.
+        EXPECT_EQ(observed.groups.count("F"), 0u);
+        EXPECT_EQ(observed.groups.count("FL"), 0u);
+        for (const auto& [tag, bytes] : expected_bytes) {
+            (void)bytes;
+            const bool full = tag != "swa_kv" && tag != "csa_state";
+            const std::string name = (full ? "F" : "L") + tag;
+            std::vector<std::string> specs;
+            for (int rank = 0; rank < cp; ++rank)
+                specs.push_back(kvcm::genLocationSpecName(rank, name, "DeepSeekV41"));
+            EXPECT_EQ(observed.groups.at(name), specs);
+        }
         backend.backend->shutdown();
         return observed;
     };
