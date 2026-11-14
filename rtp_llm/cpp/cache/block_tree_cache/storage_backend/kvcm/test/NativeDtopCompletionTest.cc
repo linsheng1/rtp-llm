@@ -12,6 +12,7 @@
 #include <map>
 #include <tuple>
 #include <typeinfo>
+#include <stdexcept>
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -532,6 +533,20 @@ protected:
         }
         return b;
     }
+    void registerPipelineSpans() {
+        int device = -1;
+        ASSERT_EQ(cudaGetDevice(&device), cudaSuccess);
+        context = std::make_shared<Client::GpuPackingContext>(arena, device);
+        context->registered_gpu_spans = {{output.get(), 2 * 1024 * 1024, device},
+                                          {arena.get(), Client::max_operation_bytes, device}};
+        context->registered = true;
+    }
+    size_t leasedBytes() {
+        std::lock_guard<std::mutex> lock(context->mutex);
+        size_t free = 0;
+        for (const auto& range : context->free_ranges) free += range.second;
+        return Client::max_operation_bytes - free;
+    }
     template<typename C>
     void checkSafeSdkRetry() {
         if constexpr (kvcm::detail::HasExplicitBufferSafeCodes<C>::value) {
@@ -585,6 +600,242 @@ protected:
         }
     }
 };
+// Deferred test copies execute only at Fence. A one-bank implementation that
+// starts the next SDK load before draining them corrupts the asserted GPU bytes.
+TEST_F(NativeSsdGpuReadWindowTest, ReadPipelineAlternatesBanksAndPreservesAliasedDestinationOrder) {
+    for (bool alias : {false, true}) {
+        registerPipelineSpans();
+        std::vector<std::string> events;
+        std::vector<std::tuple<void*, const void*, size_t>> pending;
+        std::vector<void*> banks;
+        auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+        EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(3)
+            .WillRepeatedly(Invoke([&](const Uris& u, const Buffers& b, auto trace) {
+                const size_t window = banks.size();
+                events.push_back("L" + std::to_string(window));
+                EXPECT_EQ(pending.size(), window ? 1u : 0u);
+                EXPECT_EQ(u, (Uris{std::to_string(window)}));
+                EXPECT_TRUE(trace && trace->block_ids == Uris{std::to_string(100 + window)});
+                if (b.size() != 1 || b[0].iovs.size() != 1) return Code::ER_INVALID_PARAMS;
+                banks.push_back(b[0].iovs[0].base);
+                EXPECT_EQ(cudaMemset(b[0].iovs[0].base, 11 + window, 17), cudaSuccess);
+                EXPECT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess);
+                EXPECT_EQ(leasedBytes(), 34u);
+                return Code::ER_OK;
+            }));
+        Client client(std::move(delegate), [&](void* dst, M, const void* src, M, size_t bytes) {
+            events.push_back("S" + std::to_string(banks.size() - 1));
+            pending.emplace_back(dst, src, bytes); return true;
+        }, context, 1, [&] {
+            events.push_back("F");
+            for (const auto& [dst, src, bytes] : pending)
+                EXPECT_EQ(cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToDevice), cudaSuccess);
+            pending.clear();
+            return cudaStreamSynchronize(nullptr) == cudaSuccess;
+        }, true);
+        auto buffers = destinations({17, 17, 17});
+        if (alias) for (auto& b : buffers) b.iovs[0].base = output.get();
+        auto trace = std::make_shared<kv_cache_manager::TransferTraceInfo>(); trace->block_ids = {"100", "101", "102"};
+        ASSERT_EQ(client.LoadKvCaches({"0", "1", "2"}, buffers, trace), Code::ER_OK);
+        EXPECT_EQ(events, (std::vector<std::string>{"L0", "S0", "L1", "F", "S1", "L2", "F", "S2", "F"}));
+        ASSERT_EQ(banks.size(), 3u);
+        EXPECT_NE(banks[0], banks[1]); EXPECT_EQ(banks[0], banks[2]);
+        std::vector<unsigned char> bytes(alias ? 17 : 51);
+        ASSERT_EQ(cudaMemcpy(bytes.data(), output.get(), bytes.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+        for (size_t j = 0; j < bytes.size(); ++j) EXPECT_EQ(bytes[j], alias ? 13 : 11 + j / 17);
+        EXPECT_TRUE(pending.empty()); EXPECT_EQ(leasedBytes(), 0u);
+    }
+}
+TEST_F(NativeSsdGpuReadWindowTest, WritePipelineGathersAheadButKeepsSdkSavesSerialAndBytesReady) {
+    registerPipelineSpans();
+    // Count-based windows: 64, 64, 1 objects; no oversized fixture allocation.
+    constexpr size_t objects = 129, bytes_per_object = 17, bank_bytes = 64 * bytes_per_object;
+    auto buffers = destinations(std::vector<size_t>(objects, bytes_per_object));
+    Uris uris;
+    auto trace = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+    for (size_t j = 0; j < objects; ++j) {
+        uris.push_back(std::to_string(j)); trace->block_ids.push_back(std::to_string(j + 100));
+        ASSERT_EQ(cudaMemset(buffers[j].iovs[0].base, 1 + j, bytes_per_object), cudaSuccess);
+    }
+    ASSERT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess);
+    std::vector<std::string> events;
+    std::vector<std::tuple<void*, const void*, size_t>> pending;
+    std::vector<void*> banks;
+    size_t copied = 0;
+    auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+    EXPECT_CALL(*delegate, SaveKvCaches(_, _, _)).Times(3)
+        .WillRepeatedly(Invoke([&](const Uris& u, const Buffers& b, auto t) {
+            const size_t window = banks.size(), first = window * 64;
+            events.push_back("W" + std::to_string(window));
+            EXPECT_EQ(pending.size(), window == 0 ? 64u : window == 1 ? 1u : 0u);
+            EXPECT_EQ(u, Uris(uris.begin() + first, uris.begin() + first + b.size()));
+            EXPECT_TRUE(t && t->block_ids == Uris(trace->block_ids.begin() + first, trace->block_ids.begin() + first + b.size()));
+            if (b.empty() || b[0].iovs.size() != 1) return std::make_pair(Code::ER_INVALID_PARAMS, Uris{});
+            banks.push_back(b[0].iovs[0].base);
+            for (size_t j = 0; j < b.size(); ++j) {
+                std::vector<unsigned char> data(bytes_per_object);
+                EXPECT_EQ(cudaMemcpy(data.data(), b[j].iovs[0].base, data.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+                EXPECT_TRUE(std::all_of(data.begin(), data.end(), [=](unsigned char v) { return v == 1 + first + j; }));
+            }
+            EXPECT_EQ(leasedBytes(), 2 * bank_bytes);
+            Uris actual = u; for (auto& uri : actual) uri += "-saved";
+            return std::make_pair(Code::ER_OK, actual);
+        }));
+    Client client(std::move(delegate), [&](void* dst, M, const void* src, M, size_t bytes) {
+        if (copied % 64 == 0) events.push_back("G" + std::to_string(copied / 64));
+        ++copied; pending.emplace_back(dst, src, bytes); return true;
+    }, context, 1, [&] {
+        events.push_back("F");
+        for (const auto& [dst, src, bytes] : pending)
+            EXPECT_EQ(cudaMemcpy(dst, src, bytes, cudaMemcpyDeviceToDevice), cudaSuccess);
+        pending.clear(); return cudaStreamSynchronize(nullptr) == cudaSuccess;
+    }, true);
+    const auto result = client.SaveKvCaches(uris, buffers, trace);
+    EXPECT_EQ(result.first, Code::ER_OK);
+    Uris expected = uris; for (auto& uri : expected) uri += "-saved";
+    EXPECT_EQ(result.second, expected);
+    EXPECT_EQ(events, (std::vector<std::string>{"G0", "F", "G1", "W0", "F", "G2", "W1", "F", "W2"}));
+    ASSERT_EQ(banks.size(), 3u); EXPECT_NE(banks[0], banks[1]); EXPECT_EQ(banks[0], banks[2]);
+    EXPECT_TRUE(pending.empty()); EXPECT_EQ(leasedBytes(), 0u);
+}
+TEST_F(NativeSsdGpuReadWindowTest, PipelineFailureMustDrainCopiesBeforeReturningSafeOrKeepBothBanks) {
+    const auto safe = expectedPreflightError(Code::ER_INVALID_LOCAL_BUFFERS);
+    if (!kvcm::sdkCodeProvesBufferSafety(safe)) GTEST_SKIP() << "SDK lacks explicit buffer-safe error codes";
+    for (bool write : {false, true}) for (int failure = 0; failure < 4; ++failure) {
+        registerPipelineSpans();
+        size_t copies = 0, fences = 0, calls = 0, pending = 0;
+        const size_t objects = write ? 65 : 2, bank_bytes = write ? 64 * 17 : 17;
+        Uris uris(objects, "object"); auto buffers = destinations(std::vector<size_t>(objects, 17));
+        auto fail = [&]() -> Code {
+            EXPECT_GT(pending, 0u);
+            if (failure == 3) throw std::runtime_error("uncertain SDK call");
+            return failure == 2 ? Code::ER_SDK_TIMEOUT : safe;
+        };
+        auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+        if (write) EXPECT_CALL(*delegate, SaveKvCaches(_, _, _)).WillOnce(Invoke([&](auto, auto, auto) {
+            ++calls; return std::make_pair(fail(), Uris{});
+        }));
+        else EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(2).WillRepeatedly(Invoke([&](auto, auto, auto) {
+            return ++calls == 1 ? Code::ER_OK : fail();
+        }));
+        {
+            Client client(std::move(delegate), [&](auto, auto, auto, auto, size_t) {
+                ++copies; ++pending; return true; // No DMA in this fault-injection test.
+            }, context, 1, [&] {
+                ++fences; pending = 0;
+                return failure != 1 || fences != (write ? 2u : 1u);
+            }, true);
+            if (failure == 3) {
+                if (write) EXPECT_THROW(client.SaveKvCaches(uris, buffers), std::runtime_error);
+                else EXPECT_THROW(client.LoadKvCaches(uris, buffers), std::runtime_error);
+            } else {
+                const auto result = write ? client.SaveKvCaches(uris, buffers).first : client.LoadKvCaches(uris, buffers);
+                EXPECT_EQ(result, failure == 1 ? Code::ER_CUDAMEMCPY_ERROR : failure == 2 ? Code::ER_SDK_TIMEOUT : safe);
+            }
+            EXPECT_EQ(calls, write ? 1u : 2u); EXPECT_EQ(copies, write ? 65u : 1u);
+            EXPECT_EQ(fences, write ? 2u : 1u); EXPECT_EQ(pending, 0u);
+            EXPECT_EQ(leasedBytes(), failure ? 2 * bank_bytes : 0u);
+            if (failure) {
+                EXPECT_EQ(client.LoadKvCaches({"blocked"}, destinations({17})),
+                          expectedPreflightError(Code::ER_INVALID_LOCAL_BUFFERS));
+            }
+        }
+        EXPECT_EQ(leasedBytes(), 0u); // Fake SDK has no DMA; its client is now destroyed.
+    }
+}
+TEST_F(NativeSsdGpuReadWindowTest, PipelineDrainsItsPendingCopyWhenAnotherReaderBecomesUnknown) {
+    registerPipelineSpans();
+    struct State {
+        std::promise<void> entered, release, done;
+        std::shared_future<void> released = release.get_future().share(), finished = done.get_future().share();
+        std::atomic<bool> signalled{false};
+        std::atomic<size_t> fences{0};
+        std::shared_ptr<void> output;
+        void signal() { if (!signalled.exchange(true)) release.set_value(); }
+    };
+    auto state = std::make_shared<State>(); state->output = output;
+    struct Guard { std::shared_ptr<State> state; ~Guard() { state->signal(); } } guard{state};
+    auto entered = state->entered.get_future();
+    auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+    EXPECT_CALL(*delegate, LoadKvCaches(Uris{"b"}, _, _)).WillOnce(Invoke([state](auto, auto, auto) {
+        state->entered.set_value(); state->released.wait(); return Code::ER_SDK_TIMEOUT;
+    }));
+    EXPECT_CALL(*delegate, LoadKvCaches(Uris{"a0"}, _, _)).WillOnce(Return(Code::ER_OK));
+    auto client = std::make_shared<Client>(std::move(delegate), [state](auto, auto, auto, auto, size_t) {
+        // a0's scatter is now pending. Arrange for b to quarantine before a1.
+        state->signal(); return state->finished.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+    }, context, 1, [state] { ++state->fences; return true; }, true);
+    auto b_buffers = destinations({17});
+    block_tree_cache_test::BoundedThread<Code> b([client, state, b_buffers] {
+        const auto result = client->LoadKvCaches({"b"}, b_buffers);
+        state->done.set_value(); return result;
+    });
+    const auto status = entered.wait_for(std::chrono::seconds(5));
+    const auto result = client->LoadKvCaches({"a0", "a1"}, destinations({17, 17}));
+    state->signal();
+    ASSERT_EQ(b.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(b.get(), Code::ER_SDK_TIMEOUT);
+    EXPECT_EQ(status, std::future_status::ready);
+    EXPECT_EQ(result, expectedPreflightError(Code::ER_INVALID_LOCAL_BUFFERS));
+    EXPECT_EQ(state->fences.load(), 1u); // Safe early return must drain a0, even though a1 never starts.
+    EXPECT_EQ(leasedBytes(), 17u); // Only b's one-bank UNKNOWN, not a's double bank.
+    client.reset(); EXPECT_EQ(leasedBytes(), 0u);
+}
+TEST_F(NativeSsdGpuReadWindowTest, PipelineCopyAndFenceExceptionsKeepBothBanks) {
+    for (bool write : {false, true}) for (bool fence_throws : {false, true}) {
+        registerPipelineSpans();
+        const size_t count = write ? 65 : 2, bank_bytes = write ? 64 * 17 : 17;
+        size_t copied = 0, fences = 0;
+        auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+        if (write) EXPECT_CALL(*delegate, SaveKvCaches(_, _, _)).Times(fence_throws ? 1 : 0)
+            .WillRepeatedly(Return(std::make_pair(Code::ER_OK, Uris{})));
+        else EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(fence_throws ? 2 : 1)
+            .WillRepeatedly(Return(Code::ER_OK));
+        {
+            Client client(std::move(delegate), [&](auto, auto, auto, auto, size_t) {
+                if (++copied == (write ? 65u : 1u) && !fence_throws) throw std::runtime_error("copy enqueue");
+                return true; // Fake copy, so no DMA survives the test.
+            }, context, 1, [&] {
+                if (++fences == (write ? 2u : 1u) && fence_throws) throw std::runtime_error("copy fence");
+                return true;
+            }, true);
+            if (write) EXPECT_THROW(client.SaveKvCaches(Uris(count, "one"), destinations(std::vector<size_t>(count, 17))), std::runtime_error);
+            else EXPECT_THROW(client.LoadKvCaches(Uris(count, "one"), destinations(std::vector<size_t>(count, 17))), std::runtime_error);
+            EXPECT_EQ(leasedBytes(), 2 * bank_bytes);
+            EXPECT_EQ(fences, (write ? 1u : 0u) + (fence_throws ? 2u : 1u));
+        }
+        EXPECT_EQ(leasedBytes(), 0u);
+    }
+}
+TEST_F(NativeSsdGpuReadWindowTest, PipelineFallsBackWithoutRejectingSerialGeometryOrArenaCapacity) {
+    for (int reason = 0; reason < 6; ++reason) {
+        registerPipelineSpans();
+        auto buffers = destinations({17, 17});
+        if (reason == 0) { // Only one bank fits; optional second-bank reservation must roll back.
+            context->free_ranges = {{0, 17}};
+        } else if (reason == 1) {
+            for (auto& block : buffers) block.iovs[0].base = arena.get();
+        } else if (reason == 2) context->registered = false;
+        else if (reason == 3) context->registered_gpu_spans.clear();
+        else if (reason == 4) buffers.resize(1);
+        else context = std::make_shared<Client::GpuPackingContext>(arena); // Unknown device.
+        size_t calls = 0, fences = 0;
+        auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+        EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(buffers.size()).WillRepeatedly(Invoke([&](auto, auto, auto) {
+            EXPECT_EQ(fences, calls); ++calls; return Code::ER_OK;
+        }));
+        Client client(std::move(delegate), [](auto, auto, auto, auto, size_t) { return true; }, context, 1,
+                      [&] { ++fences; return true; }, true);
+        EXPECT_EQ(client.LoadKvCaches(Uris(buffers.size(), "one"), buffers), Code::ER_OK);
+        EXPECT_EQ(calls, buffers.size()); EXPECT_EQ(fences, calls);
+        EXPECT_EQ(context->active_reservations, 0u);
+        if (reason == 0) {
+            std::lock_guard<std::mutex> lock(context->mutex);
+            EXPECT_EQ(context->free_ranges, (std::vector<std::pair<size_t, size_t>>{{0, 17}}));
+        }
+    }
+}
+
 TEST_F(NativeSsdGpuReadWindowTest, ExplicitSafeSdkFailureReleasesArenaAndPermitsRetry) {
     checkSafeSdkRetry<Code>();
 }

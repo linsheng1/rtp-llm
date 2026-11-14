@@ -68,8 +68,9 @@ public:
         }
     };
     // Without Fence, Copy finishes before returning. With Fence, copies stay
-    // ordered on one caller-thread stream and Fence drains the entire window
-    // before external RDMA, reuse, or return. Failed drains keep the operation.
+    // ordered on one caller-thread stream. Fence drains a bank before RDMA
+    // accesses it, reuse, or return; another bank may overlap. Failed drains
+    // keep the operation. Overlap requires a nonempty Fence.
     using Copy =
         std::function<bool(void*, kv_cache_manager::MemoryType, const void*, kv_cache_manager::MemoryType, size_t)>;
     using Fence = std::function<bool()>;
@@ -84,16 +85,19 @@ public:
                             Copy                                              copy,
                             std::shared_ptr<GpuPackingContext>                gpu_context,
                             size_t                                            read_window_objects = 1,
-                            Fence                                             fence = {}):
+                            Fence                                             fence = {},
+                            bool                                              overlap_windows = false):
         inner_(std::move(inner)),
         copy_(std::move(copy)),
         gpu_context_(std::move(gpu_context)),
         staging_type_(kv_cache_manager::MemoryType::GPU),
-        read_window_objects_(read_window_objects), fence_(std::move(fence)) {
+        read_window_objects_(read_window_objects), fence_(std::move(fence)), overlap_windows_(overlap_windows) {
         if (!inner_ || !copy_ || (!gpu_context_ || !gpu_context_->memory))
             throw std::invalid_argument("missing SSD delegate/copy operation");
         if (!read_window_objects_ || read_window_objects_ > max_read_window_objects)
             throw std::invalid_argument("invalid SSD read window size");
+        if (overlap_windows_ && !fence_)
+            throw std::invalid_argument("SSD window overlap requires a copy fence");
     }
     ~PackedSsdTransferClient() override {
         // The SDK delegate drains before staging memory (including failures)
@@ -122,18 +126,41 @@ public:
         } catch (const std::length_error&) {
             return preflightFailure(kv_cache_manager::ER_INVALID_LOCAL_BUFFERS);
         }
-        for (size_t window = 0; window < operation->read_ranges.size(); ++window) {
-            bool copies_pending = false;
-            try {
-                if (hasQuarantine()) return preflightFailure(kv_cache_manager::ER_INVALID_LOCAL_BUFFERS);
+        bool copies_pending = false;
+        try {
+            for (size_t window = 0; window < operation->read_ranges.size(); ++window) {
+                if (hasQuarantine()) {
+                    if (!finishCopies(copies_pending)) {
+                        quarantine(operation);
+                        return kv_cache_manager::ER_CUDAMEMCPY_ERROR;
+                    }
+                    return preflightFailure(kv_cache_manager::ER_INVALID_LOCAL_BUFFERS);
+                }
+                // With two disjoint banks, this SDK call can overlap the
+                // preceding scatter. Its bank was drained two iterations ago.
                 const auto result = loadBatch(*operation->calls[window]);
                 if (result != kv_cache_manager::ER_OK) {
-                    if (!sdkCodeProvesBufferSafety(result)) quarantine(operation);
+                    if (!sdkCodeProvesBufferSafety(result)) {
+                        if (copies_pending) drainCopies();
+                        copies_pending = false;
+                        quarantine(operation);
+                        return result;
+                    }
+                    if (!finishCopies(copies_pending)) {
+                        quarantine(operation);
+                        return kv_cache_manager::ER_CUDAMEMCPY_ERROR;
+                    }
                     return result;
                 }
+                // Preserve caller destination order, including overlapping
+                // user IOVs, before enqueueing this window's scatter.
+                if (!finishCopies(copies_pending)) {
+                    quarantine(operation);
+                    return kv_cache_manager::ER_CUDAMEMCPY_ERROR;
+                }
                 const auto& range = operation->read_ranges[window];
+                copies_pending = true;
                 for (size_t block = range.first; block < range.second; ++block) {
-                    copies_pending = true;
                     if (!copyBlock(destination[block], operation->bytes[block].get(), false)) {
                         drainCopies();
                         copies_pending = false;
@@ -141,17 +168,19 @@ public:
                         return kv_cache_manager::ER_CUDAMEMCPY_ERROR;
                     }
                 }
-                const bool complete = !fence_ || fence_();
-                copies_pending = false;
-                if (!complete) {
+                if (!operation->pipelined && !finishCopies(copies_pending)) {
                     quarantine(operation);
                     return kv_cache_manager::ER_CUDAMEMCPY_ERROR;
                 }
-            } catch (...) {
-                if (copies_pending) drainCopies();
-                quarantine(operation);
-                throw;
             }
+            if (!finishCopies(copies_pending)) {
+                quarantine(operation);
+                return kv_cache_manager::ER_CUDAMEMCPY_ERROR;
+            }
+        } catch (...) {
+            if (copies_pending) drainCopies();
+            quarantine(operation);
+            throw;
         }
         return kv_cache_manager::ER_OK;
     }
@@ -173,36 +202,47 @@ public:
         } catch (const std::length_error&) {
             return {preflightFailure(kv_cache_manager::ER_INVALID_LOCAL_BUFFERS), {}};
         }
-        auto gather = [&](size_t block) {
-            return copyBlock(source[block], operation->bytes[block].get(), true);
-        };
-        for (size_t window = 0; window < operation->write_ranges.size(); ++window) {
+        bool copies_pending = false;
+        auto gather = [&](size_t window) {
             const auto& range = operation->write_ranges[window];
-            // Each URI has a disjoint GPU subspan. Complete every gather in the
-            // window before submitting its single multi-URI SDK operation.
-            bool copies_pending = false;
-            try {
-                for (size_t block = range.first; block < range.second; ++block) {
-                    copies_pending = true;
-                    if (!gather(block)) {
-                        drainCopies();
-                        copies_pending = false;
-                        quarantine(operation);
-                        return {kv_cache_manager::ER_CUDAMEMCPY_ERROR, {}};
-                    }
-                }
-                const bool complete = !fence_ || fence_();
-                copies_pending = false;
-                if (!complete) {
+            copies_pending = true;
+            for (size_t block = range.first; block < range.second; ++block)
+                if (!copyBlock(source[block], operation->bytes[block].get(), true)) return false;
+            return true;
+        };
+        try {
+            if (operation->pipelined && (!gather(0) || !finishCopies(copies_pending))) {
+                if (copies_pending) drainCopies();
+                quarantine(operation);
+                return {kv_cache_manager::ER_CUDAMEMCPY_ERROR, {}};
+            }
+            for (size_t window = 0; window < operation->write_ranges.size(); ++window) {
+                const auto& range = operation->write_ranges[window];
+                // The current bank is ready. Gather into the OTHER bank before
+                // Save so its GPU copy can run while the one SDK call blocks.
+                // Save calls remain serial under this method's exclusive lock.
+                const bool prepared = operation->pipelined ?
+                    (window + 1 == operation->write_ranges.size() || gather(window + 1)) :
+                    (gather(window) && finishCopies(copies_pending));
+                if (!prepared) {
+                    if (copies_pending) drainCopies();
                     quarantine(operation);
                     return {kv_cache_manager::ER_CUDAMEMCPY_ERROR, {}};
                 }
                 auto result = saveBatch(*operation->write_calls[window]);
-                if (result.first != kv_cache_manager::ER_OK) {
-                    if (!sdkCodeProvesBufferSafety(result.first))
-                        quarantine(operation);
+                if (result.first != kv_cache_manager::ER_OK && !sdkCodeProvesBufferSafety(result.first)) {
+                    if (copies_pending) drainCopies();
+                    copies_pending = false;
+                    quarantine(operation);
                     return {result.first, {}};
                 }
+                // A safe SDK failure is not proof that our lookahead copy has
+                // stopped. Drain it successfully before any safe return/reuse.
+                if (!finishCopies(copies_pending)) {
+                    quarantine(operation);
+                    return {kv_cache_manager::ER_CUDAMEMCPY_ERROR, {}};
+                }
+                if (result.first != kv_cache_manager::ER_OK) return {result.first, {}};
                 if (!result.second.empty()) {
                     if (result.second.size() != range.second - range.first) {
                         quarantine(operation);
@@ -211,13 +251,11 @@ public:
                     for (size_t i = 0; i < result.second.size(); ++i)
                         actual[range.first + i] = std::move(result.second[i]);
                 }
-            } catch (...) {
-                if (copies_pending) drainCopies();
-                quarantine(operation);
-                throw;
             }
-            // Only successful completion permits the next window to reuse
-            // these addresses. Unknown completion retains the entire lease.
+        } catch (...) {
+            if (copies_pending) drainCopies();
+            quarantine(operation);
+            throw;
         }
         return {kv_cache_manager::ER_OK, std::move(actual)};
     }
@@ -235,6 +273,20 @@ private:
         if constexpr (detail::HasExplicitBufferSafeCodes<C>::value)
             return C::ER_SDK_ERROR_BUFFER_SAFE;
         return fallback;
+    }
+
+    bool canOverlapWindows(const Buffers& buffers) const {
+        if (!overlap_windows_ || !gpu_context_->registered || gpu_context_->device_id < 0) return false;
+        const auto arena = reinterpret_cast<uintptr_t>(gpu_context_->memory.get());
+        const auto limit = std::numeric_limits<uintptr_t>::max();
+        if (max_operation_bytes > limit - arena) return false;
+        for (const auto& block : buffers) for (const auto& iov : block.iovs) {
+            if (iov.ignore) continue;
+            const auto user = reinterpret_cast<uintptr_t>(iov.base);
+            if (iov.size > limit - user || (user < arena + max_operation_bytes && arena < user + iov.size)
+                || !gpu_context_->coversRegisteredGpuSpan({iov.base, iov.size}, gpu_context_->device_id)) return false;
+        }
+        return true;
     }
 
     bool canCoalesceCopy(void* user, const void* packed, size_t bytes) const {
@@ -317,6 +369,12 @@ private:
                 result.first != kv_cache_manager::ER_OK);
         return result;
     }
+    bool finishCopies(bool& pending) {
+        if (!pending) return true;
+        const bool complete = !fence_ || fence_();
+        pending = false;
+        return complete;
+    }
     void drainCopies() noexcept {
         if (fence_) {
             try { (void)fence_(); } catch (...) {}
@@ -352,6 +410,7 @@ private:
     };
     struct Operation {
         size_t                                 charged = 0;
+        bool                                   pipelined{false};
         std::shared_ptr<GpuRangeLease>         gpu_lease;
         std::vector<std::shared_ptr<void>>     bytes;
         Buffers                                buffers;
@@ -420,44 +479,64 @@ private:
             charge = std::max(charge, bytes);
             begin  = end;
         }
-        // Charge the largest simultaneously live GPU window, not the whole
-        // logical request. A large object still reserves its own window.
-        size_t previous = process_bytes_.load();
-        do {
-            if (previous > max_process_bytes - charge)
-                return {};
-        } while (!process_bytes_.compare_exchange_weak(previous, previous + charge));
-        operation->charged = charge;
+        const size_t bank_bytes = charge;
+        operation->pipelined = ranges.size() > 1 && bank_bytes <= max_operation_bytes / 2
+                               && canOverlapWindows(original);
         operation->bytes.resize(sizes.size());
         operation->buffers.resize(sizes.size());
         size_t offset = 0;
-        {
+        for (;;) {
+            // Account for both simultaneously live banks. Optional overlap
+            // never enlarges the arena/process limits or rejects a request
+            // that could acquire the original one-bank lease instead.
+            charge = operation->pipelined ? 2 * bank_bytes : bank_bytes;
+            size_t previous = process_bytes_.load();
+            bool charged = false;
+            while (previous <= max_process_bytes - charge) {
+                if (process_bytes_.compare_exchange_weak(previous, previous + charge)) {
+                    charged = true;
+                    break;
+                }
+            }
+            if (!charged) {
+                if (!operation->pipelined) return {};
+                operation->pipelined = false;
+                continue;
+            }
+            operation->charged = charge;
             auto lease = std::make_shared<GpuRangeLease>();
             {
                 std::lock_guard<std::mutex> guard(gpu_context_->mutex);
-                if (gpu_context_->active_reservations >= 1024)
-                    return {};
+                if (gpu_context_->active_reservations >= 1024) return {};
                 auto& free = gpu_context_->free_ranges;
-                auto  it =
-                    std::find_if(free.begin(), free.end(), [charge](const auto& r) { return r.second >= charge; });
-                if (it == free.end())
-                    return {};
-                offset = it->first;
-                it->first += charge;
-                it->second -= charge;
-                if (it->second == 0)
-                    free.erase(it);
-                ++gpu_context_->active_reservations;
-                lease->context = gpu_context_;
-                lease->begin   = offset;
-                lease->bytes   = charge;
+                auto it = std::find_if(free.begin(), free.end(), [charge](const auto& r) { return r.second >= charge; });
+                if (it != free.end()) {
+                    offset = it->first;
+                    it->first += charge;
+                    it->second -= charge;
+                    if (it->second == 0) free.erase(it);
+                    ++gpu_context_->active_reservations;
+                    lease->context = gpu_context_;
+                    lease->begin = offset;
+                    lease->bytes = charge;
+                }
             }
-            operation->gpu_lease = std::move(lease);
+            if (lease->context) {
+                operation->gpu_lease = std::move(lease);
+                break;
+            }
+            if (!operation->pipelined) return {};
+            process_bytes_.fetch_sub(operation->charged);
+            operation->charged = 0;
+            operation->pipelined = false;
         }
-        for (size_t i = 0; i < sizes.size(); ++i) {
-            operation->bytes[i] = std::shared_ptr<void>(
-                gpu_context_->memory, static_cast<unsigned char*>(gpu_context_->memory.get()) + offset + offsets[i]);
-            operation->buffers[i].iovs.push_back({staging_type_, operation->bytes[i].get(), sizes[i], false});
+        for (size_t window = 0; window < ranges.size(); ++window) {
+            const size_t bank_offset = operation->pipelined ? (window % 2) * bank_bytes : 0;
+            for (size_t i = ranges[window].first; i < ranges[window].second; ++i) {
+                operation->bytes[i] = std::shared_ptr<void>(gpu_context_->memory,
+                    static_cast<unsigned char*>(gpu_context_->memory.get()) + offset + bank_offset + offsets[i]);
+                operation->buffers[i].iovs.push_back({staging_type_, operation->bytes[i].get(), sizes[i], false});
+            }
         }
         auto& calls = write ? operation->write_calls : operation->calls;
         calls.reserve(ranges.size());
@@ -478,6 +557,7 @@ private:
     kv_cache_manager::MemoryType                      staging_type_;
     const size_t                                      read_window_objects_;
     Fence                                             fence_;
+    const bool                                        overlap_windows_;
     std::shared_mutex                                 mutex_;
     std::mutex                                        quarantine_mutex_;
     SdkTransferObserver                               transfer_observer_;

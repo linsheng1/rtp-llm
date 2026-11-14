@@ -126,7 +126,7 @@ createNativeSsdGpu(const std::string&                                 config,
         },
         std::move(context),
         PackedSsdTransferClient::max_read_window_objects,
-        [] { return cudaStreamSynchronize(nullptr) == cudaSuccess; });
+        [] { return cudaStreamSynchronize(nullptr) == cudaSuccess; }, true);
 #else
     throw std::invalid_argument("native SSD GDR requires CUDA");
 #endif
