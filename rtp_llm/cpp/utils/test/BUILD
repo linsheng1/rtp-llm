@@ -28,20 +28,6 @@ cc_test(
 )
 
 cc_test(
-    name = "decode_cache_origin_test",
-    srcs = ["DecodeCacheOriginTest.cc"],
-    copts = copts(),
-    deps = google_test_deps + ["//rtp_llm/cpp/utils:decode_cache_origin"],
-)
-
-cc_test(
-    name = "physical_decode_origins_test",
-    srcs = ["PhysicalDecodeOriginsTest.cc"],
-    copts = copts(),
-    deps = google_test_deps + ["//rtp_llm/cpp/utils:physical_decode_origins"],
-)
-
-cc_test(
     name = "remote_cache_config_test",
     srcs = ["RemoteCacheConfigTest.cc"],
     copts = copts(),

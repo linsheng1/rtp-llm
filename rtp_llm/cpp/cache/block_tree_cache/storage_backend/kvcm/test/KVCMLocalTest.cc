@@ -1128,7 +1128,7 @@ TEST(KVCMLocalTest, PrefillNonrootBackendDoesNotInstallDecodePayloadObserver) {
     }
 }
 
-TEST(KVCMLocalTest, PrefillLoadsDecoratedOrPlainUriWithoutEnablingDecodeProvenance) {
+TEST(KVCMLocalTest, PrefillForwardsDecoratedOrPlainUriAndExactDestinationDescriptors) {
     for (const bool known_source : {true, false}) {
         SCOPED_TRACE(known_source);
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
@@ -1140,11 +1140,8 @@ TEST(KVCMLocalTest, PrefillLoadsDecoratedOrPlainUriWithoutEnablingDecodeProvenan
         EXPECT_CALL(*client, shutdown()).Times(1);
         auto backend = makeCompletionProofBackend(environment, client);
         ASSERT_TRUE(initSingleRank(*backend.backend, environment));
-        auto source = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".4.0.8.8.9");
-        ASSERT_TRUE(source);
-        EXPECT_EQ(environment.device_pool->decodeOriginIncarnation(environment.block_id), uint64_t{0});
         const std::string           canonical = "pace://allocated/1?media_type=2&node_id=1&size=32";
-        const auto                  uri       = known_source ? *attachDecodeCacheOrigin(canonical, *source) : canonical;
+        const auto uri = known_source ? canonical + "&dtop_origin=v1." + std::string(32, 'a') + ".4.0.8.8.9" : canonical;
         kv_cache_manager::Locations locations{{{"tp0_Fdefault", uri}}};
         EXPECT_CALL(*client, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
         auto observation = match(*backend.backend, makeStorageRequest(environment));
@@ -1153,7 +1150,6 @@ TEST(KVCMLocalTest, PrefillLoadsDecoratedOrPlainUriWithoutEnablingDecodeProvenan
         EXPECT_CALL(*client, loadKvCachesForTag("default", kv_cache_manager::UriStrVec{uri}, _, _))
             .WillOnce(Invoke([&](const auto&, const auto&, auto& buffers, const auto&) {
                 // The original read still reaches the actual destination buffer.
-                EXPECT_FALSE(environment.device_pool->decodeOrigin(environment.block_id, "default"));
                 const auto expected = environmentBuffers(environment, 0, "default", environment.block_id);
                 EXPECT_EQ(buffers.size(), 1u);
                 if (buffers.size() == 1) {
@@ -1166,8 +1162,6 @@ TEST(KVCMLocalTest, PrefillLoadsDecoratedOrPlainUriWithoutEnablingDecodeProvenan
                 return true;
             }));
         EXPECT_TRUE(read(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta)));
-        EXPECT_FALSE(environment.device_pool->decodeOrigin(environment.block_id, "default"));
-        EXPECT_EQ(environment.device_pool->decodeOriginIncarnation(environment.block_id), uint64_t{0});
         });
     }
 }

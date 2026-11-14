@@ -436,7 +436,6 @@ struct PublicationGroupSnapshot {
     BlockIndicesType physical, kernel, endpoint_blocks, pinned;
     std::weak_ptr<BlockIds> owner;
     std::vector<std::weak_ptr<const DecodeEndpoint::PageHold>> holds;
-    std::vector<uint64_t> incarnations, pin_incarnations;
     std::vector<uint32_t> refs;
 };
 struct PublicationCallSnapshot {
@@ -501,8 +500,6 @@ protected:
         cache_manager_ = std::make_shared<KVCacheManager>(config, false, nullptr, settings, parallel,
                                                          RuntimeConfig{}, speculation, pd);
         ASSERT_TRUE(cache_manager_->init());
-        for (const auto& pool : cache_manager_->coordinator_manager_->groupBlockPools())
-            ASSERT_TRUE(pool->enableDecodeOriginTracking());
         backend_ = std::make_shared<StreamReadStorageBackend>();
         cache_manager_->coordinator_manager_->block_tree_cache_.reset();
         cache_manager_->block_tree_cache_.reset();
@@ -558,9 +555,7 @@ protected:
                     if (isNullBlockIdx(block)) continue;
                     ASSERT_TRUE(pools[i]->isAllocated(block));
                     group.refs.push_back(pools[i]->refCount(block));
-                    group.incarnations.push_back(pools[i]->decodeOriginIncarnation(block));
                     EXPECT_GT(group.refs.back(), 0u);
-                    EXPECT_GT(group.incarnations.back(), 0u);
                 }
                 if (value.decode_endpoint) {
                     const auto blocks = value.decode_endpoint->blocks.find(tags[i]);
@@ -571,10 +566,12 @@ protected:
                             ASSERT_TRUE(hold);
                             ASSERT_TRUE(hold->pool->isAllocated(hold->block));
                             EXPECT_GT(hold->pool->refCount(hold->block), 0u);
+                            ASSERT_TRUE(hold->pin);
+                            EXPECT_EQ(hold->pin.get(), hold->pool.get());
+                            EXPECT_EQ(hold->pin.get_deleter().block, hold->block);
+                            EXPECT_NE(hold->pin.get_deleter().release, nullptr);
                             group.pinned.push_back(hold->block);
                             group.holds.push_back(hold);
-                            group.pin_incarnations.push_back(hold->pool->decodeOriginIncarnation(hold->block));
-                            EXPECT_GT(group.pin_incarnations.back(), 0u);
                         }
                     }
                 }
@@ -650,12 +647,10 @@ protected:
             EXPECT_EQ(group.physical, released.physical);
             EXPECT_EQ(group.kernel, released.kernel);
             EXPECT_EQ(group.endpoint_blocks, released.endpoint_blocks);
-            EXPECT_EQ(group.incarnations, released.incarnations);
             EXPECT_EQ(group.refs, released.refs);
             EXPECT_FALSE(group.owner.owner_before(released.owner));
             EXPECT_FALSE(released.owner.owner_before(group.owner));
             EXPECT_EQ(group.pinned, released.pinned);
-            EXPECT_EQ(group.pin_incarnations, released.pin_incarnations);
             ASSERT_EQ(group.holds.size(), released.holds.size());
             for (size_t i = 0; i < group.holds.size(); ++i) {
                 EXPECT_FALSE(group.holds[i].owner_before(released.holds[i]));

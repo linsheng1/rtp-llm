@@ -15,7 +15,6 @@
 
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/PhysicalDecodeOrigins.h"
 
 namespace rtp_llm {
 
@@ -94,22 +93,6 @@ public:
     bool validBlock(BlockIdxType block) const;
     bool isAllocated(BlockIdxType block) const;
 
-    // Optional source metadata bound to the exact physical allocation. Table
-    // access uses mutex_; a never-bound lookup needs no table access.
-    bool                          enableDecodeOriginTracking();
-    uint64_t                      decodeOriginIncarnation(BlockIdxType block) const;
-    PhysicalDecodeOrigins::Origin decodeOrigin(BlockIdxType block, std::string_view region) const;
-    // A paired read for provenance propagation; a null origin needs no stamp.
-    std::pair<uint64_t, PhysicalDecodeOrigins::Origin>
-    decodeOriginSnapshot(BlockIdxType block, std::string_view region) const;
-    // Synchronous overwrite preparation only; the caller owns a block reference.
-    // Completion callbacks must keep using bindDecodeOrigin(expected_incarnation).
-    uint64_t clearDecodeOrigin(BlockIdxType block, std::string_view region);
-    bool                          bindDecodeOrigin(BlockIdxType                  block,
-                                                   uint64_t                      expected_incarnation,
-                                                   std::string_view              region,
-                                                   PhysicalDecodeOrigins::Origin origin);
-
     size_t totalBlocksNum() const;
     size_t freeBlocksNum() const;
     // Blocks that can be reclaimed for a new request: physical free blocks plus
@@ -184,10 +167,6 @@ protected:
     void     updateActiveBlocksNumNoLock(BlockIdxType block, bool was_active);
     void     updateAvailableBlocksNumNoLock(BlockIdxType block, bool was_available);
     void     freeAllocatedBlockNoLock(BlockIdxType block);
-    void     beginDecodeOriginIncarnationNoLock(BlockIdxType block) {
-        if (decode_origins_)
-            decode_origins_->beginAllocation(block);
-    }
 
     mutable std::mutex mutex_;
 
@@ -214,9 +193,6 @@ private:
     bool                                                      initialized_{false};
     std::function<void()>                                     capacity_change_callback_;
     std::vector<uint8_t>                                      allocated_;
-    std::unique_ptr<PhysicalDecodeOrigins>                    decode_origins_;
-    // Sticky: once true, every lookup keeps the original locked behavior.
-    std::atomic<bool>                                        decode_origin_ever_bound_{false};
     std::vector<uint32_t>                                     tree_refcounts_;
     std::array<std::vector<uint32_t>, kBlockTreeRefTypeCount> tree_refcounts_by_type_;
     std::array<size_t, kBlockTreeRefTypeCount>                tree_referenced_block_counts_{};

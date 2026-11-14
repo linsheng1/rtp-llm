@@ -2396,37 +2396,29 @@ TEST_F(TransferWorkLoopCrcTest, DirectionPollScansAllDevicesWithIndependentSlots
     releasePoolBlock(*other_host, destination);
 }
 
-TEST_F(TransferWorkLoopCrcTest, DecodeOriginsAreVisibleAtReadyAndClearedAfterCrcFailure) {
+TEST_F(TransferWorkLoopCrcTest, CrcFailureIsReportedBeforeLaterTransfersContinue) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
     initialize();
-    ASSERT_TRUE(device->enableDecodeOriginTracking());
-    const auto parsed = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".4.0.8.8.9");
-    ASSERT_TRUE(parsed);
-    const auto  origin = std::make_shared<const DecodeCacheOrigin>(*parsed);
-    const auto& tag    = group->groupTags().front();
-    ASSERT_TRUE(device->bindDecodeOrigin(sources[0], device->decodeOriginIncarnation(sources[0]), tag, origin));
     auto sealed = engine->execute(store(0, Tier::HOST));
     ASSERT_TRUE(await(sealed));
-    EXPECT_EQ(host->decodeOrigin(hosts[0], tag), origin);
+    ASSERT_TRUE(sealed->success());
     auto loaded = engine->execute(makeTransferTask({TransferDescriptor::hostToDevice(0, hosts[0], {targets[0]})}));
     loaded->onDone([&](TransferResult result) {
         EXPECT_TRUE(result.ok());
-        EXPECT_EQ(device->decodeOrigin(targets[0], tag), origin);
     });
     ASSERT_TRUE(await(loaded));
-    EXPECT_EQ(device->decodeOrigin(targets[0], tag), origin);
+    ASSERT_TRUE(loaded->success());
     static_cast<uint8_t*>(host->blockBuffer(hosts[0]).addr)[0] ^= 1;
     auto failed = engine->execute(makeTransferTask({TransferDescriptor::hostToDevice(0, hosts[0], {targets[0]})}));
     ASSERT_TRUE(await(failed));
     EXPECT_EQ(failed->result().copy_error, CacheCopyError::CRC_MISMATCH);
-    EXPECT_FALSE(device->decodeOrigin(targets[0], tag));
     auto offload = engine->execute(store(0));
     ASSERT_TRUE(await(offload));
-    EXPECT_EQ(disk->decodeOrigin(disks[0], tag), origin);
+    ASSERT_TRUE(offload->success());
     auto disk_load = engine->execute(makeTransferTask({TransferDescriptor::diskToDevice(0, disks[0], {targets[1]})}));
     ASSERT_TRUE(await(disk_load));
-    EXPECT_EQ(device->decodeOrigin(targets[1], tag), origin);
+    ASSERT_TRUE(disk_load->success());
     engine->shutdown();
     }, [&] { TearDown(); group.reset(); disk.reset(); host.reset(); retained_controlled_disk.reset(); device.reset(); reporter.reset(); raw.reset(); std::filesystem::remove_all(temp.path); });
 }
