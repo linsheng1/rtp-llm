@@ -193,7 +193,30 @@ public:
             RTP_LLM_LOG_ERROR("KVCM task timeout must be positive");
             return false;
         }
-        if (!configureDecodePublication(topology, buffer_resolver, pool_resolver)) {
+        kvcm::ClientWrapper::ConfigMap client_config_map;
+        kvcm::KVCMConfigPtr custom_config;
+        if (!kv_cache_config_.kvcm_client_config.empty()) {
+            try {
+                autil::legacy::FromJsonString(client_config_map, kv_cache_config_.kvcm_client_config);
+                if (client_config_map.size() == 1 && !client_config_map.begin()->first.empty()) {
+                    auto config = client_config_map.begin()->second;
+                    client_config_map.clear();
+                    client_config_map.emplace("", std::move(config));
+                }
+                if (client_config_map.size() != 1 || client_config_map.count("") != 1 || !client_config_map.at("")) {
+                    RTP_LLM_LOG_ERROR("BlockTree KVCM requires one default instance config");
+                    return false;
+                }
+                custom_config = client_config_map.at("");
+            } catch (const autil::legacy::ExceptionBase& error) {
+                RTP_LLM_LOG_ERROR("parse KVCM_CLIENT_CONFIG failed: %s", error.what());
+                return false;
+            } catch (const std::exception& error) {
+                RTP_LLM_LOG_ERROR("initialize BlockTree KVCM client config failed: %s", error.what());
+                return false;
+            }
+        }
+        if (!configureDecodePublication(topology, buffer_resolver, pool_resolver, custom_config)) {
             return false;
         }
         const auto quarantine_abort_ratio = remoteCacheQuarantineAbortRatio();
@@ -238,15 +261,30 @@ public:
             RTP_LLM_LOG_ERROR("BlockTree KVCM group policy init failed");
             return false;
         }
-        kvcm::ClientWrapper::ConfigMap client_config_map;
         try {
             if (!kv_cache_config_.kvcm_client_config.empty()) {
                 auto [location_infos, location_groups] = genLocationSpecs();
-                autil::legacy::FromJsonString(client_config_map, kv_cache_config_.kvcm_client_config);
-                if (client_config_map.size() == 1 && !client_config_map.begin()->first.empty()) {
-                    auto config = client_config_map.begin()->second;
-                    client_config_map.clear();
-                    client_config_map.emplace("", std::move(config));
+                if (decode_publication_enabled_) {
+                    // Check the supplied target layout before the original
+                    // disabled-group pruning replaces its specification map.
+                    const auto fields = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
+                        autil::legacy::ToJson(custom_config));
+                    kvcm::KVCMConfig::LocationSpecInfoMap supplied_infos;
+                    int64_t supplied_block_size = 0;
+                    autil::legacy::FromJson(supplied_infos, fields.at("location_spec_infos"));
+                    autil::legacy::FromJson(supplied_block_size, fields.at("block_size"));
+                    if (supplied_block_size != static_cast<int64_t>(cache_config_.seq_size_per_block)) {
+                        RTP_LLM_LOG_ERROR("Decode custom block_size does not match target Prefill block size");
+                        return false;
+                    }
+                    for (const auto& [name, bytes] : *location_infos) {
+                        const auto found = supplied_infos.find(name);
+                        if (found == supplied_infos.end() || found->second != bytes) {
+                            RTP_LLM_LOG_ERROR("Decode custom location spec [%s] does not match target Prefill bytes",
+                                              name.c_str());
+                            return false;
+                        }
+                    }
                 }
                 if (group_policy_->groups().size() != topology.groups().size()) {
                     // Keep custom settings and aliases, but only advertise

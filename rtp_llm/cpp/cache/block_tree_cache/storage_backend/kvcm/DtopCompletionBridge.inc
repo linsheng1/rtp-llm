@@ -3,7 +3,8 @@
 
 bool configureDecodePublication(const CacheTopology&                                                topology,
                                 const StorageBackend::BufferResolver&                               resolver,
-                                const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver) {
+                                const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver,
+                                const kvcm::KVCMConfigPtr& custom_config) {
     if (!remoteCacheDecodePublicationConfigValid()) {
         if (parallelism_config_.role_type == RoleType::DECODE) {
             RTP_LLM_LOG_ERROR("ENABLE_DECODE_PUBLISH must be 0 or 1");
@@ -23,12 +24,20 @@ bool configureDecodePublication(const CacheTopology&                            
     try {
         // Use the same polymorphic parser as client creation. Inspect its wire
         // type without rewriting the caller's SDK options (including logging).
-        kvcm::SdkWrapperConfig sdk;
-        sdk.parseBackendConfigs(kv_cache_config_.kvcm_model_sdk_config);
-        const auto& backends = sdk.sdk_backend_configs();
-        if (backends.size() == 1) {
+        autil::legacy::json::JsonArray backends;
+        if (custom_config) {
             const auto fields = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
-                autil::legacy::ToJson(backends.front()));
+                autil::legacy::ToJson(custom_config));
+            const auto sdk = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(fields.at("sdk_config"));
+            backends = autil::legacy::AnyCast<autil::legacy::json::JsonArray>(sdk.at("sdk_backend_configs"));
+        } else {
+            kvcm::SdkWrapperConfig sdk;
+            sdk.parseBackendConfigs(kv_cache_config_.kvcm_model_sdk_config);
+            backends = autil::legacy::AnyCast<autil::legacy::json::JsonArray>(
+                autil::legacy::ToJson(sdk.sdk_backend_configs()));
+        }
+        if (backends.size() == 1) {
+            const auto fields = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(backends.front());
             autil::legacy::FromJson(backend_type, fields.at("type"));
         }
     } catch (const autil::legacy::ExceptionBase& error) {
@@ -65,7 +74,7 @@ bool configureDecodePublication(const CacheTopology&                            
         || cache_config_.seq_size_per_block < 1
         || static_cast<size_t>(target_prefill_cp_)
                > static_cast<size_t>(std::numeric_limits<int>::max()) / cache_config_.seq_size_per_block
-        || ((!cache_config_.mtp_sub_configs.empty() || sp_config_.type != SP_TYPE_NONE) && !supported_speculation) || !kv_cache_config_.kvcm_client_config.empty()
+        || ((!cache_config_.mtp_sub_configs.empty() || sp_config_.type != SP_TYPE_NONE) && !supported_speculation)
         || (is_decode_role_ && (parallelism_config_.tp_size != 1 || parallelism_config_.dp_size < 1))) {
         RTP_LLM_LOG_ERROR(
             "Decode publication requires valid target CP, D TP1/positive DP, DSV4.1 complete target/draft endpoints, and native PACE: "

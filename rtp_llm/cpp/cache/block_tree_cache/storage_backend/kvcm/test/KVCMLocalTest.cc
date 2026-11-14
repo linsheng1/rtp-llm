@@ -794,13 +794,17 @@ TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWire
         return config;
     };
     struct Observation {
-        std::string identity;
+        bool initialized{false};
+        std::string identity, config_json, backend_type;
         kvcm::KVCMConfig::LocationSpecInfoMap infos;
         kvcm::KVCMConfig::LocationSpecGroups groups;
     };
-    const auto instance = [&](RoleType role, int cp, bool sharded, bool bounded, bool dspark, int gamma = 5) {
+    const auto instance = [&](RoleType role, int cp, bool sharded, bool bounded, bool dspark, int gamma = 5,
+                              bool ssd = false, const std::string& custom = {},
+                              bool expected_init = true, int decode_dp = 1) {
         auto parallel = singleRankConfig();
         parallel.role_type = role;
+        if (role == RoleType::DECODE) parallel.dp_size = decode_dp;
         parallel.tp_size = role == RoleType::PREFILL ? cp : 1;
         parallel.prefill_cp_config.prefill_cp_size = cp;
         parallel.prefill_cp_config.kv_cache_sharded = sharded;
@@ -808,7 +812,11 @@ TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWire
             (role == RoleType::PREFILL ? CPRotateMethod::ALL_GATHER : CPRotateMethod::PREFILL_CP);
         KVCacheConfig settings;
         settings.kvcm_server_address = "unused-test-address";
-        settings.kvcm_model_sdk_config = R"([{"type":"pace"}])";
+        settings.kvcm_client_config = custom;
+        settings.kvcm_read_backend_type = ssd ? 9 : 0;
+        // A selected custom config must not depend on the unused native JSON.
+        settings.kvcm_model_sdk_config = !custom.empty() ? "{invalid-unselected-native-sdk" :
+            (ssd ? R"([{"type":"pace_ssd"}])" : R"([{"type":"pace"}])");
         SpeculativeExecutionConfig speculation;
         speculation.type = dspark ? SP_TYPE_DSPARK : SP_TYPE_NONE;
         speculation.gen_num_per_cycle = dspark ? gamma : 0; // Draft layers remain three, independent of gamma.
@@ -849,13 +857,21 @@ TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWire
         initializeEnvironmentPools(environment, "v41_native_contract", 4);
         Observation observed;
         auto client = std::make_shared<MockClientWrapper>();
-        EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Invoke(
+        EXPECT_CALL(*client, initForPools(_, _, _, _)).Times(expected_init ? 1 : 0).WillRepeatedly(Invoke(
             [&](const auto& configs, auto, const auto&, const auto&) {
                 observed.identity = configs.at("")->instance_id();
+                observed.config_json = autil::legacy::ToJsonString(configs);
                 const auto fields = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(
                     autil::legacy::ToJson(configs.at("")));
                 autil::legacy::FromJson(observed.infos, fields.at("location_spec_infos"));
                 autil::legacy::FromJson(observed.groups, fields.at("location_spec_groups"));
+                const auto sdk = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(fields.at("sdk_config"));
+                const auto backends = autil::legacy::AnyCast<autil::legacy::json::JsonArray>(sdk.at("sdk_backend_configs"));
+                EXPECT_EQ(backends.size(), 1u);
+                if (!backends.empty()) {
+                    const auto backend = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(backends.front());
+                    autil::legacy::FromJson(observed.backend_type, backend.at("type"));
+                }
                 return true;
             }));
         EXPECT_CALL(*client, shutdown()).Times(1);
@@ -866,7 +882,12 @@ TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWire
             broadcast = std::make_shared<BroadcastManager>(std::vector<std::string>(cp, "unused-contract-peer"));
         BackendHandle backend(std::make_unique<KVCMStorageBackend>(cache, settings, runtime, parallel,
             speculation, std::move(broadcast), true, nullptr, client));
-        EXPECT_TRUE(initSingleRank(*backend.backend, environment));
+        observed.initialized = initSingleRank(*backend.backend, environment);
+        EXPECT_EQ(observed.initialized, expected_init);
+        if (!observed.initialized) {
+            return observed;
+        }
+        EXPECT_EQ(observed.backend_type, ssd ? "pace_ssd" : "pace");
         EXPECT_FALSE(observed.identity.empty());
         EXPECT_EQ(observed.infos, expected_infos);
         // Location groups retain the original full tag names, independently
@@ -906,6 +927,75 @@ TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWire
                 EXPECT_EQ(p3.groups, d3.groups);
                 EXPECT_NE(p3.identity, p.identity); // Original speculation identity retains gamma.
             }
+            if (bounded && dspark && cp == 4) {
+                // Feed the actual target P config to D TP1/DP4. No model or SDK
+                // runs here; this checks the selected config/projection contract.
+                const auto d_custom = instance(RoleType::DECODE, cp, sharded, true, true, 5,
+                                               false, p.config_json, true, 4);
+                EXPECT_EQ(d_custom.identity, p.identity);
+                EXPECT_EQ(d_custom.infos, p.infos);
+                EXPECT_EQ(d_custom.groups, p.groups);
+                const auto p_ssd = instance(RoleType::PREFILL, cp, sharded, true, true, 5, true);
+                const auto d_ssd = instance(RoleType::DECODE, cp, sharded, true, true, 5,
+                                            true, p_ssd.config_json, true, 4);
+                EXPECT_EQ(d_ssd.identity, p_ssd.identity);
+                EXPECT_EQ(d_ssd.infos, p_ssd.infos);
+                EXPECT_EQ(d_ssd.groups, p_ssd.groups);
+                if (sharded) {
+                    using Map = autil::legacy::json::JsonMap;
+                    const auto config_fields = [&](const std::string& json) {
+                        Map selected;
+                        autil::legacy::FromJsonString(selected, json);
+                        return autil::legacy::AnyCast<Map>(selected.at(""));
+                    };
+                    const auto custom_json = [](const Map& fields) {
+                        return autil::legacy::ToJsonString(Map{{"target-p-alias", autil::legacy::ToJson(fields)}});
+                    };
+                    const auto required = p_ssd.infos.begin()->first;
+                    for (int invalid = 0; invalid < 5; ++invalid) {
+                        SCOPED_TRACE(invalid);
+                        auto fields = config_fields(p_ssd.config_json);
+                        kvcm::KVCMConfig::LocationSpecInfoMap infos = p_ssd.infos;
+                        if (invalid == 0) { // Must fail BEFORE disabled-decoder pruning rewrites the map.
+                            ++infos.at(required);
+                            fields["location_spec_infos"] = autil::legacy::ToJson(infos);
+                        } else if (invalid == 1) {
+                            fields["block_size"] = autil::legacy::ToJson(int32_t{128});
+                        } else if (invalid == 2) {
+                            infos.erase(required);
+                            fields["location_spec_infos"] = autil::legacy::ToJson(infos);
+                        } else if (invalid == 3) {
+                            fields.erase("block_size"); // Required by the original KVCM parser.
+                        } else {
+                            auto sdk = autil::legacy::AnyCast<Map>(fields.at("sdk_config"));
+                            sdk["sdk_backend_configs"] = autil::legacy::ToJson(
+                                autil::legacy::json::JsonArray{autil::legacy::ToJson(Map{{"type", std::string("mooncake")}})});
+                            fields["sdk_config"] = autil::legacy::ToJson(sdk);
+                        }
+                        EXPECT_FALSE(instance(RoleType::DECODE, cp, sharded, true, true, 5,
+                                              true, custom_json(fields), false, 4).initialized);
+                    }
+                    // Original instance/group aliases and disabled-group pruning
+                    // also work for D; required geometry is still checked first.
+                    auto fields = config_fields(p_ssd.config_json);
+                    auto infos = p_ssd.infos;
+                    auto groups = p_ssd.groups;
+                    infos["unused_decoder"] = 16;
+                    groups["disabled_alias"] = {"unused_decoder"};
+                    groups["safe_alias"] = {required};
+                    fields["location_spec_infos"] = autil::legacy::ToJson(infos);
+                    fields["location_spec_groups"] = autil::legacy::ToJson(groups);
+                    const auto aliased = instance(RoleType::DECODE, cp, sharded, true, true, 5,
+                                                   true, custom_json(fields), true, 4);
+                    EXPECT_EQ(aliased.identity, p_ssd.identity);
+                    EXPECT_EQ(aliased.infos, p_ssd.infos);
+                    EXPECT_EQ(aliased.groups.at("safe_alias"), (std::vector<std::string>{required}));
+                    EXPECT_EQ(aliased.groups.count("disabled_alias"), 0u);
+                    const auto p_custom = instance(RoleType::PREFILL, cp, sharded, true, true, 5,
+                                                    true, p_ssd.config_json);
+                    EXPECT_EQ(p_custom.identity, p_ssd.identity);
+                }
+            }
             if (!sharded) replicated_identity = p.identity;
             else if (cp > 1) EXPECT_NE(p.identity, replicated_identity);
             else EXPECT_EQ(p.identity, replicated_identity);
@@ -914,11 +1004,11 @@ TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWire
     });
 }
 
-TEST(KVCMLocalTest, DsparkAdmitsNativeCacheTagsAndRejectsIncompleteDraftConfiguration) {
+TEST(KVCMLocalTest, DsparkDecodeAdmitsNativeCacheTagsAndRejectsIncompleteDraftConfiguration) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
     createDevice();
-    for (const auto role : {RoleType::PREFILL, RoleType::DECODE}) {
+    for (const auto role : {RoleType::DECODE}) {
         // Native bounded-replay layout: target encoder STATE/SWA, plus an
         // independent non-reusable decoder SWA segment for all three draft layers.
         for (int invalid = 0; invalid < 10; ++invalid) {
