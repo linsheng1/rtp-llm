@@ -345,6 +345,30 @@ protected:
     }
 };
 
+TEST_F(KVCMSubmissionBoundaryTest, OnlyDecodeCreatesTransportRetentionOwner) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+        for (const bool decode : {false, true}) {
+            // P TP2 requires its original broadcast manager, but this test
+            // submits no RPC or payload; only actual backend init is observed.
+            auto broadcast = decode ? nullptr : std::make_shared<BoundaryBroadcastManager>(
+                std::vector<std::string>{"unused-owner-peer0", "unused-owner-peer1"});
+            Fixture s(decode, std::move(broadcast));
+            ASSERT_TRUE(s.backend->initialized_);
+            EXPECT_EQ(static_cast<bool>(s.backend->completionResourceOwner()), decode);
+            if (decode) {
+                ASSERT_TRUE(s.backend->impl_->completion_resources_);
+                EXPECT_EQ(s.backend->impl_->completion_resources_->unresolved.load(), 0u);
+            } else {
+                EXPECT_FALSE(s.backend->impl_->completion_resources_);
+            }
+            EXPECT_EQ(s.starts.load(), 0);
+            EXPECT_EQ(s.saves.load(), 0);
+            EXPECT_EQ(s.closes.load(), 0);
+        }
+    });
+}
+
 TEST_F(KVCMSubmissionBoundaryTest, InitializedBroadcastWithZeroRankHandoffsClosesUnusedSession) {
     broadcastCase(false);
 }

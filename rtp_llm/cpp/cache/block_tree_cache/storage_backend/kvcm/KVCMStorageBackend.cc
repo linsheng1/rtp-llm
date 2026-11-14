@@ -450,7 +450,8 @@ public:
                 return false;
             }
         }
-        completion_resources_ = std::make_shared<CompletionResources>(client_wrapper_);
+        if (decode_publication_enabled_)
+            completion_resources_ = std::make_shared<CompletionResources>(client_wrapper_);
         if (completion_accounting_)
             completion_accounting_->startSampling();
         const auto tp_rank = parallelism_config_.tp_rank;
