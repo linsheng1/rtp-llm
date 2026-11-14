@@ -307,13 +307,27 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
     size_t                                                                       bytes = 0;
     std::unordered_map<const DeviceBlockPool*, std::unordered_set<BlockIdxType>> charged_blocks;
     size_t                                                                       unique_pages = 0;
-    for (size_t key = 0; key < request.keys->size(); ++key) {
-        for (const auto& entry : group_policy_->groups()) {
-            const auto& spec  = entry.second;
-            const auto& group = topology_->group(spec.tag);
-            if (!spec.is_full && request.keys->size() - key > group.reuseBlockCount(request.keys->size()))
-                continue;
-            const auto&        blocks = source_blocks(spec.tag);
+    // Group geometry, source tables and pools are immutable during planning.
+    // Keep each key's group order while avoiding those lookups per key/peer.
+    for (const auto& entry : group_policy_->groups()) {
+        const auto& spec  = entry.second;
+        const auto& group = topology_->group(spec.tag);
+        const size_t first = spec.is_full ? 0 : request.keys->size()
+            - std::min(request.keys->size(), group.reuseBlockCount(request.keys->size()));
+        if (first == request.keys->size()) continue;
+        const auto& blocks = source_blocks(spec.tag);
+        const auto& pool = pools_by_tag_.at(spec.tag);
+        auto& charged = charged_blocks[pool.get()];
+        auto charge = [&](BlockIdxType block) {
+            if (charged.insert(block).second) {
+                const auto page_bytes = pool->blockSizeBytes();
+                RTP_LLM_CHECK_WITH_INFO(page_bytes <= std::numeric_limits<size_t>::max() - bytes,
+                                        "EOS source-page budget charge overflow");
+                bytes += page_bytes;
+                ++unique_pages;
+            }
+        };
+        for (size_t key = first; key < request.keys->size(); ++key) {
             StorageBlockHandle handle;
             handle.tag = spec.tag;
             if (spec.is_full) {
@@ -324,16 +338,6 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
             } else {
                 handle.block = blocks.at((key + 1) * canonical_unit / group.seqSizePerBlock() - 1);
             }
-            auto charge = [&](BlockIdxType block) {
-                const auto& pool = pools_by_tag_.at(spec.tag);
-                if (charged_blocks[pool.get()].insert(block).second) {
-                    const auto page_bytes = pool->blockSizeBytes();
-                    RTP_LLM_CHECK_WITH_INFO(page_bytes <= std::numeric_limits<size_t>::max() - bytes,
-                                            "EOS source-page budget charge overflow");
-                    bytes += page_bytes;
-                    ++unique_pages;
-                }
-            };
             charge(handle.block);
             for (auto peer : handle.peer_blocks)
                 charge(peer);
