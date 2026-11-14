@@ -201,6 +201,26 @@ TEST_F(KVCacheManagerTest, EndpointFullHoldsShareAcrossBoundariesAndBothReleaseO
     }
 }
 
+TEST_F(KVCacheManagerTest, EndpointReadsStridedCpuBlockTablesWithoutChangingPagesOrPins) {
+    EndpointHoldFixture f;
+    const auto baseline = f.refs();
+    auto contiguous = f.capture(12);
+    ASSERT_TRUE(contiguous);
+    auto backing = torch::full({static_cast<int64_t>(f.tags.size()), 4, 2}, NULL_BLOCK_IDX, torch::kInt32);
+    auto strided = backing.select(2, 0).unsqueeze(1);
+    strided.copy_(f.ids);
+    ASSERT_FALSE(strided.is_contiguous());
+    f.ids = strided;
+    auto endpoint = f.capture(12);
+    ASSERT_TRUE(endpoint);
+    EXPECT_EQ(endpoint->blocks, contiguous->blocks);
+    for (const auto& tag : f.tags)
+        EXPECT_EQ(endpoint->pages.at(tag).size(), contiguous->pages.at(tag).size());
+    endpoint.reset();
+    contiguous.reset();
+    EXPECT_EQ(f.refs(), baseline);
+}
+
 TEST_F(KVCacheManagerTest, EndpointPhysicalRemapAndLocalTailPagesAreNotShared) {
     EndpointHoldFixture f;
     const auto baseline = f.refs();

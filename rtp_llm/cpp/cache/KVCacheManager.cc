@@ -544,7 +544,7 @@ std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
     // performs the actual target-CP slicing at publication time.
     if (decode_capture_stopped_.load() || !isAllocatorOwner() || !coordinator_manager_ || !end) return {};
     const auto unit = decodePublicationUnit();
-    if (!unit || end % unit || physical_ids.dim() != 3 || physical_ids.is_cuda()
+    if (!unit || end % unit || physical_ids.dim() != 3 || !physical_ids.is_cpu()
         || physical_ids.scalar_type() != torch::kInt32 || row >= static_cast<size_t>(physical_ids.size(1))
         || tags.size() != static_cast<size_t>(physical_ids.size(0))) return {};
     auto endpoint = std::make_shared<DecodeEndpoint>(); endpoint->end = end;
@@ -574,9 +574,10 @@ std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
             if (found != previous->pages.end()) prior = &found->second;
         }
         const auto input = physical_ids.select(0, it - tags.begin()).select(0, row);
+        const auto values = input.accessor<int32_t, 1>();
         for (size_t slot = first; slot < count; ++slot) {
             if (!input.numel() || (group.policy.group_type == CacheGroupType::FULL && slot >= static_cast<size_t>(input.numel()))) return {};
-            const auto source = input[slot % input.numel()].item<int32_t>();
+            const auto source = values[slot % input.numel()];
             if (isNullBlockIdx(source) || !pool->isAllocated(source)) return {};
             if (prior && slot < prior->size() && (*prior)[slot]
                 && (*prior)[slot]->pool.get() == pool.get() && (*prior)[slot]->block == source) {
