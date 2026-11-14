@@ -295,6 +295,14 @@ IBlockPool::decodeOriginSnapshot(BlockIdxType block, std::string_view region) co
     return {decode_origins_->incarnation(block), decode_origins_->get(block, region)};
 }
 
+uint64_t IBlockPool::clearDecodeOrigin(BlockIdxType block, std::string_view region) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!decode_origins_ || !validBlockNoLock(block) || !allocated_[block]) return 0;
+    const auto stamp = decode_origins_->incarnation(block);
+    decode_origins_->bind(block, stamp, region, nullptr);
+    return stamp;
+}
+
 bool IBlockPool::bindDecodeOrigin(BlockIdxType                  block,
                                   uint64_t                      expected_incarnation,
                                   std::string_view              region,

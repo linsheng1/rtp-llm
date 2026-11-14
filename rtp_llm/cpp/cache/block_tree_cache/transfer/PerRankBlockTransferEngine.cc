@@ -79,10 +79,9 @@ std::vector<RegionOriginTransfer> prepareOriginTransfers(const std::vector<Trans
             const auto [source_incarnation, origin] = source->decodeOriginSnapshot(source_block, tag);
             if (origin && collect)
                 (void)target->enableDecodeOriginTracking();
-            const auto target_incarnation = target->decodeOriginIncarnation(target_block);
             // Unknown sources and failed transfers must not inherit a previous
             // destination's source assertion. Never clear a newer allocation.
-            target->bindDecodeOrigin(target_block, target_incarnation, tag, nullptr);
+            const auto target_incarnation = target->clearDecodeOrigin(target_block, tag);
             if (origin && collect && source_incarnation != 0 && target_incarnation != 0) {
                 try {
                     transfers.push_back({source,

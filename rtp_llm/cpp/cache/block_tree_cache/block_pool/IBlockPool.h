@@ -102,6 +102,9 @@ public:
     // A paired read for provenance propagation; a null origin needs no stamp.
     std::pair<uint64_t, PhysicalDecodeOrigins::Origin>
     decodeOriginSnapshot(BlockIdxType block, std::string_view region) const;
+    // Synchronous overwrite preparation only; the caller owns a block reference.
+    // Completion callbacks must keep using bindDecodeOrigin(expected_incarnation).
+    uint64_t clearDecodeOrigin(BlockIdxType block, std::string_view region);
     bool                          bindDecodeOrigin(BlockIdxType                  block,
                                                    uint64_t                      expected_incarnation,
                                                    std::string_view              region,

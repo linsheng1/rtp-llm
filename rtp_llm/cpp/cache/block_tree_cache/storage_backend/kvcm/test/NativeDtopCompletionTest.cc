@@ -18,6 +18,11 @@
 
 namespace rtp_llm {
 namespace {
+template<typename C>
+C expectedPreflightError(C legacy) {
+    if constexpr (kvcm::detail::HasExplicitBufferSafeCodes<C>::value) return C::ER_SDK_ERROR_BUFFER_SAFE;
+    return legacy;
+}
 TEST(DecodePublicationProofTest, AbortRequiresProvenNoPayloadAndNoFinishAttempt) {
     using Proof = kvcm::PayloadDispatchProof;
     using Action = kvcm::FailedPublicationAction;
@@ -395,7 +400,7 @@ TEST(NativeSsdGpuPackingTest, CopyRunsRespectRegistrationGapsIgnoredOffsetsAlias
             EXPECT_EQ(client.SaveKvCaches(uris, buffers).first, ER_CUDAMEMCPY_ERROR);
             ASSERT_EQ(copies.size(), 1u);
             EXPECT_EQ(std::get<2>(copies[0]), 8u);
-            EXPECT_EQ(client.SaveKvCaches(uris, buffers).first, ER_INVALID_LOCAL_BUFFERS);
+            EXPECT_EQ(client.SaveKvCaches(uris, buffers).first, expectedPreflightError(ER_INVALID_LOCAL_BUFFERS));
             EXPECT_EQ(copies.size(), 1u); // The quarantined operation cannot be overwritten.
         } else {
             ASSERT_EQ(client.SaveKvCaches(uris, buffers).first, ER_OK);
@@ -573,7 +578,7 @@ protected:
                 auto buffers = destinations({17, 17});
                 EXPECT_EQ(client.LoadKvCaches(uris, buffers), C::ER_SDK_TIMEOUT);
                 EXPECT_EQ(context->active_reservations, 1u);
-                EXPECT_EQ(client.LoadKvCaches(uris, buffers), C::ER_INVALID_LOCAL_BUFFERS);
+                EXPECT_EQ(client.LoadKvCaches(uris, buffers), expectedPreflightError(C::ER_INVALID_LOCAL_BUFFERS));
             }
         } else {
             GTEST_SKIP() << "SDK has no explicit buffer-safe failure contract";
@@ -582,6 +587,35 @@ protected:
 };
 TEST_F(NativeSsdGpuReadWindowTest, ExplicitSafeSdkFailureReleasesArenaAndPermitsRetry) {
     checkSafeSdkRetry<Code>();
+}
+TEST_F(NativeSsdGpuReadWindowTest, PreflightRejectionsDoNotTouchPayloadOrBecomeUnknown) {
+    auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(0);
+    EXPECT_CALL(*delegate, SaveKvCaches(_, _, _)).Times(0);
+    int copies = 0;
+    Client client(std::move(delegate), [&](auto, auto, auto, auto, size_t) { ++copies; return false; }, context);
+    auto buffers = destinations({17});
+    auto trace = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+    trace->block_ids = {"one", "extra"};
+    EXPECT_EQ(client.LoadKvCaches({"one"}, buffers, trace), expectedPreflightError(Code::ER_INVALID_PARAMS));
+    EXPECT_EQ(client.SaveKvCaches({"one"}, buffers, trace).first, expectedPreflightError(Code::ER_INVALID_PARAMS));
+    std::vector<std::pair<size_t, size_t>> free_ranges;
+    {
+        std::lock_guard<std::mutex> lock(context->mutex);
+        free_ranges.swap(context->free_ranges); // Simulate all arena ranges held by another operation.
+    }
+    const auto code = client.LoadKvCaches({"one"}, buffers);
+    EXPECT_EQ(code, expectedPreflightError(Code::ER_INVALID_LOCAL_BUFFERS));
+    if constexpr (kvcm::detail::HasExplicitBufferSafeCodes<Code>::value)
+        EXPECT_EQ(kvcm::ClientWrapper::sdkResultCompletion(code), kvcm::ClientWrapper::TransferCompletion::BUFFER_SAFE);
+    EXPECT_EQ(client.SaveKvCaches({"one"}, buffers).first,
+              expectedPreflightError(Code::ER_INVALID_LOCAL_BUFFERS));
+    {
+        std::lock_guard<std::mutex> lock(context->mutex);
+        free_ranges.swap(context->free_ranges);
+    }
+    EXPECT_EQ(copies, 0);
+    EXPECT_EQ(context->active_reservations, 0u);
 }
 TEST_F(NativeSsdGpuReadWindowTest, AnyUnknownPeerDominatesSafeFailureInEitherOrder) {
     checkMixedPeerSafety<Code>();
@@ -672,7 +706,7 @@ TEST_F(NativeSsdGpuReadWindowTest, WorkerExceptionDrainsEveryPeerAndQuarantinesW
     EXPECT_EQ(observations.load(), 4u);
     EXPECT_EQ(completed.load(), 3);
     EXPECT_EQ(context->active_reservations, 1u);
-    EXPECT_EQ(client.LoadKvCaches({"0", "1", "2", "3"}, b), kv_cache_manager::ER_INVALID_LOCAL_BUFFERS);
+    EXPECT_EQ(client.LoadKvCaches({"0", "1", "2", "3"}, b), expectedPreflightError(kv_cache_manager::ER_INVALID_LOCAL_BUFFERS));
     unsigned char byte = 1;
     ASSERT_EQ(cudaMemcpy(&byte, output.get(), 1, cudaMemcpyDeviceToHost), cudaSuccess);
     EXPECT_EQ(byte, 0);
@@ -753,7 +787,7 @@ TEST_F(NativeSsdGpuReadWindowTest, DeviceInitializationFailureProtectsTheEntireW
     EXPECT_EQ(initialized.load(), 4);
     EXPECT_EQ(observed.load(), 0);
     EXPECT_EQ(context->active_reservations, 1u);
-    EXPECT_EQ(client.LoadKvCaches({"0", "1", "2", "3"}, buffers), kv_cache_manager::ER_INVALID_LOCAL_BUFFERS);
+    EXPECT_EQ(client.LoadKvCaches({"0", "1", "2", "3"}, buffers), expectedPreflightError(kv_cache_manager::ER_INVALID_LOCAL_BUFFERS));
     unsigned char byte = 1;
     ASSERT_EQ(cudaMemcpy(&byte, output.get(), 1, cudaMemcpyDeviceToHost), cudaSuccess);
     EXPECT_EQ(byte, 0);
@@ -795,7 +829,7 @@ TEST_F(NativeSsdGpuReadWindowTest, PreSdkGeometryAndGatherRejectionsDoNotReportU
     Client client(std::move(delegate), [](void*, M, const void*, M, size_t) { return false; }, context);
     int    observed = 0;
     client.setSdkTransferObserver([&](bool, size_t, bool) { ++observed; });
-    EXPECT_EQ(client.SaveKvCaches({"invalid"}, destinations({0})).first, ER_INVALID_LOCAL_BUFFERS);
+    EXPECT_EQ(client.SaveKvCaches({"invalid"}, destinations({0})).first, expectedPreflightError(ER_INVALID_LOCAL_BUFFERS));
     EXPECT_EQ(context->active_reservations, 0u);
     EXPECT_EQ(client.SaveKvCaches({"gather-fails"}, destinations({17})).first, ER_CUDAMEMCPY_ERROR);
     EXPECT_EQ(observed, 0);
@@ -822,7 +856,7 @@ TEST_F(NativeSsdGpuReadWindowTest, SdkWriteSuccessRemainsConfirmedAfterActualUri
     std::vector<std::tuple<bool, size_t, bool>> seen;
     client.setSdkTransferObserver(
         [&](bool read, size_t bytes, bool unknown) { seen.emplace_back(read, bytes, unknown); });
-    EXPECT_EQ(client.SaveKvCaches({"one"}, destinations({17})).first, ER_INVALID_PARAMS);
+    EXPECT_EQ(client.SaveKvCaches({"one"}, destinations({17})).first, expectedPreflightError(ER_INVALID_PARAMS));
     ASSERT_EQ(seen.size(), 1u);
     EXPECT_EQ(seen[0], std::make_tuple(false, size_t(17), false));
 }
@@ -841,7 +875,7 @@ TEST_F(NativeSsdGpuReadWindowTest, ObserverExceptionsPreserveSdkSuccessAndFailur
     ASSERT_EQ(seen.size(), 2u);
     EXPECT_EQ(seen[0], std::make_tuple(true, size_t(17), false));
     EXPECT_EQ(seen[1], std::make_tuple(true, size_t(0), true));
-    EXPECT_EQ(client.LoadKvCaches({"quarantined"}, destinations({17})), ER_INVALID_LOCAL_BUFFERS);
+    EXPECT_EQ(client.LoadKvCaches({"quarantined"}, destinations({17})), expectedPreflightError(ER_INVALID_LOCAL_BUFFERS));
     EXPECT_EQ(seen.size(), 2u);
 }
 TEST_F(NativeSsdGpuReadWindowTest, ObserverExceptionCannotReplaceTheOriginalSdkException) {
@@ -963,7 +997,7 @@ TEST_F(NativeSsdGpuReadWindowTest, WriteLeaseFailureSubmitsNothingAndDoesNotLeak
     Buffers large(1);
     large[0].iovs = {{M::GPU, arena.get(), Client::max_operation_bytes, false}};
     for (size_t i = 0; i < 9; ++i)
-        EXPECT_EQ(failed.SaveKvCaches({"blocked"}, large).first, ER_INVALID_LOCAL_BUFFERS);
+        EXPECT_EQ(failed.SaveKvCaches({"blocked"}, large).first, expectedPreflightError(ER_INVALID_LOCAL_BUFFERS));
     EXPECT_EQ(context->active_reservations, 0u);
     context->free_ranges = {{0, Client::max_operation_bytes}};
     auto retry = std::make_unique<MockTransferClient>(destroyed);
@@ -981,11 +1015,11 @@ TEST_F(NativeSsdGpuReadWindowTest, BatchWriteBadUriShapeKeepsConfirmedBytesAndQu
     std::vector<std::tuple<bool, size_t, bool>> seen;
     client.setSdkTransferObserver(
         [&](bool read, size_t bytes, bool unknown) { seen.emplace_back(read, bytes, unknown); });
-    EXPECT_EQ(client.SaveKvCaches({"one", "two"}, destinations({17, 33})).first, ER_INVALID_PARAMS);
+    EXPECT_EQ(client.SaveKvCaches({"one", "two"}, destinations({17, 33})).first, expectedPreflightError(ER_INVALID_PARAMS));
     ASSERT_EQ(seen.size(), 1u);
     EXPECT_EQ(seen.front(), std::make_tuple(false, size_t(50), false));
     EXPECT_EQ(context->active_reservations, 1u);
-    EXPECT_EQ(client.SaveKvCaches({"retry"}, destinations({17})).first, ER_INVALID_LOCAL_BUFFERS);
+    EXPECT_EQ(client.SaveKvCaches({"retry"}, destinations({17})).first, expectedPreflightError(ER_INVALID_LOCAL_BUFFERS));
 }
 TEST_F(NativeSsdGpuReadWindowTest, GatherExceptionBeforeBatchSubmissionRetainsWholeWindow) {
     using namespace kv_cache_manager;

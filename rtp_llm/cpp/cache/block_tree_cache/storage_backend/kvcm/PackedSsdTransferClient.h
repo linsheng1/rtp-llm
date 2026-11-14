@@ -105,10 +105,10 @@ public:
     Code LoadKvCaches(const Uris& uris, const Buffers& destination, Trace trace = nullptr) override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (trace && trace->block_ids.size() != uris.size())
-            return kv_cache_manager::ER_INVALID_PARAMS;
+            return preflightFailure(kv_cache_manager::ER_INVALID_PARAMS);
         auto operation = makeOperation(uris, destination, false, read_thread_init_ ? max_read_window_objects : 1);
         if (!operation)
-            return kv_cache_manager::ER_INVALID_LOCAL_BUFFERS;
+            return preflightFailure(kv_cache_manager::ER_INVALID_LOCAL_BUFFERS);
         for (size_t block = 0; block < uris.size(); ++block)
             operation->calls[block]->trace = blockTrace(trace, block, uris.size());
         auto scatter = [&](size_t block) {
@@ -175,10 +175,10 @@ public:
     std::pair<Code, Uris> SaveKvCaches(const Uris& uris, const Buffers& source, Trace trace = nullptr) override {
         std::lock_guard<std::mutex> lock(mutex_);
         if (trace && trace->block_ids.size() != uris.size())
-            return {kv_cache_manager::ER_INVALID_PARAMS, {}};
+            return {preflightFailure(kv_cache_manager::ER_INVALID_PARAMS), {}};
         auto operation = makeOperation(uris, source, true);
         if (!operation)
-            return {kv_cache_manager::ER_INVALID_LOCAL_BUFFERS, {}};
+            return {preflightFailure(kv_cache_manager::ER_INVALID_LOCAL_BUFFERS), {}};
         // Prepare trace slices before the first gather or SDK submission.
         for (size_t window = 0; window < operation->write_ranges.size(); ++window) {
             if (trace) {
@@ -233,6 +233,15 @@ protected:
     }
 
 private:
+    // This operation has not touched caller/staging bytes or submitted SDK I/O.
+    // Do not use this for a copy, fence, or delegate failure.
+    template<typename C = Code>
+    static C preflightFailure(C fallback) {
+        if constexpr (detail::HasExplicitBufferSafeCodes<C>::value)
+            return C::ER_SDK_ERROR_BUFFER_SAFE;
+        return fallback;
+    }
+
     bool canCoalesceCopy(void* user, const void* packed, size_t bytes) const {
         if (!gpu_context_->registered || gpu_context_->device_id < 0) return false;
         const auto source = reinterpret_cast<uintptr_t>(user);

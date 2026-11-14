@@ -391,6 +391,34 @@ TEST(IBlockPoolTest, OriginSnapshotKeepsTheStickyFastPathAndRejectsRecycledAlloc
     EXPECT_FALSE(invalid.second);
 }
 
+TEST(IBlockPoolTest, ClearOriginReturnsHeldAllocationStampAndPreservesSiblingRegions) {
+    auto pool = makeInitializedPool(2);
+    const auto block = *pool->malloc();
+    EXPECT_EQ(pool->clearDecodeOrigin(block, "full"), 0u);
+    ASSERT_TRUE(pool->enableDecodeOriginTracking());
+    const auto stamp = pool->decodeOriginIncarnation(block);
+    EXPECT_EQ(pool->clearDecodeOrigin(block, "full"), stamp);
+    ASSERT_NO_FATAL_FAILURE(expectOriginLookupUnderPoolLock(pool, block, true, {}));
+    const auto parsed = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".7680.7680.8192.8200.8201");
+    ASSERT_TRUE(parsed);
+    auto origin = std::make_shared<const DecodeCacheOrigin>(*parsed);
+    ASSERT_TRUE(pool->bindDecodeOrigin(block, stamp, "full", origin));
+    ASSERT_TRUE(pool->bindDecodeOrigin(block, stamp, "state", origin));
+    EXPECT_EQ(pool->clearDecodeOrigin(block, "full"), stamp);
+    EXPECT_FALSE(pool->decodeOrigin(block, "full"));
+    EXPECT_EQ(pool->decodeOrigin(block, "state"), origin);
+    ASSERT_NO_FATAL_FAILURE(expectOriginLookupUnderPoolLock(pool, block, false, {}));
+    pool->incTreeRef(block, BlockTreeRefType::CACHE);
+    pool->decTreeRef(block, BlockTreeRefType::CACHE);
+    EXPECT_EQ(pool->clearDecodeOrigin(block, "state"), 0u);
+    ASSERT_EQ(*pool->malloc(), block);
+    const auto next = pool->clearDecodeOrigin(block, "full");
+    EXPECT_NE(next, 0u);
+    EXPECT_NE(next, stamp);
+    EXPECT_FALSE(pool->bindDecodeOrigin(block, stamp, "full", origin));
+    EXPECT_EQ(pool->clearDecodeOrigin(NULL_BLOCK_IDX, "full"), 0u);
+}
+
 TEST(IBlockPoolTest, OriginTrackingIsOptionalAndFollowsAllocatedPhysicalLifetime) {
     auto       pool   = makeInitializedPool(2);
     const auto block  = *pool->malloc();

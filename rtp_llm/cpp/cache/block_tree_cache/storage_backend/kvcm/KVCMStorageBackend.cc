@@ -678,11 +678,10 @@ public:
                     remote->add_block_ids(handle->block);
                     if (track_origins && info->second.tp_rank == parallelism_config_.tp_rank) {
                         const auto& pool        = pools_by_tag_.at(group.tag);
-                        const auto  incarnation = pool->decodeOriginIncarnation(handle->block);
                         // A destination overwrite must not retain its previous
                         // source, including a legacy or failed remote read. This
                         // does not invalidate siblings sharing the physical page.
-                        pool->bindDecodeOrigin(handle->block, incarnation, group.tag, nullptr);
+                        const auto incarnation = pool->clearDecodeOrigin(handle->block, group.tag);
                         if (origin && incarnation != 0) {
                             try {
                                 origin_bindings.push_back({key_idx, pool, handle->block, incarnation, group.tag, origin});
