@@ -12,6 +12,7 @@
 #include <tuple>
 #include <typeinfo>
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientFactory.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PackedSsdTransferClient.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
@@ -856,7 +857,7 @@ TEST_F(NativeSsdGpuReadWindowTest, SdkWriteSuccessRemainsConfirmedAfterActualUri
     std::vector<std::tuple<bool, size_t, bool>> seen;
     client.setSdkTransferObserver(
         [&](bool read, size_t bytes, bool unknown) { seen.emplace_back(read, bytes, unknown); });
-    EXPECT_EQ(client.SaveKvCaches({"one"}, destinations({17})).first, expectedPreflightError(ER_INVALID_PARAMS));
+    EXPECT_EQ(client.SaveKvCaches({"one"}, destinations({17})).first, ER_INVALID_PARAMS);
     ASSERT_EQ(seen.size(), 1u);
     EXPECT_EQ(seen[0], std::make_tuple(false, size_t(17), false));
 }
@@ -1015,7 +1016,7 @@ TEST_F(NativeSsdGpuReadWindowTest, BatchWriteBadUriShapeKeepsConfirmedBytesAndQu
     std::vector<std::tuple<bool, size_t, bool>> seen;
     client.setSdkTransferObserver(
         [&](bool read, size_t bytes, bool unknown) { seen.emplace_back(read, bytes, unknown); });
-    EXPECT_EQ(client.SaveKvCaches({"one", "two"}, destinations({17, 33})).first, expectedPreflightError(ER_INVALID_PARAMS));
+    EXPECT_EQ(client.SaveKvCaches({"one", "two"}, destinations({17, 33})).first, ER_INVALID_PARAMS);
     ASSERT_EQ(seen.size(), 1u);
     EXPECT_EQ(seen.front(), std::make_tuple(false, size_t(50), false));
     EXPECT_EQ(context->active_reservations, 1u);
