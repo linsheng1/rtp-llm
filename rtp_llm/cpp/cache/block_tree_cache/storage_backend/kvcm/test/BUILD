@@ -244,7 +244,8 @@ cc_test_wrapper(
         "//:using_remote_kv_cache": [],
         "//conditions:default": ["@platforms//:incompatible"],
     }),
-    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + kvcm_backend_test_deps,
+    deps = ["//rtp_llm/cpp/utils:decode_publication_test_support",
+            "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils"] + kvcm_backend_test_deps,
 )
 
 # Do not link kvcm_storage_backend: this test includes its current .cc once.

@@ -122,11 +122,11 @@ createNativeSsdGpu(const std::string&                                 config,
             // D2D cudaMemcpy need not wait on the host. External RDMA is
             // not ordered by the CUDA default stream: publish/scatter must
             // finish before handing off or reusing the registered range.
-            return dt == M::GPU && st == M::GPU && cudaMemcpy(dst, src, size, cudaMemcpyDeviceToDevice) == cudaSuccess
-                   && cudaStreamSynchronize(nullptr) == cudaSuccess;
+            return dt == M::GPU && st == M::GPU && cudaMemcpy(dst, src, size, cudaMemcpyDeviceToDevice) == cudaSuccess;
         },
         std::move(context),
-        [device] { return cudaSetDevice(device) == cudaSuccess; });
+        PackedSsdTransferClient::max_read_window_objects,
+        [] { return cudaStreamSynchronize(nullptr) == cudaSuccess; });
 #else
     throw std::invalid_argument("native SSD GDR requires CUDA");
 #endif

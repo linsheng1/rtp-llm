@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/utils/DecodePublicationTest.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
 #include <cuda_runtime_api.h>
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PayloadDispatchProof.h"
@@ -567,15 +568,13 @@ protected:
         if constexpr (kvcm::detail::HasExplicitBufferSafeCodes<C>::value) {
             for (bool safe_first : {true, false}) {
                 auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
-                EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(2)
-                    .WillRepeatedly(Invoke([](const Uris& uris, const Buffers&, auto) -> C {
-                        return uris.front() == "safe" ? C::ER_SDK_TIMEOUT_BUFFER_SAFE : C::ER_SDK_TIMEOUT;
-                    }));
-                int device = 0;
-                ASSERT_EQ(cudaGetDevice(&device), cudaSuccess);
-                Client client(std::move(delegate), copy, context,
-                              [device] { return cudaSetDevice(device) == cudaSuccess; });
                 const Uris uris = safe_first ? Uris{"safe", "unknown"} : Uris{"unknown", "safe"};
+                EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).WillOnce(Invoke([&](const Uris& u, const Buffers& b, auto) -> C {
+                    EXPECT_EQ(u, uris);
+                    EXPECT_EQ(b.size(), 2u);
+                    return C::ER_SDK_TIMEOUT; // The SDK reports one unknown outcome for the whole batch.
+                }));
+                Client client(std::move(delegate), copy, context, 4);
                 auto buffers = destinations({17, 17});
                 EXPECT_EQ(client.LoadKvCaches(uris, buffers), C::ER_SDK_TIMEOUT);
                 EXPECT_EQ(context->active_reservations, 1u);
@@ -618,180 +617,247 @@ TEST_F(NativeSsdGpuReadWindowTest, PreflightRejectionsDoNotTouchPayloadOrBecomeU
     EXPECT_EQ(copies, 0);
     EXPECT_EQ(context->active_reservations, 0u);
 }
-TEST_F(NativeSsdGpuReadWindowTest, AnyUnknownPeerDominatesSafeFailureInEitherOrder) {
+TEST_F(NativeSsdGpuReadWindowTest, UnknownBatchRetainsTheWholeWindowInEitherUriOrder) {
     checkMixedPeerSafety<Code>();
 }
-TEST_F(NativeSsdGpuReadWindowTest, ConcurrentWindowInitializesDeviceAndJoinsBeforeScatter) {
+TEST_F(NativeSsdGpuReadWindowTest, BatchReadPreservesTraceBytesAndFencesBeforeReusingTheWindow) {
     auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
-    int  device   = 0;
+    size_t calls = 0, fences = 0, copies = 0;
+    int device = -1;
     ASSERT_EQ(cudaGetDevice(&device), cudaSuccess);
-    std::mutex              mutex;
-    std::condition_variable cv;
-    int                     arrived[2] = {0, 0};
-    std::atomic<int>        active{0}, peak{0}, initialized{0}, completed{0};
-    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _))
-        .Times(8)
-        .WillRepeatedly(Invoke([&](const Uris& u, const Buffers& gpu, auto t) {
-            EXPECT_EQ(u.size(), 1u);
-            int id = std::stoi(u[0]);
-            EXPECT_EQ(t->block_ids[0], std::to_string(100 + id));
+    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(2)
+        .WillRepeatedly(Invoke([&](const Uris& u, const Buffers& b, auto trace) {
+            EXPECT_EQ(fences, calls);
+            EXPECT_EQ(u.size(), 4u);
+            EXPECT_EQ(b.size(), 4u);
             int actual = -1;
             EXPECT_EQ(cudaGetDevice(&actual), cudaSuccess);
             EXPECT_EQ(actual, device);
-            int count = active.fetch_add(1) + 1, prior = peak.load();
-            while (prior < count && !peak.compare_exchange_weak(prior, count)) {}
-            {
-                std::unique_lock<std::mutex> guard(mutex);
-                ++arrived[id / 4];
-                cv.notify_all();
-                EXPECT_TRUE(cv.wait_for(guard, std::chrono::seconds(5), [&] { return arrived[id / 4] == 4; }));
+            if (u.size() != 4 || b.size() != 4 || !trace || trace->block_ids.size() != 4)
+                return Code::ER_INVALID_PARAMS;
+            for (size_t i = 0; i < 4; ++i) {
+                const size_t id = calls * 4 + i;
+                EXPECT_EQ(u[i], std::to_string(id));
+                EXPECT_EQ(trace->block_ids[i], std::to_string(100 + id));
+                EXPECT_EQ(b[i].iovs.size(), 1u);
+                if (b[i].iovs.size() != 1) return Code::ER_INVALID_PARAMS;
+                EXPECT_EQ(b[i].iovs[0].size, 36u * 1024);
+                EXPECT_EQ(cudaMemset(b[i].iovs[0].base, 11 + id, b[i].iovs[0].size), cudaSuccess);
             }
-            EXPECT_EQ(cudaMemset(gpu[0].iovs[0].base, 11 + id, gpu[0].iovs[0].size), cudaSuccess);
-            active.fetch_sub(1);
-            completed.fetch_add(1);
-            return kv_cache_manager::ER_OK;
+            EXPECT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess); // Fake SDK success means data ready.
+            ++calls;
+            return Code::ER_OK;
         }));
-    auto scatter = [&](void* dst, M dt, const void* src, M st, size_t bytes) {
-        EXPECT_EQ(active.load(), 0);
-        return copy(dst, dt, src, st, bytes);
-    };
-    Client client(std::move(delegate), scatter, context, [&, device] {
-        initialized.fetch_add(1);
-        return cudaSetDevice(device) == cudaSuccess;
-    });
-    Uris   uris;
-    auto   t = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+    Client client(std::move(delegate), [&](void* d, M dt, const void* src, M st, size_t n) {
+        ++copies;
+        return dt == M::GPU && st == M::GPU && cudaMemcpy(d, src, n, cudaMemcpyDeviceToDevice) == cudaSuccess;
+    }, context, 4, [&] { ++fences; return cudaStreamSynchronize(nullptr) == cudaSuccess; });
+    Uris uris;
+    auto trace = std::make_shared<kv_cache_manager::TransferTraceInfo>();
     for (int i = 0; i < 8; ++i) {
         uris.push_back(std::to_string(i));
-        t->block_ids.push_back(std::to_string(100 + i));
+        trace->block_ids.push_back(std::to_string(100 + i));
     }
-    ASSERT_EQ(client.LoadKvCaches(uris, destinations(std::vector<size_t>(8, 36 * 1024)), t), kv_cache_manager::ER_OK);
-    EXPECT_EQ(peak.load(), 4);
-    EXPECT_EQ(initialized.load(), 8);
-    EXPECT_EQ(completed.load(), 8);
+    ASSERT_EQ(client.LoadKvCaches(uris, destinations(std::vector<size_t>(8, 36 * 1024)), trace), Code::ER_OK);
+    EXPECT_EQ(calls, 2u);
+    EXPECT_EQ(fences, 2u);
+    EXPECT_EQ(copies, 8u);
     std::vector<unsigned char> bytes(8 * 36 * 1024);
     ASSERT_EQ(cudaMemcpy(bytes.data(), output.get(), bytes.size(), cudaMemcpyDeviceToHost), cudaSuccess);
     for (size_t i = 0; i < 8; ++i)
-        EXPECT_TRUE(std::all_of(bytes.begin() + i * 36 * 1024,
-                                bytes.begin() + (i + 1) * 36 * 1024,
+        EXPECT_TRUE(std::all_of(bytes.begin() + i * 36 * 1024, bytes.begin() + (i + 1) * 36 * 1024,
                                 [i](unsigned char v) { return v == 11 + i; }));
     EXPECT_EQ(context->active_reservations, 0u);
 }
-TEST_F(NativeSsdGpuReadWindowTest, WorkerExceptionDrainsEveryPeerAndQuarantinesWholeWindow) {
+TEST_F(NativeSsdGpuReadWindowTest, BatchExceptionKeepsConfirmedPrefixAndQuarantinesTheRemainingWindow) {
     auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
-    int  device   = 0;
-    ASSERT_EQ(cudaGetDevice(&device), cudaSuccess);
-    std::atomic<int> completed{0};
-    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _))
-        .Times(4)
-        .WillRepeatedly(Invoke([&](const Uris& u, const Buffers& gpu, auto) -> Code {
-            if (u[0] == "0")
-                throw std::runtime_error("uncertain read DMA");
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            EXPECT_EQ(cudaMemset(gpu[0].iovs[0].base, 0x55, gpu[0].iovs[0].size), cudaSuccess);
-            completed.fetch_add(1);
-            return kv_cache_manager::ER_OK;
+    int calls = 0;
+    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(2)
+        .WillRepeatedly(Invoke([&](const Uris&, const Buffers& b, auto) -> Code {
+            if (++calls == 2) throw std::runtime_error("uncertain batch DMA");
+            for (const auto& block : b)
+                EXPECT_EQ(cudaMemset(block.iovs[0].base, 0x55, block.iovs[0].size), cudaSuccess);
+            EXPECT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess);
+            return Code::ER_OK;
         }));
-    Client client(std::move(delegate), copy, context, [device] { return cudaSetDevice(device) == cudaSuccess; });
-    std::atomic<size_t> confirmed{0}, unknown{0}, observations{0};
+    Client client(std::move(delegate), copy, context, 4);
+    size_t confirmed = 0, unknown = 0, observations = 0;
     client.setSdkTransferObserver([&](bool read, size_t bytes, bool uncertain) {
-        EXPECT_TRUE(read);
-        confirmed.fetch_add(bytes);
-        unknown.fetch_add(uncertain);
-        observations.fetch_add(1);
+        EXPECT_TRUE(read); confirmed += bytes; unknown += uncertain; ++observations;
     });
-    auto b = destinations({4096, 4096, 4096, 4096});
-    EXPECT_THROW(client.LoadKvCaches({"0", "1", "2", "3"}, b), std::runtime_error);
-    EXPECT_EQ(confirmed.load(), 3u * 4096);
-    EXPECT_EQ(unknown.load(), 1u);
-    EXPECT_EQ(observations.load(), 4u);
-    EXPECT_EQ(completed.load(), 3);
+    auto b = destinations(std::vector<size_t>(8, 4096));
+    Uris uris{"0","1","2","3","4","5","6","7"};
+    EXPECT_THROW(client.LoadKvCaches(uris, b), std::runtime_error);
+    EXPECT_EQ(confirmed, 4u * 4096);
+    EXPECT_EQ(unknown, 1u);
+    EXPECT_EQ(observations, 2u);
     EXPECT_EQ(context->active_reservations, 1u);
-    EXPECT_EQ(client.LoadKvCaches({"0", "1", "2", "3"}, b), expectedPreflightError(kv_cache_manager::ER_INVALID_LOCAL_BUFFERS));
-    unsigned char byte = 1;
-    ASSERT_EQ(cudaMemcpy(&byte, output.get(), 1, cudaMemcpyDeviceToHost), cudaSuccess);
-    EXPECT_EQ(byte, 0);
+    EXPECT_EQ(client.LoadKvCaches(uris, b), expectedPreflightError(Code::ER_INVALID_LOCAL_BUFFERS));
+    std::vector<unsigned char> actual(8 * 4096);
+    ASSERT_EQ(cudaMemcpy(actual.data(), output.get(), actual.size(), cudaMemcpyDeviceToHost), cudaSuccess);
+    EXPECT_TRUE(std::all_of(actual.begin(), actual.begin() + 4 * 4096, [](auto v) { return v == 0x55; }));
+    EXPECT_TRUE(std::all_of(actual.begin() + 4 * 4096, actual.end(), [](auto v) { return v == 0; }));
 }
-TEST_F(NativeSsdGpuReadWindowTest, PayloadBudgetSplitsAWindowBeforeTheObjectLimit) {
+TEST_F(NativeSsdGpuReadWindowTest, PayloadBudgetSplitsBatchBeforeTheObjectLimit) {
     auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
-    int  device   = 0;
-    ASSERT_EQ(cudaGetDevice(&device), cudaSuccess);
-    std::atomic<int>        active{0}, peak{0};
-    std::mutex              mutex;
-    std::condition_variable cv;
-    int                     arrived = 0;
-    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _))
-        .Times(3)
-        .WillRepeatedly(Invoke([&](const Uris& uris, const Buffers& buffers, auto) {
-            EXPECT_EQ(uris.size(), 1u);
-            int id    = std::stoi(uris[0]);
-            int count = active.fetch_add(1) + 1, previous = peak.load();
-            while (previous < count && !peak.compare_exchange_weak(previous, count)) {}
-            if (id < 2) {
-                std::unique_lock<std::mutex> guard(mutex);
-                ++arrived;
-                cv.notify_all();
-                EXPECT_TRUE(cv.wait_for(guard, std::chrono::seconds(5), [&] { return arrived == 2; }));
-            }
+    size_t calls = 0;
+    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(2)
+        .WillRepeatedly(Invoke([&](const Uris& u, const Buffers& b, auto) {
+            EXPECT_EQ(u.size(), calls == 0 ? 2u : 1u);
             {
-                std::lock_guard<std::mutex> guard(context->mutex);
-                size_t                      free = 0;
-                for (const auto& range : context->free_ranges)
-                    free += range.second;
+                std::lock_guard<std::mutex> lock(context->mutex);
+                size_t free = 0;
+                for (const auto& range : context->free_ranges) free += range.second;
                 EXPECT_EQ(Client::max_operation_bytes - free, 200u * 1024);
             }
-            EXPECT_EQ(cudaMemset(buffers[0].iovs[0].base, 11 + id, 100 * 1024), cudaSuccess);
-            active.fetch_sub(1);
-            return kv_cache_manager::ER_OK;
+            for (size_t i = 0; i < b.size(); ++i) {
+                const int id = std::stoi(u[i]);
+                EXPECT_EQ(b[i].iovs.size(), 1u);
+                EXPECT_EQ(cudaMemset(b[i].iovs[0].base, 11 + id, 100 * 1024), cudaSuccess);
+            }
+            EXPECT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess);
+            ++calls;
+            return Code::ER_OK;
         }));
-    Client client(std::move(delegate), copy, context, [device] { return cudaSetDevice(device) == cudaSuccess; });
-    ASSERT_EQ(client.LoadKvCaches({"0", "1", "2"}, destinations({100 * 1024, 100 * 1024, 100 * 1024})),
-              kv_cache_manager::ER_OK);
-    EXPECT_EQ(peak.load(), 2);
+    Client client(std::move(delegate), copy, context, 4);
+    ASSERT_EQ(client.LoadKvCaches({"0","1","2"}, destinations({100*1024,100*1024,100*1024})), Code::ER_OK);
+    EXPECT_EQ(calls, 2u);
     EXPECT_EQ(context->active_reservations, 0u);
     std::vector<unsigned char> bytes(300 * 1024);
     ASSERT_EQ(cudaMemcpy(bytes.data(), output.get(), bytes.size(), cudaMemcpyDeviceToHost), cudaSuccess);
     for (int id = 0; id < 3; ++id)
-        EXPECT_TRUE(std::all_of(bytes.begin() + id * 100 * 1024,
-                                bytes.begin() + (id + 1) * 100 * 1024,
-                                [id](unsigned char v) { return v == 11 + id; }));
+        EXPECT_TRUE(std::all_of(bytes.begin() + id * 100 * 1024, bytes.begin() + (id + 1) * 100 * 1024,
+                                [id](auto v) { return v == 11 + id; }));
 }
 TEST_F(NativeSsdGpuReadWindowTest, OversizedStateObjectIsReadAlone) {
-    auto             delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
-    std::atomic<int> initialized{0};
-    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _))
-        .Times(2)
-        .WillRepeatedly(Invoke([](const Uris& uris, const Buffers&, auto) {
-            EXPECT_EQ(uris.size(), 1u);
-            return kv_cache_manager::ER_OK;
+    auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(2)
+        .WillRepeatedly(Invoke([](const Uris& u, const Buffers&, auto) {
+            EXPECT_EQ(u.size(), 1u);
+            return Code::ER_OK;
         }));
-    Client client(std::move(delegate), copy, context, [&] {
-        ++initialized;
-        return true;
-    });
-    EXPECT_EQ(client.LoadKvCaches({"state", "small"}, destinations({354816, 4096})), kv_cache_manager::ER_OK);
-    EXPECT_EQ(initialized.load(), 0);
+    Client client(std::move(delegate), copy, context, 4);
+    EXPECT_EQ(client.LoadKvCaches({"state","small"}, destinations({354816,4096})), Code::ER_OK);
     EXPECT_EQ(context->active_reservations, 0u);
 }
-TEST_F(NativeSsdGpuReadWindowTest, DeviceInitializationFailureProtectsTheEntireWindow) {
+TEST_F(NativeSsdGpuReadWindowTest, CopyAndFenceFailuresDrainThenKeepTheLease) {
+    for (int mode = 0; mode < 4; ++mode) {
+        SCOPED_TRACE(mode);
+        auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+        EXPECT_CALL(*delegate, SaveKvCaches(_, _, _)).Times(0);
+        size_t copies = 0, fences = 0;
+        {
+            Client client(std::move(delegate), [&](auto, auto, auto, auto, size_t) {
+                ++copies;
+                if (copies == 2 && mode == 1) throw std::runtime_error("copy-sentinel");
+                return !(copies == 2 && mode == 0);
+            }, context, 4, [&] {
+                ++fences;
+                if (mode == 3) throw std::runtime_error("fence-sentinel");
+                return mode != 2;
+            });
+            if (mode == 1 || mode == 3)
+                EXPECT_THROW(client.SaveKvCaches({"0","1"}, destinations({17,33})), std::runtime_error);
+            else
+                EXPECT_EQ(client.SaveKvCaches({"0","1"}, destinations({17,33})).first, Code::ER_CUDAMEMCPY_ERROR);
+            EXPECT_EQ(copies, 2u);
+            EXPECT_EQ(fences, mode == 3 ? 2u : 1u);
+            EXPECT_EQ(context->active_reservations, 1u);
+            EXPECT_EQ(client.SaveKvCaches({"retry"}, destinations({17})).first,
+                      expectedPreflightError(Code::ER_INVALID_LOCAL_BUFFERS));
+        } // Fake delegate has no outstanding I/O; destruction returns this test lease.
+        EXPECT_EQ(context->active_reservations, 0u);
+    }
+}
+TEST_F(NativeSsdGpuReadWindowTest, ConcurrentUnknownReadsKeepBothLeasesAndRejectNewOperations) {
+    struct State {
+        std::mutex mu;
+        std::condition_variable cv;
+        size_t entered{0};
+        std::vector<uintptr_t> staging;
+        std::promise<void> release;
+        std::shared_future<void> released = release.get_future().share();
+        std::shared_ptr<void> payload;
+    };
+    auto state = std::make_shared<State>();
+    state->payload = output;
     auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
-    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(0);
-    std::atomic<int> initialized{0};
-    Client           client(std::move(delegate), copy, context, [&] {
-        ++initialized;
-        return false;
+    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(2)
+        .WillRepeatedly(Invoke([state](const Uris&, const Buffers& b, auto) {
+            { std::lock_guard<std::mutex> lock(state->mu); ++state->entered;
+              state->staging.push_back(reinterpret_cast<uintptr_t>(b[0].iovs[0].base)); }
+            state->cv.notify_all();
+            state->released.wait(); // No DMA is submitted by this fake.
+            return Code::ER_SDK_TIMEOUT;
+        }));
+    int device = -1;
+    ASSERT_EQ(cudaGetDevice(&device), cudaSuccess);
+    auto client = std::make_shared<Client>(std::move(delegate), copy, context, 4);
+    auto first = destinations({4096}), second = destinations({4096});
+    second[0].iovs[0].base = static_cast<unsigned char*>(output.get()) + 4096;
+    block_tree_cache_test::BoundedThread<Code> a([client, state, first, device] {
+        if (cudaSetDevice(device) != cudaSuccess) return Code::ER_CUDAMEMCPY_ERROR;
+        return client->LoadKvCaches({"a"}, first);
     });
-    std::atomic<int> observed{0};
-    client.setSdkTransferObserver([&](bool, size_t, bool) { ++observed; });
-    auto buffers = destinations({4096, 4096, 4096, 4096});
-    EXPECT_EQ(client.LoadKvCaches({"0", "1", "2", "3"}, buffers), kv_cache_manager::ER_CUDAMEMCPY_ERROR);
-    EXPECT_EQ(initialized.load(), 4);
-    EXPECT_EQ(observed.load(), 0);
-    EXPECT_EQ(context->active_reservations, 1u);
-    EXPECT_EQ(client.LoadKvCaches({"0", "1", "2", "3"}, buffers), expectedPreflightError(kv_cache_manager::ER_INVALID_LOCAL_BUFFERS));
-    unsigned char byte = 1;
-    ASSERT_EQ(cudaMemcpy(&byte, output.get(), 1, cudaMemcpyDeviceToHost), cudaSuccess);
-    EXPECT_EQ(byte, 0);
+    block_tree_cache_test::BoundedThread<Code> b([client, state, second, device] {
+        if (cudaSetDevice(device) != cudaSuccess) return Code::ER_CUDAMEMCPY_ERROR;
+        return client->LoadKvCaches({"b"}, second);
+    });
+    bool overlapping = false;
+    { std::unique_lock<std::mutex> lock(state->mu);
+      overlapping = state->cv.wait_for(lock, std::chrono::seconds(5), [&] { return state->entered == 2; }); }
+    state->release.set_value(); // Release before assertions; detached failures own all captured state.
+    ASSERT_EQ(a.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    ASSERT_EQ(b.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(a.get(), Code::ER_SDK_TIMEOUT);
+    EXPECT_EQ(b.get(), Code::ER_SDK_TIMEOUT);
+    ASSERT_TRUE(overlapping);
+    ASSERT_EQ(state->staging.size(), 2u);
+    EXPECT_TRUE(state->staging[0] + 4096 <= state->staging[1] || state->staging[1] + 4096 <= state->staging[0]);
+    EXPECT_EQ(context->active_reservations, 2u);
+    EXPECT_EQ(client->LoadKvCaches({"after"}, first), expectedPreflightError(Code::ER_INVALID_LOCAL_BUFFERS));
+    EXPECT_EQ(context->active_reservations, 2u);
+    client.reset(); // All fake SDK calls have joined; both test leases can now be reclaimed.
+    EXPECT_EQ(context->active_reservations, 0u);
+}
+TEST_F(NativeSsdGpuReadWindowTest, SaveWaitsForAConcurrentReadToLeaveTheWrapper) {
+    struct State {
+        std::promise<void> entered, release, save_started;
+        std::shared_future<void> released = release.get_future().share();
+        std::atomic<bool> read_released{false}, save_entered{false};
+        std::shared_ptr<void> payload;
+    };
+    auto state = std::make_shared<State>();
+    state->payload = output;
+    auto ready = state->entered.get_future(), attempted = state->save_started.get_future();
+    auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).WillOnce(Invoke([state](auto, auto, auto) {
+        state->entered.set_value(); state->released.wait(); state->read_released.store(true); return Code::ER_OK;
+    }));
+    EXPECT_CALL(*delegate, SaveKvCaches(_, _, _)).WillOnce(Invoke([state](const Uris& u, auto, auto) {
+        EXPECT_TRUE(state->read_released.load()); state->save_entered.store(true); return std::make_pair(Code::ER_OK, u);
+    }));
+    auto client = std::make_shared<Client>(std::move(delegate),
+        [](auto, auto, auto, auto, size_t) { return true; }, context, 4);
+    auto buffers = destinations({17});
+    block_tree_cache_test::BoundedThread<Code> read([client, state, buffers] { return client->LoadKvCaches({"read"}, buffers); });
+    const auto entered_status = ready.wait_for(std::chrono::seconds(5));
+    block_tree_cache_test::BoundedThread<Code> save([client, state, buffers] {
+        state->save_started.set_value(); return client->SaveKvCaches({"save"}, buffers).first;
+    });
+    const auto attempted_status = attempted.wait_for(std::chrono::seconds(5));
+    const auto held = save.waitFor(std::chrono::milliseconds(20));
+    const bool entered_early = state->save_entered.load();
+    state->release.set_value();
+    ASSERT_EQ(read.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    ASSERT_EQ(save.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(read.get(), Code::ER_OK);
+    EXPECT_EQ(save.get(), Code::ER_OK);
+    EXPECT_EQ(entered_status, std::future_status::ready);
+    EXPECT_EQ(attempted_status, std::future_status::ready);
+    EXPECT_EQ(held, std::future_status::timeout);
+    EXPECT_FALSE(entered_early);
+    EXPECT_EQ(context->active_reservations, 0u);
 }
 TEST_F(NativeSsdGpuReadWindowTest, SaveObserverKeepsConfirmedPrefixBeforeSdkFailure) {
     using namespace kv_cache_manager;
@@ -919,9 +985,10 @@ TEST_F(NativeSsdGpuReadWindowTest, WriteBatchPreservesPositionsTracesAndGpuPaylo
     ASSERT_EQ(cudaMalloc(&remote, expected.size()), cudaSuccess);
     auto storage = std::shared_ptr<void>(remote, [](void* p) { cudaFree(p); });
     auto delegate = std::make_unique<MockTransferClient>(destroyed);
-    size_t next = 0, remote_offset = 0, calls = 0;
+    size_t next = 0, remote_offset = 0, calls = 0, fences = 0;
     EXPECT_CALL(*delegate, SaveKvCaches(_, _, _)).Times(3)
         .WillRepeatedly(Invoke([&](const Uris& u, const Buffers& b, const auto& slice) {
+            EXPECT_EQ(fences, calls + 1); // The whole gather window must be ready before SDK submission.
             EXPECT_EQ(u.size(), std::min(size_t(64), uris.size() - next));
             EXPECT_EQ(b.size(), u.size());
             EXPECT_NE(slice, nullptr);
@@ -951,16 +1018,20 @@ TEST_F(NativeSsdGpuReadWindowTest, WriteBatchPreservesPositionsTracesAndGpuPaylo
                 remote_offset += packed.size;
                 actual.push_back("actual" + std::to_string(next));
             }
+            EXPECT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess); // Fake SDK copy has completed.
             ++calls;
             return std::make_pair(ER_OK, actual);
         }));
-    Client client(std::move(delegate), copy, context);
+    Client client(std::move(delegate), [](void* d, M dt, const void* src, M st, size_t n) {
+        return dt == M::GPU && st == M::GPU && cudaMemcpy(d, src, n, cudaMemcpyDeviceToDevice) == cudaSuccess;
+    }, context, 4, [&] { ++fences; return cudaStreamSynchronize(nullptr) == cudaSuccess; });
     const auto result = client.SaveKvCaches(uris, destinations(sizes), trace);
     ASSERT_EQ(result.first, ER_OK);
     ASSERT_EQ(result.second.size(), uris.size());
     for (size_t i = 0; i < uris.size(); ++i)
         EXPECT_EQ(result.second[i], "actual" + std::to_string(i));
     EXPECT_EQ(calls, 3u);
+    EXPECT_EQ(fences, 3u);
     EXPECT_EQ(next, uris.size());
     EXPECT_EQ(context->active_reservations, 0u);
     std::vector<unsigned char> observed(expected.size());

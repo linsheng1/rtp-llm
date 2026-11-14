@@ -4,7 +4,8 @@
 #include <algorithm>
 #include <cstdint>
 #include <functional>
-#include <future>
+#include <new>
+#include <shared_mutex>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -66,11 +67,12 @@ public:
             return false;
         }
     };
-    // Copy must finish before returning: external RDMA cannot rely on CUDA
-    // stream ordering to observe a gather or protect an in-flight scatter.
+    // Without Fence, Copy finishes before returning. With Fence, copies stay
+    // ordered on one caller-thread stream and Fence drains the entire window
+    // before external RDMA, reuse, or return. Failed drains keep the operation.
     using Copy =
         std::function<bool(void*, kv_cache_manager::MemoryType, const void*, kv_cache_manager::MemoryType, size_t)>;
-    using ReadThreadInit                            = std::function<bool()>;
+    using Fence = std::function<bool()>;
     static constexpr size_t max_operation_bytes     = 64ULL * 1024 * 1024;
     static constexpr size_t max_process_bytes       = 512ULL * 1024 * 1024;
     static constexpr size_t max_read_window_bytes   = 256ULL * 1024;
@@ -81,13 +83,15 @@ public:
     PackedSsdTransferClient(std::unique_ptr<kv_cache_manager::TransferClient> inner,
                             Copy                                              copy,
                             std::shared_ptr<GpuPackingContext>                gpu_context,
-                            ReadThreadInit                                    read_thread_init = {}):
+                            size_t                                            read_window_objects = 1,
+                            Fence                                             fence = {}):
         inner_(std::move(inner)),
         copy_(std::move(copy)),
         gpu_context_(std::move(gpu_context)),
         staging_type_(kv_cache_manager::MemoryType::GPU),
-        read_thread_init_(std::move(read_thread_init)) {
-        if (!inner_ || !copy_ || (!gpu_context_ || !gpu_context_->memory))
+        read_window_objects_(read_window_objects), fence_(std::move(fence)) {
+        if (!inner_ || !copy_ || (!gpu_context_ || !gpu_context_->memory)
+            || !read_window_objects_ || read_window_objects_ > max_read_window_objects)
             throw std::invalid_argument("missing SSD delegate/copy operation");
     }
     ~PackedSsdTransferClient() override {
@@ -98,73 +102,52 @@ public:
     }
 
     void setSdkTransferObserver(SdkTransferObserver observer) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
         transfer_observer_ = std::move(observer);
     }
 
     Code LoadKvCaches(const Uris& uris, const Buffers& destination, Trace trace = nullptr) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::shared_lock<std::shared_mutex> lock(mutex_);
         if (trace && trace->block_ids.size() != uris.size())
             return preflightFailure(kv_cache_manager::ER_INVALID_PARAMS);
-        auto operation = makeOperation(uris, destination, false, read_thread_init_ ? max_read_window_objects : 1);
-        if (!operation)
+        std::shared_ptr<Operation> operation;
+        try {
+            operation = makeOperation(uris, destination, false, read_window_objects_);
+            if (!operation) return preflightFailure(kv_cache_manager::ER_INVALID_LOCAL_BUFFERS);
+            for (size_t i = 0; i < operation->read_ranges.size(); ++i)
+                operation->calls[i]->trace = rangeTrace(trace, operation->read_ranges[i]);
+        } catch (const std::bad_alloc&) {
             return preflightFailure(kv_cache_manager::ER_INVALID_LOCAL_BUFFERS);
-        for (size_t block = 0; block < uris.size(); ++block)
-            operation->calls[block]->trace = blockTrace(trace, block, uris.size());
-        auto scatter = [&](size_t block) {
-            return copyBlock(destination[block], operation->bytes[block].get(), false);
-        };
-        // Bound simultaneous object leases by count and payload. Every object
-        // in a window has a disjoint registered GPU span. Join all SDK calls
-        // before scattering or reusing any window memory, including failures.
-        for (const auto& range : operation->read_ranges) {
+        } catch (const std::length_error&) {
+            return preflightFailure(kv_cache_manager::ER_INVALID_LOCAL_BUFFERS);
+        }
+        for (size_t window = 0; window < operation->read_ranges.size(); ++window) {
+            bool copies_pending = false;
             try {
-                auto result = kv_cache_manager::ER_OK;
-                if (read_thread_init_ && range.second - range.first > 1) {
-                    std::vector<std::future<Code>> reads;
-                    reads.reserve(range.second - range.first);
-                    for (size_t block = range.first; block < range.second; ++block) {
-                        reads.emplace_back(std::async(std::launch::async,
-                                                      [this,
-                                                       call = operation->calls[block]]() {
-                                                          if (!read_thread_init_())
-                                                              return kv_cache_manager::ER_CUDAMEMCPY_ERROR;
-                                                          return loadOne(*call);
-                                                      }));
-                    }
-                    std::exception_ptr failure;
-                    for (auto& read : reads) {
-                        try {
-                            const auto code = read.get();
-                            // Any unproven peer dominates a buffer-safe failure.
-                            // Join every peer before deciding whether the arena
-                            // can be released or the caller may shut the SDK down.
-                            if (code != kv_cache_manager::ER_OK
-                                && (result == kv_cache_manager::ER_OK || !sdkCodeProvesBufferSafety(code)))
-                                result = code;
-                        } catch (...) {
-                            if (!failure)
-                                failure = std::current_exception();
-                        }
-                    }
-                    if (failure)
-                        std::rethrow_exception(failure);
-                } else {
-                    const auto block = range.first;
-                    result = loadOne(*operation->calls[block]);
-                }
+                if (hasQuarantine()) return preflightFailure(kv_cache_manager::ER_INVALID_LOCAL_BUFFERS);
+                const auto result = loadBatch(*operation->calls[window]);
                 if (result != kv_cache_manager::ER_OK) {
-                    if (!sdkCodeProvesBufferSafety(result))
-                        quarantine(operation);
+                    if (!sdkCodeProvesBufferSafety(result)) quarantine(operation);
                     return result;
                 }
+                const auto& range = operation->read_ranges[window];
                 for (size_t block = range.first; block < range.second; ++block) {
-                    if (!scatter(block)) {
+                    copies_pending = true;
+                    if (!copyBlock(destination[block], operation->bytes[block].get(), false)) {
+                        drainCopies();
+                        copies_pending = false;
                         quarantine(operation);
                         return kv_cache_manager::ER_CUDAMEMCPY_ERROR;
                     }
                 }
+                const bool complete = !fence_ || fence_();
+                copies_pending = false;
+                if (!complete) {
+                    quarantine(operation);
+                    return kv_cache_manager::ER_CUDAMEMCPY_ERROR;
+                }
             } catch (...) {
+                if (copies_pending) drainCopies();
                 quarantine(operation);
                 throw;
             }
@@ -173,35 +156,45 @@ public:
     }
 
     std::pair<Code, Uris> SaveKvCaches(const Uris& uris, const Buffers& source, Trace trace = nullptr) override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        std::unique_lock<std::shared_mutex> lock(mutex_);
         if (trace && trace->block_ids.size() != uris.size())
             return {preflightFailure(kv_cache_manager::ER_INVALID_PARAMS), {}};
-        auto operation = makeOperation(uris, source, true);
-        if (!operation)
+        std::shared_ptr<Operation> operation;
+        Uris actual;
+        try {
+            operation = makeOperation(uris, source, true);
+            if (!operation) return {preflightFailure(kv_cache_manager::ER_INVALID_LOCAL_BUFFERS), {}};
+            for (size_t i = 0; i < operation->write_ranges.size(); ++i)
+                operation->write_calls[i]->trace = rangeTrace(trace, operation->write_ranges[i]);
+            actual = uris;
+        } catch (const std::bad_alloc&) {
             return {preflightFailure(kv_cache_manager::ER_INVALID_LOCAL_BUFFERS), {}};
-        // Prepare trace slices before the first gather or SDK submission.
-        for (size_t window = 0; window < operation->write_ranges.size(); ++window) {
-            if (trace) {
-                const auto& range = operation->write_ranges[window];
-                auto slice = std::make_shared<kv_cache_manager::TransferTraceInfo>(*trace);
-                slice->block_ids = {trace->block_ids.begin() + range.first, trace->block_ids.begin() + range.second};
-                operation->write_calls[window]->trace = std::move(slice);
-            }
+        } catch (const std::length_error&) {
+            return {preflightFailure(kv_cache_manager::ER_INVALID_LOCAL_BUFFERS), {}};
         }
         auto gather = [&](size_t block) {
             return copyBlock(source[block], operation->bytes[block].get(), true);
         };
-        auto actual = uris;
         for (size_t window = 0; window < operation->write_ranges.size(); ++window) {
             const auto& range = operation->write_ranges[window];
             // Each URI has a disjoint GPU subspan. Complete every gather in the
             // window before submitting its single multi-URI SDK operation.
+            bool copies_pending = false;
             try {
                 for (size_t block = range.first; block < range.second; ++block) {
+                    copies_pending = true;
                     if (!gather(block)) {
+                        drainCopies();
+                        copies_pending = false;
                         quarantine(operation);
                         return {kv_cache_manager::ER_CUDAMEMCPY_ERROR, {}};
                     }
+                }
+                const bool complete = !fence_ || fence_();
+                copies_pending = false;
+                if (!complete) {
+                    quarantine(operation);
+                    return {kv_cache_manager::ER_CUDAMEMCPY_ERROR, {}};
                 }
                 auto result = saveBatch(*operation->write_calls[window]);
                 if (result.first != kv_cache_manager::ER_OK) {
@@ -218,6 +211,7 @@ public:
                         actual[range.first + i] = std::move(result.second[i]);
                 }
             } catch (...) {
+                if (copies_pending) drainCopies();
                 quarantine(operation);
                 throw;
             }
@@ -298,7 +292,7 @@ private:
             }
         }
     }
-    Code loadOne(const InnerIo& call) {
+    Code loadBatch(const InnerIo& call) {
         Code code;
         try {
             code = inner_->LoadKvCaches(call.uris, call.buffers, call.trace);
@@ -306,7 +300,7 @@ private:
             observe(true, 0, true);
             throw;
         }
-        observe(true, code == kv_cache_manager::ER_OK ? call.buffers.front().iovs.front().size : 0,
+        observe(true, code == kv_cache_manager::ER_OK ? call.payload_bytes : 0,
                 code != kv_cache_manager::ER_OK);
         return code;
     }
@@ -322,14 +316,15 @@ private:
                 result.first != kv_cache_manager::ER_OK);
         return result;
     }
-    static Trace blockTrace(const Trace& trace, size_t block, size_t count) {
-        if (!trace)
-            return {};
+    void drainCopies() noexcept {
+        if (fence_) {
+            try { (void)fence_(); } catch (...) {}
+        }
+    }
+    static Trace rangeTrace(const Trace& trace, const std::pair<size_t, size_t>& range) {
+        if (!trace) return {};
         auto result = std::make_shared<kv_cache_manager::TransferTraceInfo>(*trace);
-        if (trace->block_ids.size() == count)
-            result->block_ids = {trace->block_ids[block]};
-        else
-            return {};
+        result->block_ids.assign(trace->block_ids.begin() + range.first, trace->block_ids.begin() + range.second);
         return result;
     }
     struct GpuRangeLease {
@@ -363,20 +358,31 @@ private:
         std::vector<std::pair<size_t, size_t>> read_ranges;
         std::vector<std::pair<size_t, size_t>> write_ranges;
         std::vector<std::shared_ptr<InnerIo>> write_calls;
+        std::shared_ptr<Operation> next_quarantined;
+        bool quarantined{false};
         ~Operation() {
             process_bytes_.fetch_sub(charged);
         }
     };
     void quarantine(const std::shared_ptr<Operation>& operation) {
-        quarantine_ = operation;
+        std::lock_guard<std::mutex> lock(quarantine_mutex_);
+        if (!operation->quarantined) {
+            operation->quarantined = true;
+            operation->next_quarantined = std::move(quarantine_);
+            quarantine_ = operation;
+        }
         // Only this client's unresolved GPU range stays reserved. Independent
         // tags can continue using other ranges of the registered arena.
+    }
+    bool hasQuarantine() {
+        std::lock_guard<std::mutex> lock(quarantine_mutex_);
+        return static_cast<bool>(quarantine_);
     }
     std::shared_ptr<Operation>
     makeOperation(const Uris& uris, const Buffers& original, bool write, size_t read_window_objects = 1) {
         // Any uncertain completion fails this client closed until shutdown;
         // failed buffers cannot be overwritten by a later operation.
-        if (quarantine_ || uris.empty() || uris.size() != original.size())
+        if (hasQuarantine() || uris.empty() || uris.size() != original.size())
             return {};
         size_t              total = 0;
         std::vector<size_t> sizes;
@@ -451,24 +457,17 @@ private:
             operation->bytes[i] = std::shared_ptr<void>(
                 gpu_context_->memory, static_cast<unsigned char*>(gpu_context_->memory.get()) + offset + offsets[i]);
             operation->buffers[i].iovs.push_back({staging_type_, operation->bytes[i].get(), sizes[i], false});
-            if (!write) {
-                auto call = std::make_shared<InnerIo>();
-                call->uris.push_back(uris[i]);
-                call->buffers.push_back(operation->buffers[i]);
-                operation->calls.push_back(std::move(call));
-            }
         }
-        if (write) {
-            operation->write_calls.reserve(operation->write_ranges.size());
-            for (const auto& range : operation->write_ranges) {
-                auto call = std::make_shared<InnerIo>();
-                call->uris.assign(uris.begin() + range.first, uris.begin() + range.second);
-                call->buffers.assign(operation->buffers.begin() + range.first,
-                                     operation->buffers.begin() + range.second);
-                for (size_t i = range.first; i < range.second; ++i)
-                    call->payload_bytes += sizes[i];
-                operation->write_calls.push_back(std::move(call));
-            }
+        const auto& ranges = write ? operation->write_ranges : operation->read_ranges;
+        auto& calls = write ? operation->write_calls : operation->calls;
+        calls.reserve(ranges.size());
+        for (const auto& range : ranges) {
+            auto call = std::make_shared<InnerIo>();
+            call->uris.assign(uris.begin() + range.first, uris.begin() + range.second);
+            call->buffers.assign(operation->buffers.begin() + range.first, operation->buffers.begin() + range.second);
+            for (size_t i = range.first; i < range.second; ++i)
+                call->payload_bytes += sizes[i];
+            calls.push_back(std::move(call));
         }
         return operation;
     }
@@ -477,8 +476,10 @@ private:
     Copy                                              copy_;
     std::shared_ptr<GpuPackingContext>                gpu_context_;
     kv_cache_manager::MemoryType                      staging_type_;
-    ReadThreadInit                                    read_thread_init_;
-    std::mutex                                        mutex_;
+    const size_t                                      read_window_objects_;
+    Fence                                             fence_;
+    std::shared_mutex                                 mutex_;
+    std::mutex                                        quarantine_mutex_;
     SdkTransferObserver                               transfer_observer_;
     std::shared_ptr<Operation>                        quarantine_;
 };
