@@ -264,6 +264,7 @@ cc_test(
 
 cc_test(
     name = "single_type_kv_cache_allocator_test",
+    testonly = True,
     srcs = [
         "SingleTypeCoordinatorCacheManagerTest.cc",
     ],
@@ -448,6 +449,7 @@ cc_test(
 
 cc_test(
     name = "coordinator_cache_manager_atomic_update_test",
+    testonly = True,
     srcs = ["CoordinatorCacheManagerAtomicUpdateTest.cc"],
     copts = copts(),
     deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + [

@@ -96,6 +96,7 @@ cc_test(
 
 cc_test(
     name = "i_block_pool_test",
+    testonly = True,
     exec_properties = {"gpu": "L20_CU13"},
     srcs = ["IBlockPoolTest.cc"],
     copts = pool_test_copts,

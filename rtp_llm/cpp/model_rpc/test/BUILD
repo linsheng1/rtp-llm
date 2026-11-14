@@ -172,6 +172,7 @@ cc_test(
 
 cc_test(
     name = "prefill_rpc_server_test",
+    testonly = True,
     srcs = [
         "PrefillRpcServerTest.cc",
         "RpcEngineStartupTest.cc",
@@ -187,6 +188,7 @@ cc_test(
 
 cc_test(
     name = "decode_rpc_server_test",
+    testonly = True,
     srcs = ["DecodeRpcServerTest.cc"],
     copts = test_copts,
     deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + test_deps + [

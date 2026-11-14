@@ -189,6 +189,7 @@ cc_test(
 
 cc_test(
     name = "transfer_work_loop_test",
+    testonly = True,
     srcs = ["TransferWorkLoopTest.cc"],
     copts = test_copts,
     deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + test_deps + [

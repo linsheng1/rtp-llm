@@ -27,6 +27,7 @@ test_deps = [
 
 cc_test(
     name = "block_tree_loader_test",
+    testonly = True,
     exec_properties = {"gpu": "L20_CU13"},
     srcs = ["BlockTreeLoaderTest.cc"],
     copts = test_copts,

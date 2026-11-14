@@ -133,6 +133,7 @@ cc_test_wrapper(
 
 cc_test_wrapper(
     name = "kvcm_mock_only_full_test",
+    testonly = True,
     exec_properties = {"gpu": "L20_CU13"},
     srcs = [
         "KVCMMockOnlyFullTest.cc",
@@ -218,6 +219,7 @@ cc_test_wrapper(
 
 cc_test_wrapper(
     name = "native_dtop_completion_test",
+    testonly = True,
     exec_properties = {"gpu": "L20_CU13"},
     srcs = [
         "NativeDtopCompletionTest.cc",

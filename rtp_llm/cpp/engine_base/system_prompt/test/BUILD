@@ -47,6 +47,7 @@ cc_test(
 
 cc_test(
     name = "system_prompt_constructor_test",
+    testonly = True,
     srcs = [
         "SystemPromptConstructorTest.cc",
     ],

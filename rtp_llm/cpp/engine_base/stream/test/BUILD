@@ -73,6 +73,7 @@ cc_test(
 
 cc_test(
     name = "generate_stream_test",
+    testonly = True,
     srcs = [
         "GenerateStreamTest.cc",
     ],
@@ -88,6 +89,7 @@ cc_test(
 
 cc_test(
     name = "generate_stream_state_test",
+    testonly = True,
     srcs = [
         "GenerateStreamStateTest.cc",
     ],
