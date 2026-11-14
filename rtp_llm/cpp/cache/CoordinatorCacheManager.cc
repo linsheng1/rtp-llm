@@ -963,9 +963,10 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
             continue;
         }
         CacheKeysType insert_keys = cp_active ? cpCanonicalCacheKeys(cp_mapper, full_keys) : full_keys;
+        const size_t endpoint_key_unit = endpoint ?
+            (cp_active ? cp_mapper->reuseBlockTokens(config_) : config_.seq_size_per_block) : 0;
         if (endpoint) {
-            const size_t key_unit = cp_active ? cp_mapper->reuseBlockTokens(config_) : config_.seq_size_per_block;
-            insert_keys.resize(std::min(insert_keys.size(), endpoint->end / key_unit));
+            insert_keys.resize(std::min(insert_keys.size(), endpoint->end / endpoint_key_unit));
         }
         if (insert_keys.empty()) {
             continue;
@@ -991,22 +992,22 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
                     mapping_valid = false;
                     break;
                 }
-                const auto type           = config_.group(tag).policy.group_type;
+                const auto& group         = config_.group(tag);
+                const auto type           = group.policy.group_type;
                 const bool sparse_logical = cp_active
                                             && (type == CacheGroupType::LINEAR
                                                 || (type == CacheGroupType::SWA && !cpCompactSwaGroup(tag, cp_mapper)));
                 const auto& blocks = kv_cache_resource->blocks(batch_id, tag);
+                const auto* native = endpoint ? &endpoint->blocks.at(tag) : nullptr;
+                const size_t span = endpoint ? group.seqSizePerBlock() : 0;
                 for (size_t i = 0; i < insert_keys.size(); ++i) {
-                    const size_t position = sparse_logical ? (i + 1) * static_cast<size_t>(cp_mapper->cpSize()) - 1 : i;
-                    if (endpoint) {
-                        const size_t key_unit = cp_active ? cp_mapper->reuseBlockTokens(config_) : config_.seq_size_per_block;
-                        const size_t tokens = (i + 1) * key_unit;
-                        const size_t span = config_.group(tag).seqSizePerBlock();
-                        const auto& native = endpoint->blocks.at(tag);
-                        if (tokens % span == 0 && tokens / span - 1 < native.size())
-                            resources[i][group_set_id].device_blocks[member_group_id] = native[tokens / span - 1];
+                    if (native) {
+                        const size_t tokens = (i + 1) * endpoint_key_unit;
+                        if (tokens % span == 0 && tokens / span - 1 < native->size())
+                            resources[i][group_set_id].device_blocks[member_group_id] = (*native)[tokens / span - 1];
                         continue; // Original tree acquires CACHE refs before this endpoint owner is released.
                     }
+                    const size_t position = sparse_logical ? (i + 1) * static_cast<size_t>(cp_mapper->cpSize()) - 1 : i;
                     if (position >= blocks.size() || isNullBlockIdx(blocks[position])) {
                         continue;
                     }
