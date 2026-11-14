@@ -100,6 +100,11 @@ inline std::optional<std::map<std::string, std::string>> queryFields(std::string
 }  // namespace decode_origin_detail
 
 inline std::optional<DecodeCacheOrigin> decodeCacheOriginFromUri(std::string_view uri) {
+    // Legacy locations cannot carry provenance without this literal key.
+    // Keep oversized input rejection O(1); marked URIs still undergo every
+    // original query/fragment/duplicate check below, including false positives.
+    if (uri.empty() || uri.size() > 16384 || uri.find("dtop_origin=") == std::string_view::npos)
+        return std::nullopt;
     const auto fields = decode_origin_detail::queryFields(uri);
     if (!fields)
         return std::nullopt;
