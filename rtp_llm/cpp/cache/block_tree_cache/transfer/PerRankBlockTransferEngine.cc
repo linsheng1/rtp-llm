@@ -76,8 +76,7 @@ std::vector<RegionOriginTransfer> prepareOriginTransfers(const std::vector<Trans
             const auto  source_block = descriptor.source_blocks.at(descriptor.source_tier == Tier::DEVICE ? member : 0);
             const auto  target_block = descriptor.target_blocks.at(descriptor.target_tier == Tier::DEVICE ? member : 0);
             const auto& tag          = group.groupTags()[member];
-            const auto  source_incarnation = source->decodeOriginIncarnation(source_block);
-            const auto  origin             = source->decodeOrigin(source_block, tag);
+            const auto [source_incarnation, origin] = source->decodeOriginSnapshot(source_block, tag);
             if (origin && collect)
                 (void)target->enableDecodeOriginTracking();
             const auto target_incarnation = target->decodeOriginIncarnation(target_block);
@@ -108,8 +107,8 @@ void completeOriginTransfers(const std::vector<RegionOriginTransfer>& transfers,
     if (!success)
         return;
     for (const auto& transfer : transfers) {
-        if (transfer.source->decodeOriginIncarnation(transfer.source_block) == transfer.source_incarnation
-            && transfer.source->decodeOrigin(transfer.source_block, transfer.tag) == transfer.origin) {
+        const auto [incarnation, origin] = transfer.source->decodeOriginSnapshot(transfer.source_block, transfer.tag);
+        if (incarnation == transfer.source_incarnation && origin == transfer.origin) {
             transfer.target->bindDecodeOrigin(
                 transfer.target_block, transfer.target_incarnation, transfer.tag, transfer.origin);
         }

@@ -341,6 +341,56 @@ TEST(IBlockPoolTest, NeverBoundOriginsBypassLockUntilFirstSuccessfulNonNullBind)
     ASSERT_NO_FATAL_FAILURE(expectOriginLookupUnderPoolLock(pool, block, false, {}));
 }
 
+TEST(IBlockPoolTest, OriginSnapshotKeepsTheStickyFastPathAndRejectsRecycledAllocations) {
+    auto pool = makeInitializedPool(2);
+    const auto block = *pool->malloc();
+    using Snapshot = std::pair<uint64_t, PhysicalDecodeOrigins::Origin>;
+    const auto check = [&](bool bypasses_lock, Snapshot expected) {
+        auto entered = std::make_shared<std::promise<void>>();
+        auto started = entered->get_future();
+        std::unique_lock<std::mutex> lock(pool->mutex_);
+        block_tree_cache_test::BoundedThread<Snapshot> lookup([pool, block, entered] {
+            entered->set_value();
+            return pool->decodeOriginSnapshot(block, "full");
+        });
+        const auto ready = started.wait_for(std::chrono::seconds(5));
+        EXPECT_EQ(ready, std::future_status::ready);
+        if (ready == std::future_status::ready)
+            EXPECT_EQ(lookup.waitFor(bypasses_lock ? std::chrono::milliseconds(5000) : std::chrono::milliseconds(20)),
+                      bypasses_lock ? std::future_status::ready : std::future_status::timeout);
+        lock.unlock();
+        ASSERT_EQ(lookup.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+        EXPECT_EQ(lookup.get(), expected);
+    };
+    ASSERT_NO_FATAL_FAILURE(check(true, {}));
+    ASSERT_TRUE(pool->enableDecodeOriginTracking());
+    const auto stamp = pool->decodeOriginIncarnation(block);
+    ASSERT_NE(stamp, 0u);
+    ASSERT_NO_FATAL_FAILURE(check(true, {})); // Enabling alone does not arm the sticky flag.
+    const auto parsed = DecodeCacheOrigin::parse("v1." + std::string(32, 'a') + ".7680.7680.8192.8200.8201");
+    ASSERT_TRUE(parsed);
+    auto origin = std::make_shared<const DecodeCacheOrigin>(*parsed);
+    ASSERT_TRUE(pool->bindDecodeOrigin(block, stamp, "full", origin));
+    ASSERT_NO_FATAL_FAILURE(check(false, {stamp, origin}));
+    const auto missing_region = pool->decodeOriginSnapshot(block, "other");
+    EXPECT_EQ(missing_region.first, stamp);
+    EXPECT_FALSE(missing_region.second);
+    ASSERT_TRUE(pool->bindDecodeOrigin(block, stamp, "full", nullptr));
+    ASSERT_NO_FATAL_FAILURE(check(false, {stamp, {}}));
+    pool->incTreeRef(block, BlockTreeRefType::CACHE);
+    pool->decTreeRef(block, BlockTreeRefType::CACHE);
+    ASSERT_NO_FATAL_FAILURE(check(false, {}));
+    ASSERT_EQ(*pool->malloc(), block);
+    const auto recycled = pool->decodeOriginSnapshot(block, "full");
+    EXPECT_NE(recycled.first, stamp);
+    EXPECT_NE(recycled.first, 0u);
+    EXPECT_FALSE(recycled.second);
+    EXPECT_FALSE(pool->bindDecodeOrigin(block, stamp, "full", origin));
+    const auto invalid = pool->decodeOriginSnapshot(NULL_BLOCK_IDX, "full");
+    EXPECT_EQ(invalid.first, 0u);
+    EXPECT_FALSE(invalid.second);
+}
+
 TEST(IBlockPoolTest, OriginTrackingIsOptionalAndFollowsAllocatedPhysicalLifetime) {
     auto       pool   = makeInitializedPool(2);
     const auto block  = *pool->malloc();

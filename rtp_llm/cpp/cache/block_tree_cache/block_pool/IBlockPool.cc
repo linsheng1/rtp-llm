@@ -287,6 +287,14 @@ PhysicalDecodeOrigins::Origin IBlockPool::decodeOrigin(BlockIdxType block, std::
                                                                              nullptr;
 }
 
+std::pair<uint64_t, PhysicalDecodeOrigins::Origin>
+IBlockPool::decodeOriginSnapshot(BlockIdxType block, std::string_view region) const {
+    if (!decode_origin_ever_bound_.load(std::memory_order_acquire)) return {};
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!decode_origins_ || !validBlockNoLock(block) || !allocated_[block]) return {};
+    return {decode_origins_->incarnation(block), decode_origins_->get(block, region)};
+}
+
 bool IBlockPool::bindDecodeOrigin(BlockIdxType                  block,
                                   uint64_t                      expected_incarnation,
                                   std::string_view              region,

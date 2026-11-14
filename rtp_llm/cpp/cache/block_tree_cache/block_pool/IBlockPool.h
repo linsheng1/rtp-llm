@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/Types.h"
@@ -98,6 +99,9 @@ public:
     bool                          enableDecodeOriginTracking();
     uint64_t                      decodeOriginIncarnation(BlockIdxType block) const;
     PhysicalDecodeOrigins::Origin decodeOrigin(BlockIdxType block, std::string_view region) const;
+    // A paired read for provenance propagation; a null origin needs no stamp.
+    std::pair<uint64_t, PhysicalDecodeOrigins::Origin>
+    decodeOriginSnapshot(BlockIdxType block, std::string_view region) const;
     bool                          bindDecodeOrigin(BlockIdxType                  block,
                                                    uint64_t                      expected_incarnation,
                                                    std::string_view              region,
