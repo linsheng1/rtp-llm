@@ -578,11 +578,14 @@ std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
         for (size_t slot = first; slot < count; ++slot) {
             if (!input.numel() || (group.policy.group_type == CacheGroupType::FULL && slot >= static_cast<size_t>(input.numel()))) return {};
             const auto source = values[slot % input.numel()];
-            if (isNullBlockIdx(source) || !pool->isAllocated(source)) return {};
-            if (prior && slot < prior->size() && (*prior)[slot]
-                && (*prior)[slot]->pool.get() == pool.get() && (*prior)[slot]->block == source) {
+            if (isNullBlockIdx(source)) return {};
+            const auto* held = prior && slot < prior->size() ? (*prior)[slot].get() : nullptr;
+            if (held && held->pool.get() == pool.get() && held->block == source
+                && held->pin && held->pin.get() == pool.get() && held->pin.get_deleter().block == source) {
+                // This exact page's live connector pin already proves allocation.
                 holds.push_back((*prior)[slot]); // Share this FULL page, never the old endpoint's owner.
             } else {
+                if (!pool->isAllocated(source)) return {};
                 auto hold = std::make_shared<DecodeEndpoint::PageHold>();
                 hold->pool = pool;
                 hold->block = source;

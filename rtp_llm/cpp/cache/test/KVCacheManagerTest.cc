@@ -223,6 +223,32 @@ TEST_F(KVCacheManagerTest, EndpointReadsStridedCpuBlockTablesWithoutChangingPage
     EXPECT_EQ(f.refs(), baseline);
 }
 
+TEST_F(KVCacheManagerTest, EndpointRejectsPriorHoldsWithoutAnEngagedPinForTheExactPage) {
+    for (int kind = 0; kind < 3; ++kind) {
+        EndpointHoldFixture f;
+        EndpointHoldFixture other;
+        const auto baseline = f.refs(), other_baseline = other.refs();
+        auto previous = std::make_shared<DecodeEndpoint>();
+        previous->end = 4;
+        auto hold = std::make_shared<DecodeEndpoint::PageHold>();
+        hold->pool = f.pools.at("full");
+        hold->block = f.block("full", 0);
+        if (kind == 1) // The token belongs to a different pool.
+            hold->pin = other.pools.at("full")->pinForRemotePublication(other.block("full", 0));
+        else if (kind == 2) // Same pool, but a different block's token is no proof.
+            hold->pin = f.pools.at("full")->pinForRemotePublication(f.block("full", 1));
+        previous->pages["full"].push_back(hold);
+        auto endpoint = f.capture(4, previous);
+        ASSERT_TRUE(endpoint);
+        EXPECT_NE(endpoint->pages.at("full").at(0), hold);
+        EXPECT_TRUE(endpoint->pages.at("full").at(0)->pin);
+        EXPECT_EQ(f.refs("full", 0), 2u); // Fresh pin, even though the synthetic hold claims this page.
+        endpoint.reset(); previous.reset(); hold.reset();
+        EXPECT_EQ(f.refs(), baseline);
+        EXPECT_EQ(other.refs(), other_baseline);
+    }
+}
+
 TEST_F(KVCacheManagerTest, EndpointPhysicalRemapAndLocalTailPagesAreNotShared) {
     EndpointHoldFixture f;
     const auto baseline = f.refs();
