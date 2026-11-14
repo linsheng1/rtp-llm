@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "autil/legacy/json.h"
 #include <map>
+#include <mutex>
 #include <chrono>
 #include <grpcpp/create_channel.h>
 #include <grpcpp/generic/generic_stub.h>
@@ -66,8 +67,13 @@ createNativeSsdGpu(const std::string&                                 config,
     int                                          device = 0;
     if (cudaGetDevice(&device) != cudaSuccess)
         return {};
-    std::lock_guard<std::mutex> registry_lock(registry_mutex);
+    std::unique_lock<std::mutex> registry_lock(registry_mutex);
     auto                        context = contexts[device].lock();
+    if (context && context->registered) {
+        // Sealed spans are immutable and this strong reference keeps the arena
+        // alive. Validate/copy host descriptors without blocking another Init.
+        registry_lock.unlock();
+    }
     if (registrations.gpu.empty()) {
         // ClientWrapper registers every pool at its first Init and clears the
         // later descriptors. Those clients may reuse only a proven subspan of
@@ -108,6 +114,10 @@ createNativeSsdGpu(const std::string&                                 config,
     if (!context->registered)
         memory.gpu.push_back({context->memory.get(), bytes, device});
     auto registered_spans = context->registered ? std::vector<kv_cache_manager::GpuMemorySpan>{} : memory.gpu;
+    // Preserve SDK Init serialization across devices, including first arena
+    // allocation and publication. No SDK concurrency contract is assumed.
+    if (!registry_lock.owns_lock())
+        registry_lock.lock();
     auto delegate         = kv_cache_manager::TransferClient::Create(config, params, memory);
     if (!delegate)
         return {};
