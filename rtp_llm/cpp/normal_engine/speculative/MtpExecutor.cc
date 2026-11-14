@@ -68,8 +68,12 @@ void MtpExecutor::retainDecodePublicationPages(const StreamGroups& streams, cons
     const size_t unit = cache_manager_->decodePublicationUnit();
     if (!unit) return;
     bool crossing = false;
-    for (const auto& stream : streams.allStreams())
-        crossing |= stream->mayCrossDecodePublicationBoundary(unit, propose_step_ + 1);
+    for (const auto& stream : streams.allStreams()) {
+        if (stream->mayCrossDecodePublicationBoundary(unit, propose_step_ + 1)) {
+            crossing = true;
+            break;
+        }
+    }
     if (!crossing) return; // No payload copy or metadata join on ordinary rounds.
     if (!sampled.transfer_done_event || !target.prefix_lengths.defined() || !target.input_lengths.defined()
         || !draft.prefix_lengths.defined() || !draft.input_lengths.defined() || !target.kv_cache_block_id.defined()) return;
