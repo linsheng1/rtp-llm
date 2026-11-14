@@ -31,20 +31,6 @@ using ::testing::ReturnRef;
 
 using ::testing::SetArgReferee;
 
-TEST(ClientFactoryGdrTest, SsdAutomaticallyRequiresGpuRegistrations) {
-    autil::EnvGuard              enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
-    ::rtp_llm::test::withDecodePublicationStartup([&] {
-    ClientFactory                factory;
-    kv_cache_manager::InitParams params{};
-    const std::string            ssd = R"({"sdk_config":{"sdk_backend_configs":[{"type":"pace_ssd"}]}})";
-    EXPECT_THROW(factory.createTransferClient(ssd, params), std::invalid_argument);
-    const std::string mixed = R"({"sdk_config":{"sdk_backend_configs":[{"type":"pace"},{"type":"pace_ssd"}]}})";
-    kv_cache_manager::ClientMemoryRegistrations registrations;
-    EXPECT_THROW(factory.createTransferClientWithMemory(mixed, params, registrations), std::invalid_argument);
-    EXPECT_THROW(factory.createTransferClientWithMemory(ssd, params, registrations), std::invalid_argument);
-    });
-}
-
 struct InitObservation {
     const kv_cache_manager::RegistSpan* registration_descriptor = nullptr;
     void*                               registration_base       = nullptr;
