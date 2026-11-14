@@ -12,6 +12,7 @@
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutConfig.h"
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/IBlockPool.h"
@@ -55,11 +56,10 @@ public:
     void decRef(BlockIdxType block, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
     void decRef(const BlockIdList& blocks, DeviceBlockRefType ref_type = DeviceBlockRefType::REQUEST);
 
-    // EOS publication only. Allocate the release closure and reserve free-list
-    // capacity before acquiring the connector reference. The caller must keep
-    // this pool alive and invoke the returned closure exactly once. Its release
-    // performs no allocation and isolates capacity-notification exceptions.
-    std::function<void()> pinForRemotePublication(BlockIdxType block);
+    // Snapshot the callback and reserve free-list capacity before acquiring the
+    // connector reference. Keep the pool alive until the token is reset/destroyed.
+    // Release performs no allocation and isolates notification exceptions.
+    RemotePublicationPin pinForRemotePublication(BlockIdxType block);
 
     struct RequestReferenceUpdate {
         BlockIdxType block;

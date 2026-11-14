@@ -22,13 +22,13 @@ struct DecodeEndpoint {
     struct PageHold {
         std::shared_ptr<DeviceBlockPool> pool;
         BlockIdxType block{NULL_BLOCK_IDX};
-        std::function<void()> release;
+        RemotePublicationPin pin;
         PageHold() = default;
         PageHold(const PageHold&) = delete;
         PageHold& operator=(const PageHold&) = delete;
         PageHold(PageHold&&) = delete;
         PageHold& operator=(PageHold&&) = delete;
-        ~PageHold() { if (release) release(); }
+        ~PageHold() = default;
     };
     using PageHolds = std::vector<std::shared_ptr<const PageHold>>;
     // FULL holds are slot-indexed. STATE/SWA hold only this endpoint's required

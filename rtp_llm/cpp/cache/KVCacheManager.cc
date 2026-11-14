@@ -586,7 +586,7 @@ std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
                 hold->pool = pool;
                 hold->block = source;
                 holds.push_back(hold); // Prepare host ownership before acquiring a page.
-                hold->release = pool->pinForRemotePublication(source);
+                hold->pin = pool->pinForRemotePublication(source);
             }
             blocks[slot] = source; // Actual DSV4.1 STATE/SWA use position-based pages, not LINEAR accept swaps.
         }

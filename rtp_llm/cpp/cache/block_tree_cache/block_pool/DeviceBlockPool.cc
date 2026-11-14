@@ -51,7 +51,7 @@ DeviceBlockPool::DeviceBlockPool(std::shared_ptr<const DeviceBlockPoolConfig> co
     }
 }
 
-std::function<void()> DeviceBlockPool::pinForRemotePublication(BlockIdxType block) {
+RemotePublicationPin DeviceBlockPool::pinForRemotePublication(BlockIdxType block) {
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     checkAllocatedNoLock(block);
@@ -59,9 +59,6 @@ std::function<void()> DeviceBlockPool::pinForRemotePublication(BlockIdxType bloc
     // totalBlocksNumNoLock() block IDs can be in the free list at any time.
     reserveAllReleasedBlocksNoLock();
     auto notify = capacityChangeCallbackNoLock();
-    std::function<void()> release = [this, block, notify = std::move(notify)] {
-        releaseRemotePublicationPin(block, notify);
-    };
     const auto type = static_cast<size_t>(DeviceBlockRefType::REMOTE_CONNECTOR);
     const bool was_active = isActiveNoLock(block);
     const bool was_available = isAvailableNoLock(block);
@@ -71,7 +68,10 @@ std::function<void()> DeviceBlockPool::pinForRemotePublication(BlockIdxType bloc
     }
     updateActiveBlocksNumNoLock(block, was_active);
     updateAvailableBlocksNumNoLock(block, was_available);
-    return release;
+    return RemotePublicationPin(this, RemotePublicationPinDeleter{block, std::move(notify),
+        [](DeviceBlockPool* pool, BlockIdxType id, const std::function<void()>& callback) noexcept {
+            pool->releaseRemotePublicationPin(id, callback);
+        }});
 }
 
 void DeviceBlockPool::releaseRemotePublicationPin(BlockIdxType block, const std::function<void()>& notify) noexcept {

@@ -44,7 +44,7 @@ struct StorageTaskState {
     struct Pin {
         DeviceBlockPoolPtr pool;
         BlockIdxType       block;
-        std::function<void()> publication_release;
+        RemotePublicationPin publication;
     };
 
     StorageRequest   request;
@@ -58,9 +58,9 @@ struct StorageTaskState {
     std::atomic<bool>                 completion_started{false};
     void             finish() {
         std::call_once(finish_once, [this] {
-            for (const Pin& pin : pins) {
-                if (pin.publication_release) {
-                    pin.publication_release();
+            for (Pin& pin : pins) {
+                if (pin.publication) {
+                    pin.publication.reset();
                 } else {
                     pin.pool->decRef(pin.block, DeviceBlockRefType::REMOTE_CONNECTOR);
                 }
@@ -490,7 +490,7 @@ StorageBackend::prepare(StorageRequest request, bool for_write, uint64_t trace_i
         }
         state->pins.reserve(sources.size());
         for (auto& pin : sources) {
-            pin.publication_release = pin.pool->pinForRemotePublication(pin.block);
+            pin.publication = pin.pool->pinForRemotePublication(pin.block);
             state->pins.push_back(std::move(pin));
         }
         timer.finish(true);

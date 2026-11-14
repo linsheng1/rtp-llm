@@ -280,7 +280,7 @@ TEST(DeviceBlockPoolTest, PublicationPinReleasesDespiteThrowingCapacityNotificat
     EXPECT_EQ(pool.refCount(block), 2u);
     pool.decRef(block);
     EXPECT_TRUE(pool.isAllocated(block));
-    EXPECT_NO_THROW(release());
+    EXPECT_NO_THROW(release.reset());
     EXPECT_EQ(notifications, 1u);
     EXPECT_FALSE(pool.isAllocated(block));
     EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
@@ -308,6 +308,46 @@ TEST(DeviceBlockPoolTest, PublicationPinCallbackAllocationFailureDoesNotAcquireR
     EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
     *fail = false;
     pool.decRef(block);
+}
+
+TEST(DeviceBlockPoolTest, PublicationPinMoveAndResetReleaseExactlyOnceWithIndependentCallbackCopies) {
+    struct Observer {
+        std::shared_ptr<std::vector<int>> seen;
+        int count{0};
+        void operator()() { seen->push_back(++count); }
+    };
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    auto seen = std::make_shared<std::vector<int>>();
+    pool.setCapacityChangeCallback(Observer{seen});
+    const auto first = pool.malloc().value(), second = pool.malloc().value();
+    pool.incRef(first); pool.incRef(second);
+    auto a = pool.pinForRemotePublication(first), b = pool.pinForRemotePublication(second);
+    pool.decRef(first); pool.decRef(second);
+    EXPECT_TRUE(seen->empty());
+    auto moved = std::move(a);
+    EXPECT_FALSE(a);
+    EXPECT_TRUE(moved);
+    moved = std::move(b); // Release first, then adopt second.
+    EXPECT_FALSE(b);
+    EXPECT_FALSE(pool.isAllocated(first));
+    EXPECT_TRUE(pool.isAllocated(second));
+    moved.reset();
+    moved.reset();
+    EXPECT_FALSE(pool.isAllocated(second));
+    EXPECT_EQ(*seen, (std::vector<int>{1, 1})); // Shared mutable functor state would incorrectly yield 1,2.
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+}
+TEST(DeviceBlockPoolTest, PublicationPinDestructionWithoutCallbackReturnsCapacity) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto block = pool.malloc().value();
+    {
+        auto token = pool.pinForRemotePublication(block);
+        EXPECT_TRUE(pool.isAllocated(block));
+        EXPECT_EQ(pool.refCount(block), 1u);
+    }
+    EXPECT_FALSE(pool.isAllocated(block));
 }
 
 TEST(DeviceBlockPoolTest, LifecycleUsesIBlockPoolSemantics) {
