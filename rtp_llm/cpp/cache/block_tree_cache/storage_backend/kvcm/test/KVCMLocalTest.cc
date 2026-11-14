@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/utils/DecodePublicationTest.h"
+#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/KVCMMockTestBase.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/StorageBackendExecutor.h"
 
@@ -8,6 +9,7 @@
 #include <csignal>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <map>
 #include <stdexcept>
 #include <tuple>
@@ -389,6 +391,46 @@ TEST(KVCMLocalTest, DisabledPublicationIgnoresDecodeOnlyBackendAndBudgetRestrict
         .WillOnce(Return(true));
     EXPECT_TRUE(read(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta)));
     });
+}
+
+TEST(KVCMLocalTest, InvalidDecodeSwitchPreservesPrefillTrafficButStillRejectsDecode) {
+    for (const char* value : {"", "true", " 1", "2"}) {
+        autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", value);
+        ASSERT_EQ(setenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", value, 1), 0); // Empty is present, not unset.
+        test::withDecodePublicationStartup([&] {
+            EXPECT_FALSE(remoteCacheDecodePublicationEnabled());
+            EXPECT_FALSE(remoteCacheDecodePublicationConfigValid());
+            // P then D share the same cached invalid setting; P must not
+            // rewrite it to valid/off or make a later D init succeed.
+            for (auto role : {RoleType::PREFILL, RoleType::PDFUSION, RoleType::DECODE}) {
+                SCOPED_TRACE(value); SCOPED_TRACE(role);
+                auto environment = makeBackendEnvironment("role_scoped_invalid_decode_toggle");
+                auto client = std::make_shared<MockClientWrapper>();
+                const bool decode = role == RoleType::DECODE;
+                EXPECT_CALL(*client, initForPools(_, _, _, _)).Times(decode ? 0 : 1).WillRepeatedly(Return(true));
+                EXPECT_CALL(*client, shutdown()).Times(1);
+                auto parallel = singleRankConfig();
+                parallel.role_type = role;
+                parallel.prefill_cp_config.prefill_cp_size = 1;
+                auto backend = makeBackend(environment, parallel, client);
+                ASSERT_EQ(initSingleRank(*backend.backend, environment), !decode);
+                if (!decode) {
+                    kv_cache_manager::Locations locations{
+                        kv_cache_manager::Location{{"tp0_Fdefault", "legacy_read_uri"}}};
+                    EXPECT_CALL(*client, match(_, _, _, std::vector<int64_t>{101}, _, _))
+                        .WillOnce(Return(std::make_pair(true, locations)));
+                    auto matched = match(*backend.backend, makeStorageRequest(environment));
+                    ASSERT_TRUE(matched.success);
+                    ASSERT_EQ(matched.matched_blocks_num, 1u);
+                    EXPECT_CALL(*client, loadKvCachesForTag("default", kv_cache_manager::UriStrVec{"legacy_read_uri"}, _, _))
+                        .WillOnce(Return(true));
+                    EXPECT_TRUE(read(*backend.backend, makeStorageRequest(environment), std::move(matched.match_meta)));
+                }
+                EXPECT_FALSE(remoteCacheDecodePublicationEnabled());
+                EXPECT_FALSE(remoteCacheDecodePublicationConfigValid());
+            }
+        });
+    }
 }
 
 TEST(KVCMLocalTest, InitRejectsInvalidQuarantineAbortRatio) {

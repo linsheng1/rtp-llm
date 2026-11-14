@@ -5,8 +5,11 @@ bool configureDecodePublication(const CacheTopology&                            
                                 const StorageBackend::BufferResolver&                               resolver,
                                 const std::function<const DeviceBlockPoolPtr&(const std::string&)>& pool_resolver) {
     if (!remoteCacheDecodePublicationConfigValid()) {
-        RTP_LLM_LOG_ERROR("ENABLE_DECODE_PUBLISH must be 0 or 1");
-        return false;
+        if (parallelism_config_.role_type == RoleType::DECODE) {
+            RTP_LLM_LOG_ERROR("ENABLE_DECODE_PUBLISH must be 0 or 1");
+            return false;
+        }
+        RTP_LLM_LOG_WARNING("ENABLE_DECODE_PUBLISH is invalid; publication stays disabled on this non-Decode role");
     }
     decode_publication_enabled_ = remoteCacheDecodePublicationEnabled();
     // Off must preserve the upstream Prefill backend contract. In particular,

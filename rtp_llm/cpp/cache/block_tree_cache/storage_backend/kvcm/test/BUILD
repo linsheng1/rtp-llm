@@ -118,6 +118,7 @@ cc_test_wrapper(
         "//rtp_llm/cpp/cache/test:block_pool_test_helper",
         "//rtp_llm/cpp/utils:async_profile_trace",
         "//rtp_llm/cpp/utils:async_profiling_scope",
+        "//rtp_llm/cpp/utils:core_utils",
     ],
 )
 
