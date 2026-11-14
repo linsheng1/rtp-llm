@@ -948,8 +948,15 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
     }
 
     const bool native_decode = remoteCacheDecodePublicationEnabled() && role_type_ == RoleType::DECODE;
-    const auto endpoint = native_decode ? kv_cache_resource->decode_endpoint : nullptr;
-    if (native_decode && !config_.mtp_sub_configs.empty() && !endpoint) return;
+    const bool unused_decode_tree = native_decode && config_.use_opaque_kv_cache_store
+                                    && config_.disable_decode_first_malloc_device_reuse;
+    // Native publication already prepared its own source pins before release.
+    // This D policy never looks up request entries, so avoid retaining/copying
+    // them. Resident system prompts still require the original insertion count.
+    if (unused_decode_tree && !insert_info.is_resident) return;
+    const bool native_insert = native_decode && !(unused_decode_tree && insert_info.is_resident);
+    const auto endpoint = native_insert ? kv_cache_resource->decode_endpoint : nullptr;
+    if (native_insert && !config_.mtp_sub_configs.empty() && !endpoint) return;
     const auto& cp_mapper = cp_slot_mapper_;
     const bool  cp_active = cp_mapper && cp_mapper->isSharded();
     // Preserve the single-group publication contract: only batch zero becomes
@@ -963,7 +970,7 @@ void CoordinatorCacheManager::insertIntoCache(const InsertInfo& insert_info, siz
             continue;
         }
         CacheKeysType insert_keys = cp_active ? cpCanonicalCacheKeys(cp_mapper, full_keys) : full_keys;
-        const bool cap_computed_end = native_decode && !endpoint && insert_info.complete_token_ids;
+        const bool cap_computed_end = native_insert && !endpoint && insert_info.complete_token_ids;
         const size_t endpoint_key_unit = (endpoint || cap_computed_end) ?
             (cp_active ? cp_mapper->reuseBlockTokens(config_) : config_.seq_size_per_block) : 0;
         if (endpoint) {

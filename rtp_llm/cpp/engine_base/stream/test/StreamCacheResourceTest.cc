@@ -701,6 +701,34 @@ protected:
     std::shared_ptr<PublicationObservations> observations_;
 };
 
+TEST_F(PublicationCallPointTest, UnusedDecodeTreeDoesNotReplaceExplicitPublication) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
+    test::withDecodePublicationStartup([&] {
+        for (bool dspark : {false, true}) {
+            SCOPED_TRACE(dspark);
+            prepare(dspark);
+            ASSERT_FALSE(HasFatalFailure());
+            ASSERT_TRUE(cache_manager_->cacheConfig().use_opaque_kv_cache_store);
+            ASSERT_TRUE(cache_manager_->cacheConfig().disable_decode_first_malloc_device_reuse);
+            stream_->streamCacheResource().resource_context_.enable_device_cache = true;
+            finish(dspark);
+            ASSERT_FALSE(HasFatalFailure());
+            observations_->phase = "release";
+            EXPECT_EQ(stream_->moveToNext(), StreamState::FINISHED);
+            ASSERT_FALSE(HasFatalFailure());
+            EXPECT_TRUE(stream_->streamCacheResource().isResourceReleased());
+            compareCalls(dspark); // Explicit publication still sees live owners before release.
+            ASSERT_FALSE(HasFatalFailure());
+            EXPECT_TRUE(cache_manager_->blockTreeCache()->getKeySnapshot().keys.empty());
+            for (const auto& pool : cache_manager_->coordinator_manager_->groupBlockPools()) {
+                EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::CACHE), 0u);
+                EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+            }
+            cleanup();
+        }
+    }, [&] { cleanup(); TearDown(); });
+}
+
 TEST_F(PublicationCallPointTest, GenerateDoneAndReleaseKeepNativeMapsAndWeakOwners) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     test::withDecodePublicationStartup([&] {

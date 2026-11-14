@@ -53,6 +53,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps + [
+        "//rtp_llm/cpp/utils:decode_publication_test_support",
         "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
     ],
     env = {
