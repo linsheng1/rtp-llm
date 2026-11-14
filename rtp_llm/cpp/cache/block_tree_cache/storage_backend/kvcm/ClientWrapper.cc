@@ -459,17 +459,6 @@ bool ClientWrapper::finishWrite(const std::string&                 unique_id,
     return true;
 }
 
-bool ClientWrapper::abortWrite(const std::string& unique_id, const std::string& trace_id,
-                               const std::string& write_session_id) {
-    if (write_session_id.empty()) {
-        return false;
-    }
-    // Finish(0) may already have executed when its ACK is lost. Never replay it.
-    try {
-        return finishWrite(unique_id, trace_id, write_session_id, kv_cache_manager::BlockMaskOffset{0}, {});
-    } catch (...) { return false; }
-}
-
 bool ClientWrapper::checkError(kv_cache_manager::ClientErrorCode ec,
                                const std::shared_ptr<kv_cache_manager::MetaClient>& client) {
     if (ec == kv_cache_manager::ClientErrorCode::ER_OK) {

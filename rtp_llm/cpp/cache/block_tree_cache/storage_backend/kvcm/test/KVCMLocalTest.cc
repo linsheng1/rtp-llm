@@ -1246,7 +1246,6 @@ TEST(KVCMLocalTest, PrefillFailedPayloadClosesOnceAndFreezesOnlyOriginalTimeout)
             EXPECT_CALL(*client, finishWrite(_, _, "pending-session",
                 ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{0}}),
                 ::testing::IsEmpty())).WillOnce(Return(true));
-            EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
             const auto ref_count_before = environment.device_pool->refCount(environment.block_id);
             client->save_status = code;
             auto task           = backend.backend->prepareWrite(makeStorageRequest(environment));
@@ -1338,7 +1337,6 @@ TEST(KVCMLocalTest, SynchronousDecodeAdapterRejectsBeforeMetadataOrPayload) {
         EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, _)).Times(0);
         EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(0);
         EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).Times(0);
-        EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
         EXPECT_THROW(backend.backend->writeImpl(request), StorageOperationBufferSafeFailure);
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), refs);
         EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
@@ -1367,7 +1365,6 @@ TEST(KVCMLocalTest, FailedOrThrowingStartNeverDispatchesOrClosesPayload) {
                     }));
                 EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(0);
                 EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).Times(0);
-                EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
                 ASSERT_TRUE(backend.backend->write(backend.backend->prepareWrite(makeStorageRequest(environment))));
                 ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
                 backend.backend->shutdown();
@@ -1417,7 +1414,6 @@ TEST(KVCMLocalTest, RejectedPrefillCompletionPostDoesNoMetadataIoAndKeepsTimeout
                 EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
                     .WillOnce(Return(std::make_pair(true, location)));
                 EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).Times(0);
-                EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
                 client->save_status = unknown ? kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT :
                                                kv_cache_manager::ClientErrorCode::ER_OK;
                 ASSERT_TRUE(backend.backend->write(backend.backend->prepareWrite(makeStorageRequest(environment))));
@@ -1450,7 +1446,6 @@ TEST(KVCMLocalTest, LegacySessionIdsAndRetiredQuotaSettingsDoNotGateWrites) {
             auto backend = makeCompletionProofBackend(environment, client);
             ASSERT_TRUE(initSingleRank(*backend.backend, environment));
             const auto refs = environment.device_pool->refCount(environment.block_id);
-            EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
             for (const std::string id : {std::string{}, std::string(1025, 'x')}) {
                 kv_cache_manager::WriteLocation location;
                 location.write_session_id = id;
@@ -1495,7 +1490,6 @@ TEST(KVCMLocalTest, FinishIsSingleAttemptAndCannotAbortOrBlockLaterWrites) {
                         if (unused && starts == 1) backend.backend->setRemoteCacheEnabled(false);
                         return std::make_pair(true, location);
                     }));
-                EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
                 EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(unused ? 1 : 2)
                     .WillRepeatedly(Return(std::make_pair(true, kv_cache_manager::UriStrVec{"pace://actual"})));
                 EXPECT_CALL(*client, finishWrite(_, _, _, _, _))
@@ -1615,7 +1609,6 @@ TEST(KVCMLocalTest, ConfirmedLocalRejectAndExpiryCloseSessionsWithoutUnknownRete
                     }
                     return true;
                 }));
-            EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0); // Original unused close is FinishWrite(0).
             block_tree_cache_detail::ScopeRollback cleanup([&] {
                 unblock.run();
                 backend.backend->shutdown(); // Drain before promises/counters captured by callbacks are destroyed.
@@ -1714,7 +1707,6 @@ TEST(KVCMLocalTest, BroadcastWithoutAnyRankSubmissionClosesUnusedSession) {
         allocation.locations = {{{"tp0_Fdefault", "pace://rank0"}, {"tp1_Fdefault", "pace://rank1"}}};
         EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0)).WillOnce(Return(std::make_pair(true, allocation)));
         EXPECT_CALL(*client, saveKvCachesForTag(_, _, _, _)).Times(0);
-        EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
         EXPECT_CALL(*client, finishWrite(_, _, "no-rank-started",
                     ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{0}}),
                     ::testing::IsEmpty())).WillOnce(Return(true));
@@ -1745,7 +1737,6 @@ TEST(KVCMLocalTest, PrefillKeepsOriginalTagRoutingForNonPaceUris) {
     EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0)).WillOnce(Return(std::make_pair(true, allocation)));
     EXPECT_CALL(*client, saveKvCachesForTag("default", kv_cache_manager::UriStrVec{"not-pace://rejected-before-sdk"}, _, _))
         .WillOnce(Return(std::make_pair(true, kv_cache_manager::UriStrVec{"not-pace://actual"})));
-    EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
     EXPECT_CALL(*client, finishWrite(_, _, "local-preflight",
                 ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{1}}),
                 ::testing::Not(::testing::IsEmpty()))).WillOnce(Return(true));
@@ -2266,9 +2257,7 @@ TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement
             auto acknowledge = ::testing::InvokeWithoutArgs([completed] { completed->set_value(); return true; });
             if (late) {
                 EXPECT_CALL(*client, finishWrite(_, _, "deferred-write", _, _)).Times(0);
-                EXPECT_CALL(*client, abortWrite(_, _, "deferred-write")).Times(0);
             } else {
-                EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
                 EXPECT_CALL(*client, finishWrite(_, _, "deferred-write", all_written, _))
                     .WillOnce(acknowledge);
             }

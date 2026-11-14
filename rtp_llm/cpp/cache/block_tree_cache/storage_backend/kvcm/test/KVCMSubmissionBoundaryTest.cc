@@ -163,7 +163,6 @@ protected:
                     bad_close = !locations.empty() || !offset || *offset != 0;
                     return true; // ACK only an unused-session close.
                 }));
-            EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
             KVCacheConfig config;
             config.kvcm_server_address = "unused-test-address";
             config.kvcm_instance_id_salt = decode ? "projected-boundary" : "broadcast-boundary";

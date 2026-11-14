@@ -204,7 +204,6 @@ TEST(FeatureOffNativeTest, PrefillRemoteRoundTripPreservesLocalPrefixPayloadAndR
         EXPECT_CALL(*client, finishWrite(_, _, "feature-off-acknowledged",
                     ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{2}}), locations))
             .WillOnce(Return(true));
-        EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
         auto task = backend.backend->prepareWrite(makeStorageRequest(env, {102, 103}, 0, {ids[1], ids[2]}));
         ASSERT_TRUE(static_cast<bool>(task));
         ASSERT_TRUE(backend.backend->write(std::move(task)));
@@ -527,7 +526,6 @@ TEST(NativeEndpointPublicationTest, CapturedDsparkEndpointOwnsPagesThroughEosTra
                 ++finished;
                 return true;
             }));
-        EXPECT_CALL(*client, abortWrite(_, _, _)).Times(0);
         KVCacheConfig settings;
         settings.kvcm_server_address = "unused-test-address";
         settings.kvcm_model_sdk_config = R"([{"type":"pace"}])";

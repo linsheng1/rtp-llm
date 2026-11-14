@@ -125,14 +125,7 @@ snapshotRequests(const std::shared_ptr<KVCMBroadcastState>& state) {
 
 class MockClientWrapper final: public kvcm::ClientWrapper {
 public:
-    MockClientWrapper(): ClientWrapper(std::make_unique<kvcm::MockClientFactory>()) {
-        ON_CALL(*this, abortWrite(_, _, _)).WillByDefault(Invoke(
-            [this](const std::string& id, const std::string& trace, const std::string& session) {
-                return finishWrite(id, trace, session, kv_cache_manager::BlockMaskOffset{0}, {});
-            }));
-    }
-
-    MOCK_METHOD(bool, abortWrite, (const std::string&, const std::string&, const std::string&), (override));
+    MockClientWrapper(): ClientWrapper(std::make_unique<kvcm::MockClientFactory>()) {}
 
     std::optional<kv_cache_manager::ClientErrorCode> load_status;
     std::optional<kv_cache_manager::ClientErrorCode> save_status;

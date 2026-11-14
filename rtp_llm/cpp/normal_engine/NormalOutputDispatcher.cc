@@ -275,10 +275,6 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     compact_top_logprob_token_ids = copyToPinnedCpuAsync(compact_top_logprob_token_ids, need_d2h_sync);
     compact_top_logprobs          = copyToPinnedCpuAsync(compact_top_logprobs, need_d2h_sync);
     syncPinnedCpuCopies(need_d2h_sync || merge_outputs.wait_for_kv_writer);
-    // No new fence: this is evidence from the output copy's existing stream
-    // synchronization, combined with the producer's post-model rank dependency.
-    const bool context_kv_all_rank_gpu_ready =
-        need_d2h_sync && model_output.context_kv_has_rank_completion_dependency;
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
 
     int  batch_idx_in       = 0;
@@ -345,8 +341,7 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                                  logprobs_batch_idx,
                                  compact_token_logprobs,
                                  compact_top_logprob_token_ids,
-                                 compact_top_logprobs,
-                                 context_kv_all_rank_gpu_ready);
+                                 compact_top_logprobs);
         };
 
         if (thread_pool_) {
@@ -395,8 +390,7 @@ void NormalOutputDispatcher::dispatchSingleStream(
     int                                                   logprobs_batch_idx,
     const torch::Tensor&                                  token_logprobs_cpu,
     const torch::Tensor&                                  top_logprob_token_ids_cpu,
-    const torch::Tensor&                                  top_logprobs_cpu,
-    bool context_kv_all_rank_gpu_ready) const {
+    const torch::Tensor&                                  top_logprobs_cpu) const {
 
     const auto&  model_output      = merge_outputs.model_output;
     const auto&  sampler_output    = merge_outputs.sampler_output;
@@ -677,8 +671,7 @@ void NormalOutputDispatcher::dispatchSingleStream(
                                  top_logprob_token_ids,
                                  top_logprobs,
                                  -1,
-                                 logprobs_offset,
-                                 context_kv_all_rank_gpu_ready};
+                                 logprobs_offset};
     stream->update(update_info);
 }
 

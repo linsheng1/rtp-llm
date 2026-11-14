@@ -433,8 +433,7 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& schedul
         if (zero_token_batch) {
             cudaSyncAndCheck();
             result = batch_stream_processor_->dispatchPrefillOnly(
-                stream_groups, model_output.generation_prefill_cuda_graph_status,
-                model_output.context_kv_has_rank_completion_dependency);
+                stream_groups, model_output.generation_prefill_cuda_graph_status);
         } else {
             MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output), publication_frame};
             if (useDeviceInput()) {

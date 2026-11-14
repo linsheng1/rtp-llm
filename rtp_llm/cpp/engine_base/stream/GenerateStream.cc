@@ -1700,8 +1700,7 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                   update_info.top_logprob_token_ids,
                   update_info.top_logprobs,
                   old_seq_length,
-                  update_info.logprobs_offset,
-                  update_info.context_kv_all_rank_gpu_ready});
+                  update_info.logprobs_offset});
 
     // needFinish(), called by updateOutput(), can trim this packet at EOS/stop
     // words. Advance the cached phase only from tokens that were committed.

@@ -1241,42 +1241,31 @@ TEST(ClientWrapperTest, ServiceInstanceFailureReRegistersAndRoutesTheNextRequest
     EXPECT_EQ(*destruction_count, 1);
 }
 
-TEST(ClientWrapperTest, AbortRetriesOnlyTransientFailuresAndRequiresAnOkReply) {
+TEST(ClientWrapperTest, ZeroMaskFinishCallsSdkOnceAndRequiresAnOkReply) {
     using Code = kv_cache_manager::ClientErrorCode;
-    const std::vector<std::vector<Code>> scenarios{
-        {Code::ER_INVALID_GRPCSTATUS, Code::ER_OK},
-        {Code::ER_INVALID_STUB, Code::ER_OK},
-        {Code::ER_INVALID_GRPCSTATUS, Code::ER_INVALID_GRPCSTATUS, Code::ER_INVALID_GRPCSTATUS},
-        {Code::ER_SERVICE_INTERNAL_ERROR}};
-    for (const auto& codes : scenarios) {
+    for (const auto code : {Code::ER_INVALID_GRPCSTATUS, Code::ER_INVALID_STUB,
+                            Code::ER_SERVICE_INTERNAL_ERROR, Code::ER_OK}) {
         std::array<char, 64> pool{};
         kv_cache_manager::RegistSpan span{pool.data(), pool.size()};
         InitObservation observation;
         kv_cache_manager::MockMetaClient* meta = nullptr;
-        auto wrapper = initializeClient(false, "abort_endpoint", span, observation, std::make_shared<int>(0),
+        auto wrapper = initializeClient(false, "close_endpoint", span, observation, std::make_shared<int>(0),
                                         &meta, std::make_shared<std::atomic<int>>(0));
         ASSERT_NE(wrapper, nullptr);
         ASSERT_NE(meta, nullptr);
-        {
-            ::testing::InSequence ordered;
-            for (const auto code : codes) {
-                EXPECT_CALL(*meta, FinishWrite("abort_trace", "abort_session", _, _))
-                    .WillOnce(Invoke([code](const auto&, const auto&, const kv_cache_manager::BlockMask& mask,
-                                           const kv_cache_manager::Locations& locations) {
-                        const auto* offset = std::get_if<kv_cache_manager::BlockMaskOffset>(&mask);
-                        EXPECT_NE(offset, nullptr);
-                        if (offset) {
-                            EXPECT_EQ(*offset, 0u);
-                        }
-                        EXPECT_TRUE(locations.empty());
-                        return code;
-                    }));
-            }
-        }
-        EXPECT_EQ(wrapper->abortWrite("", "abort_trace", "abort_session"), codes.back() == Code::ER_OK);
-        EXPECT_FALSE(wrapper->abortWrite("", "abort_trace", ""));
+        EXPECT_CALL(*meta, FinishWrite("close_trace", "close_session", _, _))
+            .WillOnce(Invoke([code](const auto&, const auto&, const kv_cache_manager::BlockMask& mask,
+                                   const kv_cache_manager::Locations& locations) {
+                const auto* offset = std::get_if<kv_cache_manager::BlockMaskOffset>(&mask);
+                EXPECT_NE(offset, nullptr);
+                if (offset) EXPECT_EQ(*offset, 0u);
+                EXPECT_TRUE(locations.empty());
+                return code;
+            }));
+        EXPECT_EQ(wrapper->finishWrite("", "close_trace", "close_session", kv_cache_manager::BlockMaskOffset{0}, {}),
+                  code == Code::ER_OK);
         wrapper->shutdown();
-        EXPECT_FALSE(wrapper->abortWrite("", "abort_trace", "abort_session"));
+        EXPECT_FALSE(wrapper->finishWrite("", "close_trace", "close_session", kv_cache_manager::BlockMaskOffset{0}, {}));
     }
 }
 

@@ -92,8 +92,6 @@ public:
                              const std::string&                 write_session_id,
                              const kv_cache_manager::BlockMask& block_mask,
                              const kv_cache_manager::Locations& locations);
-    virtual bool abortWrite(const std::string& unique_id, const std::string& trace_id,
-                            const std::string& write_session_id);
 
     // The tag selects a registered transfer client; vector slots stay private.
     // PACE uses the first client, which owns all GPU registrations. Span-bound backends must use their own pool's tag.
