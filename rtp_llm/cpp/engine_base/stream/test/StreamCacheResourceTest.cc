@@ -732,7 +732,8 @@ TEST_F(PublicationCallPointTest, GenerateDoneAndReleaseKeepNativeMapsAndWeakOwne
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     test::withDecodePublicationStartup([&] {
         for (bool dspark : {false, true}) for (bool deferred : {false, true}) {
-            SCOPED_TRACE(dspark); SCOPED_TRACE(deferred);
+            SCOPED_TRACE(dspark);
+            SCOPED_TRACE(deferred);
             prepare(dspark);
             ASSERT_FALSE(HasFatalFailure());
             finish(dspark);
@@ -763,7 +764,8 @@ TEST_F(PublicationCallPointTest, CancellationAfterGenerateDoneSkipsReleasePublic
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     test::withDecodePublicationStartup([&] {
         for (bool dspark : {false, true}) for (bool cancelled : {false, true}) {
-            SCOPED_TRACE(dspark); SCOPED_TRACE(cancelled);
+            SCOPED_TRACE(dspark);
+            SCOPED_TRACE(cancelled);
             prepare(dspark);
             ASSERT_FALSE(HasFatalFailure());
             finish(dspark);
@@ -787,7 +789,9 @@ TEST_F(PublicationCallPointTest, PrefillRetainedPrefillAndToggleOffNeverCapture)
                 if (role == RoleType::DECODE && (retained || enabled[0] == '1')) continue;
                 for (bool dspark : {false, true}) {
                     if (role == RoleType::PREFILL && dspark) continue; // P normally uses the context update.
-                    SCOPED_TRACE(enabled); SCOPED_TRACE(dspark); SCOPED_TRACE(retained);
+                    SCOPED_TRACE(enabled);
+                    SCOPED_TRACE(dspark);
+                    SCOPED_TRACE(retained);
                     prepare(dspark, role, retained);
                     ASSERT_FALSE(HasFatalFailure());
                     finish(dspark, false); // Drive the actual old update/specUpdate publication sites too.

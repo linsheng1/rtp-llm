@@ -410,7 +410,8 @@ TEST(KVCMLocalTest, InvalidDecodeSwitchPreservesPrefillTrafficButStillRejectsDec
             // P then D share the same cached invalid setting; P must not
             // rewrite it to valid/off or make a later D init succeed.
             for (auto role : {RoleType::PREFILL, RoleType::PDFUSION, RoleType::DECODE}) {
-                SCOPED_TRACE(value); SCOPED_TRACE(role);
+                SCOPED_TRACE(value);
+                SCOPED_TRACE(role);
                 auto environment = makeBackendEnvironment("role_scoped_invalid_decode_toggle");
                 auto client = std::make_shared<MockClientWrapper>();
                 const bool decode = role == RoleType::DECODE;

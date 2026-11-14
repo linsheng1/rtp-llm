@@ -166,7 +166,8 @@ TEST_F(GenerateStreamStateTest, UnknownWriterReportsErrorAndSurvivesBothReleaseP
     autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     test::withDecodePublicationStartup([&] {
         for (bool cancelled : {false, true}) for (bool pending_worker : {false, true}) {
-            SCOPED_TRACE(cancelled); SCOPED_TRACE(pending_worker);
+            SCOPED_TRACE(cancelled);
+            SCOPED_TRACE(pending_worker);
             auto stream = createStream({1, 2, 3, 4}, false, RoleType::DECODE);
             stream->generate_status_->status = StreamState::RUNNING;
             auto& resource = stream->streamCacheResource();
@@ -232,7 +233,8 @@ TEST_F(GenerateStreamStateTest, UnclaimedPrefillAndDecodeStillReleaseWithPublica
         autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", value);
         test::withDecodePublicationStartup([&] {
             for (auto role : {RoleType::PREFILL, RoleType::DECODE}) {
-                SCOPED_TRACE(value); SCOPED_TRACE(role);
+                SCOPED_TRACE(value);
+                SCOPED_TRACE(role);
                 auto stream = createStream({1, 2, 3, 4}, false, role);
                 stream->generate_status_->status = StreamState::RUNNING;
                 auto& resource = stream->streamCacheResource();
