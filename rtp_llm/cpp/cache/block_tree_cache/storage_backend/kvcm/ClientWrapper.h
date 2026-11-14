@@ -17,7 +17,6 @@
 #include "kvcm_client/transfer_client.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientFactory.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/KVCMConfig.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkTransferObserver.h"
 
 namespace rtp_llm {
 namespace kvcm {
@@ -45,7 +44,7 @@ public:
     // Internal optional telemetry: completed logical payload per SDK chunk,
     // or completion-unknown for an attempted failed/throwing SDK call. The
     // observer must be thread-safe and must not reenter this wrapper.
-    using TransferObserver = SdkTransferObserver;
+    using TransferObserver = std::function<void(bool is_read, size_t completed_bytes, bool completion_unknown)>;
     void setTransferObserver(TransferObserver observer);
     // Internal outcome proof, not an SDK ABI extension. NOT_STARTED is set
     // only by local pre-I/O checks. A normal SDK error is not DMA completion.
@@ -152,7 +151,6 @@ private:
     std::shared_mutex transfer_mutex_;
     TransferObserver  transfer_observer_;
     const bool bound_sdk_calls_;
-    std::vector<bool> packing_clients_;
     // Borrowed URI/IOV/trace descriptors must survive an SDK error or throw
     // whose payload completion is unknown, together with the registered client.
     struct PendingTransfer {

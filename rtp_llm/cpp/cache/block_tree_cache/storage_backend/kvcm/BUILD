@@ -83,8 +83,6 @@ cc_library(
     ],
     hdrs = [
         "ClientFactory.h",
-        "PackedSsdTransferClient.h",
-        "SdkTransferObserver.h",
         "ClientWrapper.h",
         "PayloadDispatchProof.h",
         "PublicationSettlement.h",

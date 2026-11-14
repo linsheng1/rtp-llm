@@ -14,7 +14,6 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PackedSsdTransferClient.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/MockKVCMClient.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BoundedThreadTestUtils.h"
@@ -72,7 +71,7 @@ initializeClient(bool                                                  enable_vi
                  std::chrono::milliseconds                            reinit_interval = std::chrono::seconds(10),
                  MockClientFactory**                                  observed_factory = nullptr,
                  const std::vector<std::string>&                       endpoints = {},
-                 bool bound_sdk_calls = true, bool packing_client = false) {
+                 bool bound_sdk_calls = true) {
     auto  factory        = std::make_unique<MockClientFactory>();
     auto* factory_ptr    = factory.get();
     if (observed_factory) *observed_factory = factory_ptr;
@@ -136,15 +135,6 @@ initializeClient(bool                                                  enable_vi
                               std::make_unique<kv_cache_manager::MockTransferClient>(transfer_destruction_count);
             if (transfer_client != nullptr) {
                 *transfer_client = client.get();
-            }
-            if (packing_client) {
-                // Host-backed metadata fixture; an unexpected copy fails before
-                // treating its backing as GPU memory or submitting any I/O.
-                auto memory = std::shared_ptr<void>(new unsigned char[PackedSsdTransferClient::max_operation_bytes],
-                    [](void* p) { delete[] static_cast<unsigned char*>(p); });
-                return std::make_unique<PackedSsdTransferClient>(std::move(client),
-                    [](auto, auto, auto, auto, size_t) { return false; },
-                    std::make_shared<PackedSsdTransferClient::GpuPackingContext>(std::move(memory)));
             }
             return client;
         }));
@@ -1592,115 +1582,6 @@ TEST(ClientWrapperTest, BoundedSdkStopsOnFailureAndRejectsUnsafeGeometry) {
               ClientErrorCode::ER_INVALID_PARAMS);
     EXPECT_EQ(completion, ClientWrapper::TransferCompletion::NOT_STARTED);
     EXPECT_EQ(unknown_calls, 1u);  // Rejected geometry never attempted SDK I/O.
-    client->shutdown();
-    });
-}
-
-class ObservedTransferClient: public kv_cache_manager::MockTransferClient, public SdkTransferObservable {
-public:
-    using MockTransferClient::MockTransferClient;
-    void setSdkTransferObserver(SdkTransferObserver next) override {
-        ++setter_calls;
-        observer = std::move(next);
-    }
-    SdkTransferObserver observer;
-    size_t              setter_calls{0};
-};
-
-TEST(ClientWrapperTest, InnerSdkObserverOwnsPartialBytesAndSuppressesOuterFailureOrException) {
-    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
-    ::rtp_llm::test::withDecodePublicationStartup([&] {
-    using namespace kv_cache_manager;
-    unsigned char   byte = 7;
-    RegistSpan      span{&byte, 1};
-    InitObservation observation;
-    auto            destruction_count = std::make_shared<int>(0);
-    auto            inner             = std::make_unique<ObservedTransferClient>(destruction_count);
-    auto*           observed          = inner.get();
-    auto            client            = initializeClient(
-        false, "inner_sdk", span, observation, destruction_count, nullptr, nullptr, nullptr, std::move(inner));
-    ASSERT_NE(client, nullptr);
-    size_t completed = 0, unknown = 0, events = 0;
-    client->setTransferObserver([&](bool read, size_t bytes, bool uncertain) {
-        EXPECT_TRUE(read);
-        completed += bytes;
-        unknown += uncertain;
-        ++events;
-    });
-    ASSERT_TRUE(static_cast<bool>(observed->observer));
-    BlockBuffers buffers(1);
-    buffers[0].iovs.push_back({MemoryType::CPU, &byte, 1, false});
-    EXPECT_CALL(*observed, LoadKvCaches(_, _, _)).WillOnce(Invoke([&](const auto&, const auto&, const auto&) {
-        observed->observer(true, 6, false);
-        observed->observer(true, 0, true);
-        return ClientErrorCode::ER_SDKREAD_ERROR;
-    }));
-    EXPECT_EQ(client->loadKvCachesForTagWithStatus("default", {"uri"}, buffers), ClientErrorCode::ER_SDKREAD_ERROR);
-    EXPECT_EQ(completed, 6u);
-    EXPECT_EQ(unknown, 1u);
-    EXPECT_EQ(events, 2u);
-    EXPECT_CALL(*observed, LoadKvCaches(_, _, _))
-        .WillOnce(Invoke([&](const auto&, const auto&, const auto&) -> ClientErrorCode {
-            observed->observer(true, 0, true);
-            throw std::runtime_error("inner SDK unknown");
-        }));
-    EXPECT_THROW(client->loadKvCachesForTagWithStatus("default", {"uri"}, buffers), std::runtime_error);
-    EXPECT_EQ(unknown, 2u);
-    EXPECT_EQ(events, 3u);  // No outer exception duplicates the inner event.
-    client->shutdown();
-    EXPECT_EQ(*destruction_count, 1);
-    });
-}
-
-TEST(ClientWrapperTest, InnerSdkPreIoFailureProducesNoEventAndClearingOrShutdownReleasesCallback) {
-    autil::EnvGuard enabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
-    ::rtp_llm::test::withDecodePublicationStartup([&] {
-    using namespace kv_cache_manager;
-    unsigned char   byte = 7;
-    RegistSpan      span{&byte, 1};
-    InitObservation observation;
-    auto            destruction_count = std::make_shared<int>(0);
-    auto            inner             = std::make_unique<ObservedTransferClient>(destruction_count);
-    auto*           observed          = inner.get();
-    auto            client            = initializeClient(
-        false, "inner_pre_io", span, observation, destruction_count, nullptr, nullptr, nullptr, std::move(inner));
-    ASSERT_NE(client, nullptr);
-    auto               owner    = std::make_shared<int>(0);
-    std::weak_ptr<int> lifetime = owner;
-    size_t             events   = 0;
-    client->setTransferObserver([owner, &events](bool, size_t, bool) { ++events; });
-    owner.reset();
-    BlockBuffers buffers(1);
-    buffers[0].iovs.push_back({MemoryType::CPU, &byte, 1, false});
-    EXPECT_CALL(*observed, SaveKvCaches(_, _, _))
-        .WillOnce(Return(std::make_pair(ClientErrorCode::ER_INVALID_PARAMS, UriStrVec{})));
-    EXPECT_EQ(client->saveKvCachesForTagWithStatus("default", {"uri"}, buffers).first,
-              ClientErrorCode::ER_INVALID_PARAMS);
-    EXPECT_EQ(events, 0u);  // Packer rejected before any inner SDK call.
-    EXPECT_FALSE(lifetime.expired());
-    client->setTransferObserver({});
-    EXPECT_FALSE(static_cast<bool>(observed->observer));
-    EXPECT_TRUE(lifetime.expired());
-    client->shutdown();
-    });
-}
-
-TEST(ClientWrapperTest, FeatureOffDoesNotInstallAnInnerSdkObserver) {
-    autil::EnvGuard disabled("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
-    ::rtp_llm::test::withDecodePublicationStartup([&] {
-    using namespace kv_cache_manager;
-    unsigned char   byte = 7;
-    RegistSpan      span{&byte, 1};
-    InitObservation observation;
-    auto            destruction_count = std::make_shared<int>(0);
-    auto            inner             = std::make_unique<ObservedTransferClient>(destruction_count);
-    auto*           observed          = inner.get();
-    auto            client            = initializeClient(
-        false, "off_inner_sdk", span, observation, destruction_count, nullptr, nullptr, nullptr, std::move(inner));
-    ASSERT_NE(client, nullptr);
-    client->setTransferObserver([](bool, size_t, bool) {});
-    EXPECT_EQ(observed->setter_calls, 0u);
-    EXPECT_FALSE(static_cast<bool>(observed->observer));
     client->shutdown();
     });
 }

@@ -1,5 +1,4 @@
 #include "ClientWrapper.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PackedSsdTransferClient.h"
 #include <limits>
 #include <type_traits>
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
@@ -22,8 +21,8 @@ namespace kvcm {
 
 namespace {
 
-// Projected Decode and packing retain their local bounds. Legacy non-packing
-// Prefill keeps the original whole-call shape, with checked numeric accounting.
+// Projected Decode retains local bounds and owned descriptors. Prefill
+// forwards the original whole call directly to the SDK.
 struct SdkRange {
     size_t begin, end, bytes, iovs;
 };
@@ -210,9 +209,7 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
             first->gpu = std::move(memory_registrations.gpu);
         }
         std::vector<std::unique_ptr<kv_cache_manager::TransferClient>> clients;
-        std::vector<bool> packing;
         clients.reserve(pool_registrations_.size());
-        packing.reserve(pool_registrations_.size());
         // Storage configuration is invariant across these synchronous Init calls.
         auto params = init_params_;
         for (size_t index = 0; index < pool_registrations_.size(); ++index) {
@@ -229,16 +226,9 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
                 RTP_LLM_LOG_ERROR("init KVCM transfer client failed for pool %zu", index);
                 return false;
             }
-            if (transfer_observer_) {
-                if (auto* observable = dynamic_cast<SdkTransferObservable*>(client.get())) {
-                    observable->setSdkTransferObserver(transfer_observer_);
-                }
-            }
-            packing.push_back(dynamic_cast<PackedSsdTransferClient*>(client.get()) != nullptr);
             clients.push_back(std::move(client));
         }
         transfer_clients_ = std::move(clients);
-        packing_clients_ = std::move(packing);
         tag_to_index_     = std::move(pending_tags);
         try {
             if (!meta_client_map_.empty()) {
@@ -247,7 +237,6 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
         } catch (const std::exception& error) {
             RTP_LLM_LOG_ERROR("start KVCM re-registration worker failed: %s", error.what());
             transfer_clients_.clear();
-            packing_clients_.clear();
             tag_to_index_.clear();
             return false;
         }
@@ -255,7 +244,6 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
     };
     const auto clear_failed_init = [&] {
         transfer_clients_.clear();
-        packing_clients_.clear();
         {
             std::lock_guard<std::mutex> lock(pending_transfer_mutex_);
             pending_transfers_.reset();
@@ -293,7 +281,6 @@ void ClientWrapper::shutdown() noexcept {
     {
         std::unique_lock<std::shared_mutex> transfer_guard(transfer_mutex_);
         transfer_clients_.clear();
-        packing_clients_.clear();
         tag_to_index_.clear();
         transfer_observer_ = {};
     }
@@ -644,15 +631,7 @@ void ClientWrapper::releaseTransfer(const std::shared_ptr<PendingTransfer>& tran
 
 void ClientWrapper::setTransferObserver(TransferObserver observer) {
     std::unique_lock lock(transfer_mutex_);
-    const bool       had_observer = static_cast<bool>(transfer_observer_);
     transfer_observer_            = remoteCacheDecodePublicationEnabled() ? std::move(observer) : TransferObserver{};
-    if (transfer_observer_ || had_observer) {
-        for (const auto& client : transfer_clients_) {
-            if (auto* observable = dynamic_cast<SdkTransferObservable*>(client.get())) {
-                observable->setSdkTransferObserver(transfer_observer_);
-            }
-        }
-    }
 }
 
 void ClientWrapper::observeTransfer(bool is_read, size_t completed_bytes, bool completion_unknown) const noexcept {
@@ -715,12 +694,10 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
         return ec;
     }
     const auto io_started = std::chrono::steady_clock::now();
-    const bool inner_observation =
-        dynamic_cast<SdkTransferObservable*>(transfer_clients_[slot->second].get()) != nullptr;
     auto                  ec = kv_cache_manager::ClientErrorCode::ER_OK;
     std::vector<SdkRange> ranges;
     if ((trace_info && !trace_info->block_ids.empty() && trace_info->block_ids.size() != uri_str_vec.size())
-        || !sdkRanges(uri_str_vec, block_buffers, bound_sdk_calls_ || packing_clients_.at(slot->second), ranges)) {
+        || !sdkRanges(uri_str_vec, block_buffers, bound_sdk_calls_, ranges)) {
         RTP_LLM_LOG_ERROR("KVCM SDK rejects malformed, overflowing or profile-oversized block geometry");
         return kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS;
     }
@@ -753,18 +730,15 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
                 *completion = TransferCompletion::UNKNOWN;
             ec = transfer_clients_[slot->second]->LoadKvCaches(uris, buffers, part_trace);
         } catch (...) {
-            if (!inner_observation)
-                observeTransfer(/*is_read=*/true, 0, /*completion_unknown=*/true);
+            observeTransfer(/*is_read=*/true, 0, /*completion_unknown=*/true);
             throw;
         }
         local_completion = sdkResultCompletion(ec);
         if (completion)
             *completion = local_completion;
-        if (!inner_observation) {
-            observeTransfer(/*is_read=*/true,
-                            ec == kv_cache_manager::ClientErrorCode::ER_OK ? range.bytes : 0,
-                            ec != kv_cache_manager::ClientErrorCode::ER_OK);
-        }
+        observeTransfer(/*is_read=*/true,
+                        ec == kv_cache_manager::ClientErrorCode::ER_OK ? range.bytes : 0,
+                        ec != kv_cache_manager::ClientErrorCode::ER_OK);
         const auto us =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
         RTP_LLM_LOG_DEBUG("KV_SDK_CHUNK op=read pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
@@ -845,13 +819,11 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
         return result;
     }
     const auto io_started = std::chrono::steady_clock::now();
-    const bool inner_observation =
-        dynamic_cast<SdkTransferObservable*>(transfer_clients_[slot->second].get()) != nullptr;
     auto                        ec = kv_cache_manager::ClientErrorCode::ER_OK;
     kv_cache_manager::UriStrVec result;
     std::vector<SdkRange>       ranges;
     if ((trace_info && !trace_info->block_ids.empty() && trace_info->block_ids.size() != uri_str_vec.size())
-        || !sdkRanges(uri_str_vec, block_buffers, bound_sdk_calls_ || packing_clients_.at(slot->second), ranges)) {
+        || !sdkRanges(uri_str_vec, block_buffers, bound_sdk_calls_, ranges)) {
         RTP_LLM_LOG_ERROR("KVCM SDK rejects malformed, overflowing or profile-oversized block geometry");
         return {kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS, {}};
     }
@@ -885,8 +857,7 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
                     *completion = TransferCompletion::UNKNOWN;
                 return transfer_clients_[slot->second]->SaveKvCaches(uris, buffers, part_trace);
             } catch (...) {
-                if (!inner_observation)
-                    observeTransfer(/*is_read=*/false, 0, /*completion_unknown=*/true);
+                observeTransfer(/*is_read=*/false, 0, /*completion_unknown=*/true);
                 throw;
             }
         }();
@@ -894,11 +865,9 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
         local_completion = sdkResultCompletion(ec);
         if (completion)
             *completion = local_completion;
-        if (!inner_observation) {
-            observeTransfer(/*is_read=*/false,
-                            ec == kv_cache_manager::ClientErrorCode::ER_OK ? range.bytes : 0,
-                            ec != kv_cache_manager::ClientErrorCode::ER_OK);
-        }
+        observeTransfer(/*is_read=*/false,
+                        ec == kv_cache_manager::ClientErrorCode::ER_OK ? range.bytes : 0,
+                        ec != kv_cache_manager::ClientErrorCode::ER_OK);
         const auto us =
             std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
         RTP_LLM_LOG_DEBUG("KV_SDK_CHUNK op=write pid=%d tag=%s blocks=%zu iovs=%zu bytes=%zu duration_us=%ld ec=%d",
