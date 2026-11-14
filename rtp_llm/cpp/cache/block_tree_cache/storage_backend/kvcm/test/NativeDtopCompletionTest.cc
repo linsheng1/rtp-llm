@@ -907,6 +907,55 @@ TEST_F(NativeSsdGpuReadWindowTest, PipelineRequiresAFenceEvenBeforeAnyOperationS
     EXPECT_EQ(context->active_reservations, 0u);
 }
 
+TEST_F(NativeSsdGpuReadWindowTest, LeaseReturnsPreserveExactCoverageInEveryFourLeaseReleaseOrder) {
+    const std::vector<size_t> sizes{17, 23, 31, 37};
+    std::vector<size_t> offsets;
+    size_t prefix = 0;
+    for (const auto bytes : sizes) { offsets.push_back(prefix); prefix += bytes; }
+    const auto capacity = context->free_ranges.capacity();
+    std::vector<size_t> order{0, 1, 2, 3};
+    do {
+        std::vector<std::shared_ptr<Client>> held;
+        for (size_t index = 0; index < sizes.size(); ++index) {
+            auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+            EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).WillOnce(Invoke([&, index](const Uris&, const Buffers& b, auto) {
+                EXPECT_EQ(b.size(), 1u);
+                if (b.size() == 1 && b[0].iovs.size() == 1) {
+                    EXPECT_EQ(b[0].iovs[0].base, static_cast<unsigned char*>(arena.get()) + offsets[index]);
+                    EXPECT_EQ(b[0].iovs[0].size, sizes[index]);
+                } else ADD_FAILURE() << "expected one packed IOV";
+                return Code::ER_SDK_TIMEOUT; // No mock DMA; keep each real lease until its client dies.
+            }));
+            auto client = std::make_shared<Client>(std::move(delegate), copy, context);
+            ASSERT_EQ(client->LoadKvCaches({"held"}, destinations({sizes[index]})), Code::ER_SDK_TIMEOUT);
+            held.push_back(std::move(client));
+        }
+        ASSERT_EQ(context->active_reservations, 4u);
+        std::vector<bool> free_bytes(prefix + 1, false);
+        free_bytes.back() = true; // Represents the entire untouched tail of the arena.
+        size_t remaining = sizes.size();
+        for (const auto released : order) {
+            held[released].reset();
+            --remaining;
+            std::fill(free_bytes.begin() + offsets[released], free_bytes.begin() + offsets[released] + sizes[released], true);
+            // Byte-occupancy oracle is independent of ordered insertion/merging.
+            std::vector<std::pair<size_t, size_t>> expected;
+            for (size_t position = 0; position < free_bytes.size();) {
+                if (!free_bytes[position]) { ++position; continue; }
+                const auto begin = position;
+                while (position < free_bytes.size() && free_bytes[position]) ++position;
+                const auto end = position == free_bytes.size() ? Client::max_operation_bytes : position;
+                expected.emplace_back(begin, end - begin);
+            }
+            std::lock_guard<std::mutex> lock(context->mutex);
+            EXPECT_EQ(context->free_ranges, expected);
+            EXPECT_EQ(context->active_reservations, remaining);
+            EXPECT_EQ(context->free_ranges.capacity(), capacity);
+        }
+    } while (std::next_permutation(order.begin(), order.end()));
+    EXPECT_EQ(context->free_ranges, (std::vector<std::pair<size_t, size_t>>{{0, Client::max_operation_bytes}}));
+}
+
 TEST_F(NativeSsdGpuReadWindowTest, ExplicitSafeSdkFailureReleasesArenaAndPermitsRetry) {
     checkSafeSdkRetry<Code>();
 }

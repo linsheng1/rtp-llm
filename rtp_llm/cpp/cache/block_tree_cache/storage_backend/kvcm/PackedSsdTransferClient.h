@@ -403,17 +403,26 @@ private:
                 return;
             std::lock_guard<std::mutex> guard(context->mutex);
             auto&                       ranges = context->free_ranges;
-            ranges.emplace_back(begin, bytes);  // capacity reserved before any I/O
-            std::sort(ranges.begin(), ranges.end());
-            size_t kept = 0;
-            for (size_t index = 0; index < ranges.size(); ++index) {
-                const auto range = ranges[index];
-                if (kept && ranges[kept - 1].first + ranges[kept - 1].second == range.first)
-                    ranges[kept - 1].second += range.second;
-                else
-                    ranges[kept++] = range;
+            // Allocation only consumes an interval's front, so free ranges
+            // stay sorted and merged. A returned lease can join only its two
+            // neighbours. At most active+2 <= 1026 entries exist temporarily;
+            // the capacity was reserved before any I/O, so insert cannot grow.
+            auto at = std::lower_bound(ranges.begin(), ranges.end(), begin,
+                                       [](const auto& range, size_t address) { return range.first < address; });
+            at = ranges.insert(at, {begin, bytes});
+            if (at != ranges.begin()) {
+                const auto previous = at - 1;
+                if (previous->first + previous->second == at->first) {
+                    previous->second += at->second;
+                    ranges.erase(at);
+                    at = previous;
+                }
             }
-            ranges.resize(kept);
+            const auto next = at + 1;
+            if (next != ranges.end() && at->first + at->second == next->first) {
+                at->second += next->second;
+                ranges.erase(next);
+            }
             --context->active_reservations;
         }
     };
