@@ -482,7 +482,6 @@ protected:
         model.kv_cache_spec_descs = {{full, state, swa}};
         auto draft = model;
         draft.num_layers = 3;
-        draft.is_mtp = true;
         draft.hybrid_attention_config.hybrid_attention_types.assign(3, HybridAttentionType::NONE);
         draft.kv_cache_spec_descs.assign(3, {swa});
         SpeculativeExecutionConfig speculation;
