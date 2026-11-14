@@ -90,9 +90,10 @@ public:
         gpu_context_(std::move(gpu_context)),
         staging_type_(kv_cache_manager::MemoryType::GPU),
         read_window_objects_(read_window_objects), fence_(std::move(fence)) {
-        if (!inner_ || !copy_ || (!gpu_context_ || !gpu_context_->memory)
-            || !read_window_objects_ || read_window_objects_ > max_read_window_objects)
+        if (!inner_ || !copy_ || (!gpu_context_ || !gpu_context_->memory))
             throw std::invalid_argument("missing SSD delegate/copy operation");
+        if (!read_window_objects_ || read_window_objects_ > max_read_window_objects)
+            throw std::invalid_argument("invalid SSD read window size");
     }
     ~PackedSsdTransferClient() override {
         // The SDK delegate drains before staging memory (including failures)

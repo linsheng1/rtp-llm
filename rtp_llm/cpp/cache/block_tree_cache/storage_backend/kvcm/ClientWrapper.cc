@@ -710,7 +710,7 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
     std::vector<SdkRange> ranges;
     if ((trace_info && !trace_info->block_ids.empty() && trace_info->block_ids.size() != uri_str_vec.size())
         || !sdkRanges(uri_str_vec, block_buffers, bound_sdk_calls_ || packing_clients_.at(slot->second), ranges)) {
-        RTP_LLM_LOG_ERROR("KVCM bounded SDK rejects malformed or oversized block geometry");
+        RTP_LLM_LOG_ERROR("KVCM SDK rejects malformed, overflowing or profile-oversized block geometry");
         return kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS;
     }
     for (const auto& range : ranges) {
@@ -839,7 +839,7 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
     std::vector<SdkRange>       ranges;
     if ((trace_info && !trace_info->block_ids.empty() && trace_info->block_ids.size() != uri_str_vec.size())
         || !sdkRanges(uri_str_vec, block_buffers, bound_sdk_calls_ || packing_clients_.at(slot->second), ranges)) {
-        RTP_LLM_LOG_ERROR("KVCM bounded SDK rejects malformed or oversized block geometry");
+        RTP_LLM_LOG_ERROR("KVCM SDK rejects malformed, overflowing or profile-oversized block geometry");
         return {kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS, {}};
     }
     for (const auto& range : ranges) {

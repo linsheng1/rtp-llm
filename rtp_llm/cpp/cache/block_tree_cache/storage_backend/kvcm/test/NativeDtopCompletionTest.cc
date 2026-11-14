@@ -859,6 +859,96 @@ TEST_F(NativeSsdGpuReadWindowTest, SaveWaitsForAConcurrentReadToLeaveTheWrapper)
     EXPECT_FALSE(entered_early);
     EXPECT_EQ(context->active_reservations, 0u);
 }
+TEST_F(NativeSsdGpuReadWindowTest, ArenaPressureRejectsOtherReadersSafelyWhileAnOperationOwnsItsLease) {
+    struct State {
+        std::promise<void> entered, release;
+        std::shared_future<void> released = release.get_future().share();
+        std::atomic<bool> signalled{false};
+        std::shared_ptr<void> payload;
+        void signal() { if (!signalled.exchange(true)) release.set_value(); }
+    };
+    auto state = std::make_shared<State>();
+    constexpr size_t bytes = 40ULL * 1024 * 1024;
+    void* memory = nullptr;
+    ASSERT_EQ(cudaMalloc(&memory, bytes), cudaSuccess);
+    state->payload = std::shared_ptr<void>(memory, [](void* p) { cudaFree(p); });
+    struct Guard { std::shared_ptr<State> state; ~Guard() { state->signal(); } } guard{state};
+    auto entered = state->entered.get_future();
+    auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).WillOnce(Invoke([state](auto, auto, auto) {
+        state->entered.set_value(); state->released.wait(); return Code::ER_OK;
+    }));
+    auto client = std::make_shared<Client>(std::move(delegate),
+        [](auto, auto, auto, auto, size_t) { return true; }, context, 4);
+    Buffers buffers(1);
+    buffers[0].iovs = {{M::GPU, memory, bytes, false}};
+    block_tree_cache_test::BoundedThread<Code> held([client, state, buffers] {
+        return client->LoadKvCaches({"held"}, buffers);
+    });
+    const auto entered_status = entered.wait_for(std::chrono::seconds(5));
+    std::vector<std::unique_ptr<block_tree_cache_test::BoundedThread<Code>>> pressure;
+    for (int i = 0; i < 3; ++i)
+        pressure.push_back(std::make_unique<block_tree_cache_test::BoundedThread<Code>>([client, state, buffers] {
+            return client->LoadKvCaches({"pressure"}, buffers);
+        }));
+    std::vector<std::future_status> before_release;
+    for (auto& task : pressure) before_release.push_back(task->waitFor(std::chrono::seconds(5)));
+    state->signal(); // Drain even if a regression incorrectly sent a pressure request to the SDK.
+    ASSERT_EQ(held.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(held.get(), Code::ER_OK);
+    EXPECT_EQ(entered_status, std::future_status::ready);
+    for (size_t i = 0; i < pressure.size(); ++i) {
+        ASSERT_EQ(pressure[i]->waitFor(std::chrono::seconds(5)), std::future_status::ready);
+        EXPECT_EQ(before_release[i], std::future_status::ready);
+        EXPECT_EQ(pressure[i]->get(), expectedPreflightError(Code::ER_INVALID_LOCAL_BUFFERS));
+    }
+    EXPECT_EQ(context->active_reservations, 0u);
+}
+TEST_F(NativeSsdGpuReadWindowTest, AnotherUnknownBetweenWindowsStopsOnlyFutureIoAndRetainsItsOwnLease) {
+    struct State {
+        std::promise<void> entered_b, release_b, done_b;
+        std::shared_future<void> released = release_b.get_future().share(), done = done_b.get_future().share();
+        std::atomic<bool> signalled{false};
+        std::shared_ptr<void> payload;
+        void signal() { if (!signalled.exchange(true)) release_b.set_value(); }
+    };
+    auto state = std::make_shared<State>(); state->payload = output;
+    struct Guard { std::shared_ptr<State> state; ~Guard() { state->signal(); } } guard{state};
+    auto entered = state->entered_b.get_future();
+    auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(2)
+        .WillRepeatedly(Invoke([state](const Uris& u, const Buffers&, auto) {
+            if (u[0] == "b") {
+                state->entered_b.set_value(); state->released.wait(); return Code::ER_SDK_TIMEOUT;
+            }
+            EXPECT_EQ(u, (Uris{"a0"})); // a1 must never reach the SDK.
+            return Code::ER_OK;
+        }));
+    auto client = std::make_shared<Client>(std::move(delegate),
+        [](auto, auto, auto, auto, size_t) { return true; }, context, 1, [state] {
+            state->signal(); return state->done.wait_for(std::chrono::seconds(5)) == std::future_status::ready;
+        });
+    auto b_buffers = destinations({33}), a_buffers = destinations({17, 17});
+    block_tree_cache_test::BoundedThread<Code> b([client, state, b_buffers] {
+        const auto result = client->LoadKvCaches({"b"}, b_buffers);
+        state->done_b.set_value(); return result;
+    });
+    const auto entered_status = entered.wait_for(std::chrono::seconds(5));
+    block_tree_cache_test::BoundedThread<Code> a([client, state, a_buffers] {
+        return client->LoadKvCaches({"a0", "a1"}, a_buffers);
+    });
+    const auto completed_a = a.waitFor(std::chrono::seconds(5));
+    state->signal();
+    ASSERT_EQ(a.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    ASSERT_EQ(b.waitFor(std::chrono::seconds(5)), std::future_status::ready);
+    EXPECT_EQ(entered_status, std::future_status::ready);
+    EXPECT_EQ(completed_a, std::future_status::ready);
+    EXPECT_EQ(a.get(), expectedPreflightError(Code::ER_INVALID_LOCAL_BUFFERS));
+    EXPECT_EQ(b.get(), Code::ER_SDK_TIMEOUT);
+    EXPECT_EQ(context->active_reservations, 1u); // Only b's unresolved operation remains, not a's quiescent window.
+    client.reset(); // No fake SDK DMA exists; all test workers have joined.
+    EXPECT_EQ(context->active_reservations, 0u);
+}
 TEST_F(NativeSsdGpuReadWindowTest, SaveObserverKeepsConfirmedPrefixBeforeSdkFailure) {
     using namespace kv_cache_manager;
     auto delegate = std::make_unique<MockTransferClient>(destroyed);
