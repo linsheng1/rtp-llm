@@ -579,6 +579,7 @@ TEST(ClientWrapperTest, TagRoutingUsesRegistrationOrderAndFailedInitPublishesNoR
                 EXPECT_EQ(params.self_location_spec_name, retained.empty() ? "tp0_Fzeta" : "tp0_Falpha");
                 EXPECT_EQ(params.role_type,
                           retained.empty() ? kv_cache_manager::RoleType::HYBRID : kv_cache_manager::RoleType::WORKER);
+                EXPECT_EQ(params.storage_configs, storage_config);
                 retained.push_back(params.regist_span);
                 if (fail_second && retained.size() == 2) {
                     return nullptr;

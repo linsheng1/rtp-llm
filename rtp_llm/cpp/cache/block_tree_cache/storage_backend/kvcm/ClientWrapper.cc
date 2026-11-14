@@ -213,8 +213,9 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
         std::vector<bool> packing;
         clients.reserve(pool_registrations_.size());
         packing.reserve(pool_registrations_.size());
+        // Storage configuration is invariant across these synchronous Init calls.
+        auto params = init_params_;
         for (size_t index = 0; index < pool_registrations_.size(); ++index) {
-            auto params = init_params_;
             if (index != 0) {
                 params.role_type               = kv_cache_manager::RoleType::WORKER;
                 params.regist_span             = &pool_registrations_[index].span;
