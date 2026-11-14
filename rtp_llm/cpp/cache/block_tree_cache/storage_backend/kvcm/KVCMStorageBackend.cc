@@ -371,7 +371,9 @@ public:
         const auto role =
             parallelism_config_.tp_rank == 0 ? kv_cache_manager::RoleType::HYBRID : kv_cache_manager::RoleType::WORKER;
         if (!client_wrapper_) {
-            client_wrapper_ = std::make_shared<kvcm::ClientWrapper>();
+            client_wrapper_ = std::make_shared<kvcm::ClientWrapper>(
+                std::make_unique<kvcm::ClientFactory>(), std::chrono::seconds(10),
+                parallelism_config_.role_type == RoleType::DECODE);
         }
         const bool initialized =
             client_wrapper_->initForPools(client_config_map, role, registrations, registration_tags_);

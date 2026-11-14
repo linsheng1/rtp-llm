@@ -1,4 +1,6 @@
 #include "ClientWrapper.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PackedSsdTransferClient.h"
+#include <limits>
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "kvcm_client/HostCacheStateCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/Subscriber.h"
@@ -19,15 +21,17 @@ namespace kvcm {
 
 namespace {
 
-// PACE has a finite Consumer task ring. A block may carry many layer IOVs;
-// bounding only bytes or block count does not bound the number of tasks.
+// Projected Decode and packing retain their local bounds. Legacy non-packing
+// Prefill keeps the original whole-call shape, with checked numeric accounting.
 struct SdkRange {
     size_t begin, end, bytes, iovs;
 };
-bool boundedSdkRanges(const kv_cache_manager::UriStrVec&    uris,
+bool sdkRanges(const kv_cache_manager::UriStrVec&    uris,
                       const kv_cache_manager::BlockBuffers& buffers,
-                      std::vector<SdkRange>&                ranges) {
-    constexpr size_t max_bytes = 64 * 1024 * 1024, max_blocks = 256, max_iovs = 1024;
+                      bool bounded, std::vector<SdkRange>& ranges) {
+    const size_t max_bytes = bounded ? 64 * 1024 * 1024 : std::numeric_limits<size_t>::max();
+    const size_t max_blocks = bounded ? 256 : std::numeric_limits<size_t>::max();
+    const size_t max_iovs = bounded ? 1024 : std::numeric_limits<size_t>::max();
     if (uris.size() != buffers.size()) {
         return false;
     }
@@ -47,6 +51,7 @@ bool boundedSdkRanges(const kv_cache_manager::UriStrVec&    uris,
             }
             if (end > begin
                 && (end - begin >= max_blocks || next_bytes > max_bytes - bytes || next_iovs > max_iovs - iovs)) {
+                if (!bounded) return false; // A legacy whole call must still fit numeric accounting.
                 break;
             }
             bytes += next_bytes;
@@ -71,7 +76,8 @@ traceForRange(const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace,
 }  // namespace
 
 ClientWrapper::ClientWrapper(std::unique_ptr<ClientFactory> client_factory,
-                             std::chrono::milliseconds reinit_interval):
+                             std::chrono::milliseconds reinit_interval, bool bound_sdk_calls):
+    bound_sdk_calls_(bound_sdk_calls),
     client_factory_(std::move(client_factory)),
     reinit_interval_(std::max(reinit_interval, std::chrono::milliseconds(1))) {
     RTP_LLM_CHECK_WITH_INFO(client_factory_ != nullptr, "ClientWrapper requires a client factory");
@@ -196,7 +202,9 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
             first->gpu = std::move(memory_registrations.gpu);
         }
         std::vector<std::unique_ptr<kv_cache_manager::TransferClient>> clients;
+        std::vector<bool> packing;
         clients.reserve(pool_registrations_.size());
+        packing.reserve(pool_registrations_.size());
         for (size_t index = 0; index < pool_registrations_.size(); ++index) {
             auto params = init_params_;
             if (index != 0) {
@@ -217,9 +225,11 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
                     observable->setSdkTransferObserver(transfer_observer_);
                 }
             }
+            packing.push_back(dynamic_cast<PackedSsdTransferClient*>(client.get()) != nullptr);
             clients.push_back(std::move(client));
         }
         transfer_clients_ = std::move(clients);
+        packing_clients_ = std::move(packing);
         tag_to_index_     = std::move(pending_tags);
         try {
             if (!meta_client_map_.empty()) {
@@ -228,6 +238,7 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
         } catch (const std::exception& error) {
             RTP_LLM_LOG_ERROR("start KVCM re-registration worker failed: %s", error.what());
             transfer_clients_.clear();
+            packing_clients_.clear();
             tag_to_index_.clear();
             return false;
         }
@@ -235,6 +246,7 @@ bool ClientWrapper::initImpl(const ConfigMap&                     config_map,
     };
     const auto clear_failed_init = [&] {
         transfer_clients_.clear();
+        packing_clients_.clear();
         {
             std::lock_guard<std::mutex> lock(pending_transfer_mutex_);
             pending_transfers_.reset();
@@ -272,6 +284,7 @@ void ClientWrapper::shutdown() noexcept {
     {
         std::unique_lock<std::shared_mutex> transfer_guard(transfer_mutex_);
         transfer_clients_.clear();
+        packing_clients_.clear();
         tag_to_index_.clear();
         transfer_observer_ = {};
     }
@@ -696,7 +709,7 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
     auto                  ec = kv_cache_manager::ClientErrorCode::ER_OK;
     std::vector<SdkRange> ranges;
     if ((trace_info && !trace_info->block_ids.empty() && trace_info->block_ids.size() != uri_str_vec.size())
-        || !boundedSdkRanges(uri_str_vec, block_buffers, ranges)) {
+        || !sdkRanges(uri_str_vec, block_buffers, bound_sdk_calls_ || packing_clients_.at(slot->second), ranges)) {
         RTP_LLM_LOG_ERROR("KVCM bounded SDK rejects malformed or oversized block geometry");
         return kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS;
     }
@@ -825,7 +838,7 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
     kv_cache_manager::UriStrVec result;
     std::vector<SdkRange>       ranges;
     if ((trace_info && !trace_info->block_ids.empty() && trace_info->block_ids.size() != uri_str_vec.size())
-        || !boundedSdkRanges(uri_str_vec, block_buffers, ranges)) {
+        || !sdkRanges(uri_str_vec, block_buffers, bound_sdk_calls_ || packing_clients_.at(slot->second), ranges)) {
         RTP_LLM_LOG_ERROR("KVCM bounded SDK rejects malformed or oversized block geometry");
         return {kv_cache_manager::ClientErrorCode::ER_INVALID_PARAMS, {}};
     }
