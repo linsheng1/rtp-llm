@@ -701,7 +701,9 @@ ClientWrapper::loadKvCachesForTagWithStatus(const std::string&                  
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS;
     }
-    if (!remoteCacheDecodePublicationEnabled()) {
+    // Prefill forwards the caller's original descriptors and trace unchanged.
+    // Only projected Decode retains the bounded transfer/UNKNOWN records.
+    if (!remoteCacheDecodePublicationEnabled() || !bound_sdk_calls_) {
         if (completion)
             *completion = TransferCompletion::UNKNOWN;
         const auto ec = transfer_clients_[slot->second]->LoadKvCaches(uri_str_vec, block_buffers, trace_info);
@@ -829,7 +831,9 @@ ClientWrapper::saveKvCachesForTagWithStatus(const std::string&                  
         RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
         return {kv_cache_manager::ClientErrorCode::ER_CLIENT_NOT_EXISTS, {}};
     }
-    if (!remoteCacheDecodePublicationEnabled()) {
+    // Prefill forwards the caller's original descriptors and trace unchanged.
+    // Only projected Decode retains the bounded transfer/UNKNOWN records.
+    if (!remoteCacheDecodePublicationEnabled() || !bound_sdk_calls_) {
         if (completion)
             *completion = TransferCompletion::UNKNOWN;
         auto result = transfer_clients_[slot->second]->SaveKvCaches(uri_str_vec, block_buffers, trace_info);
