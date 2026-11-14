@@ -136,7 +136,9 @@ TEST(FeatureOffNativeTest, PrefillRemoteRoundTripPreservesLocalPrefixPayloadAndR
         SCOPED_TRACE(unset);
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
         ::rtp_llm::test::withDecodePublicationStartup([&] {
-        if (unset) ASSERT_EQ(unsetenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH"), 0);
+        if (unset) {
+            ASSERT_EQ(unsetenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH"), 0);
+        }
         auto env = makeBackendEnvironment("feature_off_prefill_payload");
         ScopedReferencedBlocks pages(env.device_pool, 3);
         const auto ids = pages.get();
@@ -561,7 +563,9 @@ TEST_P(EosGpuCompletionTest, DisabledAtInitializationDoesNotPublishPinOrChangeNa
         SCOPED_TRACE(unset);
         autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
         ::rtp_llm::test::withDecodePublicationStartup([&] {
-        if (unset) ASSERT_EQ(unsetenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH"), 0);
+        if (unset) {
+            ASSERT_EQ(unsetenv("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH"), 0);
+        }
         Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
         std::map<std::string, std::vector<size_t>> refs;
         for (const auto& tag : {std::string("full"), std::string("state")}) {
@@ -735,8 +739,11 @@ TEST_P(EosGpuCompletionTest, FullPrefixHolesAndTruncationKeepLargestCompleteChec
         EXPECT_EQ(s.finishes.load(), expected_keys ? 1 : 0);
         EXPECT_EQ(s.aborts.load(), 0);
         EXPECT_EQ(s.resource.decodeCompletionSubmitted(), expected_keys != 0);
-        if (expected_keys) EXPECT_GT(s.saves.load(), 0);
-        else EXPECT_EQ(s.saves.load(), 0);
+        if (expected_keys) {
+            EXPECT_GT(s.saves.load(), 0);
+        } else {
+            EXPECT_EQ(s.saves.load(), 0);
+        }
         for (const auto& [tag, pool] : s.env.pools_by_tag) {
             EXPECT_EQ(pool->referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u) << tag;
             EXPECT_EQ(pool->referencedBlocksNum(BlockTreeRefType::STORE), 0u) << tag;

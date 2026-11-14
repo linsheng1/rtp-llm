@@ -1189,7 +1189,9 @@ TEST(StorageBackendTest, TypedUnknownIsQuarantinedOnceBeforeErrorReporting) {
                 EXPECT_EQ(*callbacks, read ? 1u : 0u);
                 // Reads always examine what() to construct ErrorInfo. Write logging
                 // can be disabled; any actual what() call still runs the probe.
-                if (read) EXPECT_GT(*reports, 0u);
+                if (read) {
+                    EXPECT_GT(*reports, 0u);
+                }
                 EXPECT_EQ(backend->quarantine_events, 1u);
                 EXPECT_EQ(backend->quarantined_tasks, 1u);
                 EXPECT_EQ(backend->last_quarantine_reason, reason);

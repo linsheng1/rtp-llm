@@ -830,7 +830,9 @@ TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWire
         EXPECT_EQ(cache.seq_size_per_block, 256u);
         EXPECT_EQ(cache.layer_all_num(), dspark ? 8u : 5u);
         EXPECT_EQ(cache.mtp_sub_configs.size(), dspark ? 1u : 0u);
-        if (dspark) EXPECT_EQ(cache.mtp_sub_configs.front()->layer_num, 3u);
+        if (dspark) {
+            EXPECT_EQ(cache.mtp_sub_configs.front()->layer_num, 3u);
+        }
         const size_t shards = sharded ? cp : 1;
         // Independent literal wire sizes: two kernel pages per logical FULL
         // block; STATE has 2 (+3 rounded to 6, or +5 rounded to 8) FP32
@@ -853,7 +855,9 @@ TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWire
             for (int rank = 0; rank < cp; ++rank)
                 expected_infos[kvcm::genLocationSpecName(rank, (full ? "F" : "L") + tag, "DeepSeekV41")] = bytes;
         }
-        if (bounded) EXPECT_FALSE(cache.topology().group("decoder_swa_kv").policy.enable_prefix_reuse);
+        if (bounded) {
+            EXPECT_FALSE(cache.topology().group("decoder_swa_kv").policy.enable_prefix_reuse);
+        }
         initializeEnvironmentPools(environment, "v41_native_contract", 4);
         Observation observed;
         auto client = std::make_shared<MockClientWrapper>();
@@ -996,9 +1000,13 @@ TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWire
                     EXPECT_EQ(p_custom.identity, p_ssd.identity);
                 }
             }
-            if (!sharded) replicated_identity = p.identity;
-            else if (cp > 1) EXPECT_NE(p.identity, replicated_identity);
-            else EXPECT_EQ(p.identity, replicated_identity);
+            if (!sharded) {
+                replicated_identity = p.identity;
+            } else if (cp > 1) {
+                EXPECT_NE(p.identity, replicated_identity);
+            } else {
+                EXPECT_EQ(p.identity, replicated_identity);
+            }
         }
     }
     });
@@ -1587,8 +1595,9 @@ TEST(KVCMLocalTest, FinishIsSingleAttemptAndCannotAbortOrBlockLaterWrites) {
                         ++finishes;
                         EXPECT_EQ(session, "single-finish-" + std::to_string(finishes.load()));
                         EXPECT_EQ(std::get<kv_cache_manager::BlockMaskOffset>(mask), unused ? 0u : 1u);
-                        if (unused) EXPECT_TRUE(locations.empty());
-                        else {
+                        if (unused) {
+                            EXPECT_TRUE(locations.empty());
+                        } else {
                             EXPECT_EQ(locations.size(), 1u);
                             if (locations.size() == 1) {
                                 EXPECT_EQ(locations.front().size(), 1u);
@@ -2357,10 +2366,11 @@ TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement
             auto matched = match(*backend->backend, request);
             ASSERT_TRUE(matched.success);
             backend->backend->read(request, matched.match_meta, [completed, expect_late = late](ErrorInfo e) {
-                if (expect_late)
+                if (expect_late) {
                     EXPECT_EQ(e.code(), ErrorCode::DEADLINE_EXCEEDED);
-                else
+                } else {
                     EXPECT_TRUE(e.ok());
+                }
                 completed->set_value();
             });
         }

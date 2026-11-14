@@ -207,8 +207,11 @@ protected:
             // Off uses original FROZEN references. On retains the live source
             // owner/pins until quiescence; freezing happens during shutdown.
             EXPECT_EQ(env.device_pool->isFrozen(env.block_id), source_unknown && !protected_owner);
-            if (!source_unknown) EXPECT_EQ(env.device_pool->refCount(env.block_id), refs);
-            else if (protected_owner) EXPECT_GT(env.device_pool->refCount(env.block_id), refs);
+            if (!source_unknown) {
+                EXPECT_EQ(env.device_pool->refCount(env.block_id), refs);
+            } else if (protected_owner) {
+                EXPECT_GT(env.device_pool->refCount(env.block_id), refs);
+            }
             std::lock_guard<std::mutex> lock(backend->quarantine_mutex_);
             EXPECT_EQ(static_cast<bool>(backend->protected_quarantine_), protected_owner);
             EXPECT_EQ(backend->quarantined_task_count_, source_unknown ? 1u : 0u);
@@ -239,7 +242,9 @@ protected:
             broadcast->before_rank = [partial, deadline, arrival, gates](size_t rank) {
                 ++*gates;
                 if (rank != (partial ? 1u : 0u)) return;
-                if (partial) EXPECT_EQ(arrival.wait_for(kSetupWait), std::future_status::ready);
+                if (partial) {
+                EXPECT_EQ(arrival.wait_for(kSetupWait), std::future_status::ready);
+            }
                 std::this_thread::sleep_until(deadline + std::chrono::milliseconds(1));
             };
             ASSERT_TRUE(s.submit(std::move(request)));
@@ -247,7 +252,9 @@ protected:
             ASSERT_NE(broadcast->observed, nullptr);
             EXPECT_TRUE(broadcast->observed->done());
             EXPECT_FALSE(broadcast->observed->success());
-            if (partial) EXPECT_TRUE(broadcast->observed->rpcSucceeded(0));
+            if (partial) {
+                EXPECT_TRUE(broadcast->observed->rpcSucceeded(0));
+            }
             EXPECT_FALSE(broadcast->observed->rpcSucceeded(1));
             EXPECT_EQ(gates->load(), partial ? 2 : 1);
             EXPECT_EQ(snapshotRequests(first_state).size(), partial ? 1u : 0u);

@@ -1768,10 +1768,11 @@ TEST_F(TransferWorkLoopCrcTest, ExpiredStagingWaiterIsSkippedWithoutBlockingTheN
             ++callbacks;
         });
         owner.start();
-        if (direction == TransferDirection::OFFLOAD)
+        if (direction == TransferDirection::OFFLOAD) {
             ASSERT_TRUE(io->waitWrites(writes + 1));
-        else
+        } else {
             ASSERT_TRUE(io->waitReads(reads + 1));
+        }
         ASSERT_TRUE(await(expired));
         EXPECT_FALSE(active->done());
         EXPECT_FALSE(next->done());

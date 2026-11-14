@@ -1258,7 +1258,9 @@ TEST(ClientWrapperTest, ZeroMaskFinishCallsSdkOnceAndRequiresAnOkReply) {
                                    const kv_cache_manager::Locations& locations) {
                 const auto* offset = std::get_if<kv_cache_manager::BlockMaskOffset>(&mask);
                 EXPECT_NE(offset, nullptr);
-                if (offset) EXPECT_EQ(*offset, 0u);
+                if (offset) {
+                    EXPECT_EQ(*offset, 0u);
+                }
                 EXPECT_TRUE(locations.empty());
                 return code;
             }));
@@ -1361,12 +1363,16 @@ TEST(ClientWrapperTest, PrefillForwardsOriginalDescriptorsWhileDecodeKeepsBounde
         .Times(bounded ? 6 : 1)
         .WillRepeatedly(Invoke([&](const auto& u, const auto& b, const auto& part_trace) {
             EXPECT_NE(part_trace, nullptr);
-            if (bounded) EXPECT_NE(part_trace.get(), trace.get());
-            else EXPECT_EQ(part_trace.get(), trace.get());
+            if (bounded) {
+                EXPECT_NE(part_trace.get(), trace.get());
+            } else {
+                EXPECT_EQ(part_trace.get(), trace.get());
+            }
             EXPECT_TRUE(part_trace->need_print);
             EXPECT_EQ(part_trace->block_ids, u);
-            if (bounded) EXPECT_LE(u.size() * 19, 1024u);
-            else {
+            if (bounded) {
+                EXPECT_LE(u.size() * 19, 1024u);
+            } else {
                 EXPECT_EQ(u.size(), uris.size());
                 EXPECT_EQ(&u, &uris);
                 EXPECT_EQ(&b, &source);
@@ -1396,14 +1402,18 @@ TEST(ClientWrapperTest, PrefillForwardsOriginalDescriptorsWhileDecodeKeepsBounde
         .Times(bounded ? 6 : 1)
         .WillRepeatedly(Invoke([&](const auto& u, auto& b, const auto& part_trace) {
             EXPECT_NE(part_trace, nullptr);
-            if (bounded) EXPECT_NE(part_trace.get(), trace.get());
-            else EXPECT_EQ(part_trace.get(), trace.get());
+            if (bounded) {
+                EXPECT_NE(part_trace.get(), trace.get());
+            } else {
+                EXPECT_EQ(part_trace.get(), trace.get());
+            }
             EXPECT_TRUE(part_trace->need_print);
             EXPECT_EQ(part_trace->block_ids.size(), u.size());
             for (size_t i = 0; i < u.size(); ++i)
                 EXPECT_EQ(part_trace->block_ids[i], uris[loaded + i]);
-            if (bounded) EXPECT_LE(u.size() * 19, 1024u);
-            else {
+            if (bounded) {
+                EXPECT_LE(u.size() * 19, 1024u);
+            } else {
                 EXPECT_EQ(u.size(), uris.size());
                 EXPECT_EQ(&u, &written.second);
                 EXPECT_EQ(&b, &target);

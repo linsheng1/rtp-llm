@@ -625,8 +625,12 @@ protected:
         ASSERT_EQ(stream_->seqLength(), 258);
         ASSERT_TRUE(stream_->hasEvent(StreamEvents::GenerateDone));
         ASSERT_EQ(observations_->calls.size(), expect_capture ? 1u : 0u);
-        if (expect_capture) EXPECT_EQ(observations_->calls[0].end, 257u);
-        if (!dspark) EXPECT_FALSE(resource.kvCache().decode_endpoint);
+        if (expect_capture) {
+            EXPECT_EQ(observations_->calls[0].end, 257u);
+        }
+        if (!dspark) {
+            EXPECT_FALSE(resource.kvCache().decode_endpoint);
+        }
         EXPECT_FALSE(resource.isResourceReleased());
     }
 
