@@ -10,6 +10,8 @@
 #include <memory>
 #include <mutex>
 #include <stdexcept>
+#include <string>
+#include <type_traits>
 #include <vector>
 #include "kvcm_client/transfer_client.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkTransferObserver.h"
@@ -382,8 +384,15 @@ private:
     }
     static Trace rangeTrace(const Trace& trace, const std::pair<size_t, size_t>& range) {
         if (!trace) return {};
-        auto result = std::make_shared<kv_cache_manager::TransferTraceInfo>(*trace);
-        result->block_ids.assign(trace->block_ids.begin() + range.first, trace->block_ids.begin() + range.second);
+        // Exactly two SDK fields, with checked types; never copy the full ID
+        // vector just to discard IDs outside this independently owned window.
+        const auto& [print, ids] = *trace;
+        static_assert(std::is_same_v<std::decay_t<decltype(print)>, bool>
+                      && std::is_same_v<std::decay_t<decltype(ids)>, std::vector<std::string>>);
+        auto result = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+        auto& [result_print, result_ids] = *result;
+        result_print = print;
+        result_ids.assign(ids.begin() + range.first, ids.begin() + range.second);
         return result;
     }
     struct GpuRangeLease {

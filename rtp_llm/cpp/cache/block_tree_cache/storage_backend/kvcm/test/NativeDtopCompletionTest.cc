@@ -608,6 +608,9 @@ TEST_F(NativeSsdGpuReadWindowTest, ReadPipelineAlternatesBanksAndPreservesAliase
         std::vector<std::string> events;
         std::vector<std::tuple<void*, const void*, size_t>> pending;
         std::vector<void*> banks;
+        auto original_trace = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+        original_trace->need_print = true;
+        original_trace->block_ids = {"100", "101", "102"};
         auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
         EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(3)
             .WillRepeatedly(Invoke([&](const Uris& u, const Buffers& b, auto trace) {
@@ -616,6 +619,11 @@ TEST_F(NativeSsdGpuReadWindowTest, ReadPipelineAlternatesBanksAndPreservesAliase
                 EXPECT_EQ(pending.size(), window ? 1u : 0u);
                 EXPECT_EQ(u, (Uris{std::to_string(window)}));
                 EXPECT_TRUE(trace && trace->block_ids == Uris{std::to_string(100 + window)});
+                EXPECT_TRUE(trace && trace->need_print);
+                EXPECT_NE(trace.get(), original_trace.get());
+                if (trace && !trace->block_ids.empty()) {
+                    trace->need_print = false; trace->block_ids[0] = "sdk-private-window";
+                }
                 if (b.size() != 1 || b[0].iovs.size() != 1) return Code::ER_INVALID_PARAMS;
                 banks.push_back(b[0].iovs[0].base);
                 EXPECT_EQ(cudaMemset(b[0].iovs[0].base, 11 + window, 17), cudaSuccess);
@@ -635,8 +643,9 @@ TEST_F(NativeSsdGpuReadWindowTest, ReadPipelineAlternatesBanksAndPreservesAliase
         }, true);
         auto buffers = destinations({17, 17, 17});
         if (alias) for (auto& b : buffers) b.iovs[0].base = output.get();
-        auto trace = std::make_shared<kv_cache_manager::TransferTraceInfo>(); trace->block_ids = {"100", "101", "102"};
-        ASSERT_EQ(client.LoadKvCaches({"0", "1", "2"}, buffers, trace), Code::ER_OK);
+        ASSERT_EQ(client.LoadKvCaches({"0", "1", "2"}, buffers, original_trace), Code::ER_OK);
+        EXPECT_TRUE(original_trace->need_print);
+        EXPECT_EQ(original_trace->block_ids, (Uris{"100", "101", "102"}));
         EXPECT_EQ(events, (std::vector<std::string>{"L0", "S0", "L1", "F", "S1", "L2", "F", "S2", "F"}));
         ASSERT_EQ(banks.size(), 3u);
         EXPECT_NE(banks[0], banks[1]); EXPECT_EQ(banks[0], banks[2]);
@@ -653,6 +662,7 @@ TEST_F(NativeSsdGpuReadWindowTest, WritePipelineGathersAheadButKeepsSdkSavesSeri
     auto buffers = destinations(std::vector<size_t>(objects, bytes_per_object));
     Uris uris;
     auto trace = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+    trace->need_print = true;
     for (size_t j = 0; j < objects; ++j) {
         uris.push_back(std::to_string(j)); trace->block_ids.push_back(std::to_string(j + 100));
         ASSERT_EQ(cudaMemset(buffers[j].iovs[0].base, 1 + j, bytes_per_object), cudaSuccess);
@@ -670,6 +680,8 @@ TEST_F(NativeSsdGpuReadWindowTest, WritePipelineGathersAheadButKeepsSdkSavesSeri
             EXPECT_EQ(pending.size(), window == 0 ? 64u : window == 1 ? 1u : 0u);
             EXPECT_EQ(u, Uris(uris.begin() + first, uris.begin() + first + b.size()));
             EXPECT_TRUE(t && t->block_ids == Uris(trace->block_ids.begin() + first, trace->block_ids.begin() + first + b.size()));
+            EXPECT_TRUE(t && t->need_print);
+            EXPECT_NE(t.get(), trace.get());
             if (b.empty() || b[0].iovs.size() != 1) return std::make_pair(Code::ER_INVALID_PARAMS, Uris{});
             banks.push_back(b[0].iovs[0].base);
             for (size_t j = 0; j < b.size(); ++j) {
@@ -679,6 +691,7 @@ TEST_F(NativeSsdGpuReadWindowTest, WritePipelineGathersAheadButKeepsSdkSavesSeri
             }
             EXPECT_EQ(leasedBytes(), 2 * bank_bytes);
             Uris actual = u; for (auto& uri : actual) uri += "-saved";
+            if (t && !t->block_ids.empty()) { t->need_print = false; t->block_ids[0] = "sdk-private-window"; }
             return std::make_pair(Code::ER_OK, actual);
         }));
     Client client(std::move(delegate), [&](void* dst, M, const void* src, M, size_t bytes) {
@@ -692,6 +705,9 @@ TEST_F(NativeSsdGpuReadWindowTest, WritePipelineGathersAheadButKeepsSdkSavesSeri
     }, true);
     const auto result = client.SaveKvCaches(uris, buffers, trace);
     EXPECT_EQ(result.first, Code::ER_OK);
+    EXPECT_TRUE(trace->need_print);
+    ASSERT_EQ(trace->block_ids.size(), objects);
+    for (size_t j = 0; j < objects; ++j) EXPECT_EQ(trace->block_ids[j], std::to_string(j + 100));
     Uris expected = uris; for (auto& uri : expected) uri += "-saved";
     EXPECT_EQ(result.second, expected);
     EXPECT_EQ(events, (std::vector<std::string>{"G0", "F", "G1", "W0", "F", "G2", "W1", "F", "W2"}));

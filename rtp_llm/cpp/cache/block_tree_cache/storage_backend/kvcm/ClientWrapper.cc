@@ -1,6 +1,7 @@
 #include "ClientWrapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/PackedSsdTransferClient.h"
 #include <limits>
+#include <type_traits>
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "kvcm_client/HostCacheStateCompat.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/Subscriber.h"
@@ -68,8 +69,15 @@ std::shared_ptr<kv_cache_manager::TransferTraceInfo>
 traceForRange(const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace, const SdkRange& range) {
     if (!trace || trace->block_ids.empty())
         return trace;
-    auto result       = std::make_shared<kv_cache_manager::TransferTraceInfo>(*trace);
-    result->block_ids = {trace->block_ids.begin() + range.begin, trace->block_ids.begin() + range.end};
+    // Decomposition guards the complete SDK field set: additions must be
+    // handled explicitly instead of silently losing metadata in this clone.
+    const auto& [print, ids] = *trace;
+    static_assert(std::is_same_v<std::decay_t<decltype(print)>, bool>
+                  && std::is_same_v<std::decay_t<decltype(ids)>, std::vector<std::string>>);
+    auto result = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+    auto& [result_print, result_ids] = *result;
+    result_print = print;
+    result_ids.assign(ids.begin() + range.begin, ids.begin() + range.end);
     return result;
 }
 

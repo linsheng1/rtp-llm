@@ -1395,6 +1395,8 @@ TEST(ClientWrapperTest, LegacyPrefillWholeCallAndBoundedDecodePreserveUrisAndDes
         .Times(bounded ? 6 : 1)
         .WillRepeatedly(Invoke([&](const auto& u, const auto& b, const auto& part_trace) {
             EXPECT_NE(part_trace, nullptr);
+            EXPECT_NE(part_trace.get(), trace.get());
+            EXPECT_TRUE(part_trace->need_print);
             EXPECT_EQ(part_trace->block_ids, u);
             if (bounded) EXPECT_LE(u.size() * 19, 1024u);
             else EXPECT_EQ(u.size(), uris.size());
@@ -1407,16 +1409,22 @@ TEST(ClientWrapperTest, LegacyPrefillWholeCallAndBoundedDecodePreserveUrisAndDes
                 actual.push_back("actual_" + u[i]);
             }
             saved += u.size();
+            part_trace->need_print = false;
+            part_trace->block_ids.front() = "sdk-private-save-trace";
             return std::make_pair(ClientErrorCode::ER_OK, actual);
         }));
     auto written = client->saveKvCachesForTagWithStatus("default", uris, source, trace);
     ASSERT_EQ(written.first, ClientErrorCode::ER_OK);
     ASSERT_EQ(saved, 300u);
     ASSERT_EQ(written.second.size(), 300u);
+    EXPECT_TRUE(trace->need_print);
+    EXPECT_EQ(trace->block_ids, uris);
     EXPECT_CALL(*mock, LoadKvCaches(_, _, _))
         .Times(bounded ? 6 : 1)
         .WillRepeatedly(Invoke([&](const auto& u, auto& b, const auto& part_trace) {
             EXPECT_NE(part_trace, nullptr);
+            EXPECT_NE(part_trace.get(), trace.get());
+            EXPECT_TRUE(part_trace->need_print);
             EXPECT_EQ(part_trace->block_ids.size(), u.size());
             for (size_t i = 0; i < u.size(); ++i)
                 EXPECT_EQ(part_trace->block_ids[i], uris[loaded + i]);
@@ -1428,10 +1436,14 @@ TEST(ClientWrapperTest, LegacyPrefillWholeCallAndBoundedDecodePreserveUrisAndDes
                     *static_cast<unsigned char*>(b[i].iovs[j].base) = data[(loaded + i) * 19 + j];
             }
             loaded += u.size();
+            part_trace->need_print = false;
+            part_trace->block_ids.front() = "sdk-private-load-trace";
             return ClientErrorCode::ER_OK;
         }));
     ASSERT_EQ(client->loadKvCachesForTagWithStatus("default", written.second, target, trace), ClientErrorCode::ER_OK);
     EXPECT_EQ(loaded, 300u);
+    EXPECT_TRUE(trace->need_print);
+    EXPECT_EQ(trace->block_ids, uris);
     EXPECT_EQ(data, destination);
     EXPECT_EQ(read_bytes, data.size());
     EXPECT_EQ(written_bytes, data.size());
