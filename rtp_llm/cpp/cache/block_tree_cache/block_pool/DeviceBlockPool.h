@@ -60,6 +60,9 @@ public:
     // connector reference. Keep the pool alive until the token is reset/destroyed.
     // Release performs no allocation and isolates notification exceptions.
     RemotePublicationPin pinForRemotePublication(BlockIdxType block);
+    // Atomically test allocation and pin; empty for invalid/unallocated pages.
+    // Allocation/callback failures still propagate before acquiring a reference.
+    RemotePublicationPin tryPinForRemotePublication(BlockIdxType block);
 
     struct RequestReferenceUpdate {
         BlockIdxType block;
@@ -175,6 +178,7 @@ private:
 
 private:
     static constexpr size_t                          kRefTypeCount = static_cast<size_t>(DeviceBlockRefType::COUNT);
+    RemotePublicationPin pinForRemotePublicationNoLock(BlockIdxType block);
     std::vector<uint32_t> refcounts_;
     std::array<std::vector<uint32_t>, kRefTypeCount> refcounts_by_type_;
     std::array<size_t, kRefTypeCount>                referenced_block_counts_{};

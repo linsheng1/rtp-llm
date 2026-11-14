@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 
+#include <limits>
 #include <memory>
 #include <new>
 #include <optional>
@@ -306,8 +307,42 @@ TEST(DeviceBlockPoolTest, PublicationPinCallbackAllocationFailureDoesNotAcquireR
     EXPECT_THROW(pool.pinForRemotePublication(block), std::bad_alloc);
     EXPECT_EQ(pool.refCount(block), 1u);
     EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+    EXPECT_THROW(pool.tryPinForRemotePublication(block), std::bad_alloc);
+    EXPECT_EQ(pool.refCount(block), 1u);
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
     *fail = false;
     pool.decRef(block);
+}
+
+TEST(DeviceBlockPoolTest, TryPublicationPinChecksAllocationAndAcquiresUnderOneLock) {
+    DeviceBlockPool pool(makeConfig());
+    ASSERT_TRUE(pool.init());
+    const auto before = pool.freeBlocksNum();
+    EXPECT_FALSE(pool.tryPinForRemotePublication(NULL_BLOCK_IDX));
+    EXPECT_FALSE(pool.tryPinForRemotePublication(0));
+    EXPECT_FALSE(pool.tryPinForRemotePublication(std::numeric_limits<BlockIdxType>::max()));
+    const auto block = pool.malloc().value();
+    { // A freshly allocated page may have zero references; allocation is the contract.
+        auto token = pool.tryPinForRemotePublication(block);
+        ASSERT_TRUE(token);
+        EXPECT_EQ(pool.refCount(block), 1u);
+        EXPECT_EQ(token.get(), &pool);
+        EXPECT_EQ(token.get_deleter().block, block);
+    }
+    EXPECT_FALSE(pool.isAllocated(block));
+    EXPECT_FALSE(pool.tryPinForRemotePublication(block));
+    EXPECT_EQ(pool.freeBlocksNum(), before);
+    const auto held = pool.malloc().value();
+    pool.incRef(held);
+    auto token = pool.tryPinForRemotePublication(held);
+    ASSERT_TRUE(token);
+    EXPECT_EQ(pool.refCount(held), 2u);
+    pool.decRef(held);
+    EXPECT_TRUE(pool.isAllocated(held));
+    token.reset();
+    EXPECT_FALSE(pool.isAllocated(held));
+    EXPECT_EQ(pool.referencedBlocksNum(DeviceBlockRefType::REMOTE_CONNECTOR), 0u);
+    EXPECT_EQ(pool.freeBlocksNum(), before);
 }
 
 TEST(DeviceBlockPoolTest, PublicationPinMoveAndResetReleaseExactlyOnceWithIndependentCallbackCopies) {

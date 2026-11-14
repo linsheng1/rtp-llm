@@ -585,12 +585,12 @@ std::shared_ptr<const DecodeEndpoint> KVCacheManager::retainDecodeEndpoint(
                 // This exact page's live connector pin already proves allocation.
                 holds.push_back((*prior)[slot]); // Share this FULL page, never the old endpoint's owner.
             } else {
-                if (!pool->isAllocated(source)) return {};
                 auto hold = std::make_shared<DecodeEndpoint::PageHold>();
                 hold->pool = pool;
                 hold->block = source;
                 holds.push_back(hold); // Prepare host ownership before acquiring a page.
-                hold->pin = pool->pinForRemotePublication(source);
+                hold->pin = pool->tryPinForRemotePublication(source);
+                if (!hold->pin) return {};
             }
             blocks[slot] = source; // Actual DSV4.1 STATE/SWA use position-based pages, not LINEAR accept swaps.
         }

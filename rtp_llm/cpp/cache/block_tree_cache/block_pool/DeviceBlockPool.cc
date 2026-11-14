@@ -55,6 +55,17 @@ RemotePublicationPin DeviceBlockPool::pinForRemotePublication(BlockIdxType block
     std::lock_guard<std::mutex> lock(mutex_);
     checkInitializedNoLock();
     checkAllocatedNoLock(block);
+    return pinForRemotePublicationNoLock(block);
+}
+
+RemotePublicationPin DeviceBlockPool::tryPinForRemotePublication(BlockIdxType block) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkInitializedNoLock();
+    if (!isAllocatedNoLock(block)) return {};
+    return pinForRemotePublicationNoLock(block);
+}
+
+RemotePublicationPin DeviceBlockPool::pinForRemotePublicationNoLock(BlockIdxType block) {
     // Only the enabled publication path pays for this reservation. At most
     // totalBlocksNumNoLock() block IDs can be in the free list at any time.
     reserveAllReleasedBlocksNoLock();
