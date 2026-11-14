@@ -101,7 +101,7 @@ createNativeSsdGpu(const std::string&                                 config,
             cudaSetDevice(previous_device);
             resident_bytes.fetch_sub(bytes);
         });
-        context          = std::make_shared<Context>(std::move(arena));
+        context          = std::make_shared<Context>(std::move(arena), device);
         contexts[device] = context;
     }
     auto memory = registrations;
@@ -111,9 +111,10 @@ createNativeSsdGpu(const std::string&                                 config,
     auto delegate         = kv_cache_manager::TransferClient::Create(config, params, memory);
     if (!delegate)
         return {};
-    if (!context->registered)
+    if (!context->registered) {
         context->registered_gpu_spans.swap(registered_spans);
-    context->registered = true;
+        context->registered = true;
+    }
     return std::make_unique<PackedSsdTransferClient>(
         std::move(delegate),
         [](void* dst, kv_cache_manager::MemoryType dt, const void* src, kv_cache_manager::MemoryType st, size_t size) {

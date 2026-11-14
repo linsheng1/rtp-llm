@@ -34,17 +34,20 @@ class PackedSsdTransferClient final: public kv_cache_manager::TransferClient, pu
 
 public:
     struct GpuPackingContext {
-        explicit GpuPackingContext(std::shared_ptr<void> storage): memory(std::move(storage)) {
+        explicit GpuPackingContext(std::shared_ptr<void> storage, int device = -1):
+            memory(std::move(storage)), device_id(device) {
             free_ranges.reserve(1026);
             free_ranges.emplace_back(0, 64ULL * 1024 * 1024);
         }
         std::shared_ptr<void> memory;
+        const int             device_id;
         std::mutex            mutex;
         // GPU ranges, not whole tags, remain quarantined after uncertain DMA.
         // Fixed metadata capacity prevents allocation in the lease destructor.
         std::vector<std::pair<size_t, size_t>> free_ranges;
         size_t                                 active_reservations{0};
-        // Accessed only while ClientFactory's device registry mutex is held.
+        // Written under ClientFactory's registry mutex before publishing the
+        // first client; immutable afterwards, including during copy planning.
         bool                                         registered{false};
         std::vector<kv_cache_manager::GpuMemorySpan> registered_gpu_spans;
 
@@ -109,19 +112,7 @@ public:
         for (size_t block = 0; block < uris.size(); ++block)
             operation->calls[block]->trace = blockTrace(trace, block, uris.size());
         auto scatter = [&](size_t block) {
-            size_t offset = 0;
-            for (const auto& iov : destination[block].iovs) {
-                if (!iov.ignore
-                    && !copy_(iov.base,
-                              iov.type,
-                              static_cast<unsigned char*>(operation->bytes[block].get()) + offset,
-                              staging_type_,
-                              iov.size)) {
-                    return false;
-                }
-                offset += iov.size;
-            }
-            return true;
+            return copyBlock(destination[block], operation->bytes[block].get(), false);
         };
         // Bound simultaneous object leases by count and payload. Every object
         // in a window has a disjoint registered GPU span. Join all SDK calls
@@ -198,18 +189,7 @@ public:
             }
         }
         auto gather = [&](size_t block) {
-            size_t offset = 0;
-            for (const auto& iov : source[block].iovs) {
-                if (!copy_(static_cast<unsigned char*>(operation->bytes[block].get()) + offset,
-                           staging_type_,
-                           iov.base,
-                           iov.type,
-                           iov.size)) {
-                    return false;
-                }
-                offset += iov.size;
-            }
-            return true;
+            return copyBlock(source[block], operation->bytes[block].get(), true);
         };
         auto actual = uris;
         for (size_t window = 0; window < operation->write_ranges.size(); ++window) {
@@ -253,6 +233,49 @@ protected:
     }
 
 private:
+    bool canCoalesceCopy(void* user, const void* packed, size_t bytes) const {
+        if (!gpu_context_->registered || gpu_context_->device_id < 0) return false;
+        const auto source = reinterpret_cast<uintptr_t>(user);
+        const auto target = reinterpret_cast<uintptr_t>(packed);
+        const auto limit = std::numeric_limits<uintptr_t>::max();
+        if (bytes > limit - source || bytes > limit - target) return false;
+        // Even adjacent IOVs may alias staging. The original copy order then
+        // matters, so leave them separate instead of issuing an overlapping copy.
+        if (source < target + bytes && target < source + bytes) return false;
+        return gpu_context_->coversRegisteredGpuSpan({user, bytes}, gpu_context_->device_id);
+    }
+
+    bool copyBlock(const kv_cache_manager::BlockBuffer& block, void* packed, bool write) {
+        size_t offset = 0;
+        for (size_t index = 0; index < block.iovs.size();) {
+            const auto& first = block.iovs[index];
+            // makeOperation rejects ignored write IOVs. Ignored read regions
+            // consume packed bytes but must neither be copied nor bridge a run.
+            if (first.ignore) {
+                offset += first.size;
+                ++index;
+                continue;
+            }
+            size_t bytes = first.size, end = index + 1;
+            auto* staging = static_cast<unsigned char*>(packed) + offset;
+            const auto base = reinterpret_cast<uintptr_t>(first.base);
+            while (end < block.iovs.size()) {
+                const auto& next = block.iovs[end];
+                if (next.ignore || next.type != first.type || bytes > std::numeric_limits<uintptr_t>::max() - base
+                    || reinterpret_cast<uintptr_t>(next.base) != base + bytes
+                    || next.size > std::numeric_limits<size_t>::max() - bytes
+                    || !canCoalesceCopy(first.base, staging, bytes + next.size)) break;
+                bytes += next.size;
+                ++end;
+            }
+            if (!copy_(write ? staging : first.base, write ? staging_type_ : first.type,
+                       write ? first.base : staging, write ? first.type : staging_type_, bytes)) return false;
+            offset += bytes;
+            index = end;
+        }
+        return true;
+    }
+
     void observe(bool is_read, size_t bytes, bool unknown) const noexcept {
         if (transfer_observer_) {
             try {

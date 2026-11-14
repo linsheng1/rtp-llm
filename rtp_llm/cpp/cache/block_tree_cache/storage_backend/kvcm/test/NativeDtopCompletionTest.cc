@@ -244,6 +244,8 @@ TEST(FeatureOffNativeTest, PrefillRemoteRoundTripPreservesLocalPrefixPayloadAndR
 TEST(NativeSsdGpuPackingTest, GathersAndScattersDifferentGpuIovsWithoutHostPayloadStaging) {
     using namespace kv_cache_manager;
     using M       = kv_cache_manager::MemoryType;
+    int device = -1;
+    ASSERT_EQ(cudaGetDevice(&device), cudaSuccess);
     auto allocate = [](size_t bytes) {
         void* p = nullptr;
         if (cudaMalloc(&p, bytes) != cudaSuccess)
@@ -290,16 +292,22 @@ TEST(NativeSsdGpuPackingTest, GathersAndScattersDifferentGpuIovsWithoutHostPaylo
                       cudaSuccess);
             return ER_OK;
         }));
+    auto context = std::make_shared<kvcm::PackedSsdTransferClient::GpuPackingContext>(arena, device);
+    context->registered_gpu_spans = {{input.get(), 4096, device}, {output.get(), 4096, device}};
+    context->registered = true;
+    std::vector<size_t> copy_sizes;
     kvcm::PackedSsdTransferClient client(
         std::move(delegate),
-        [](void* d, M dt, const void* s, M st, size_t n) {
+        [&](void* d, M dt, const void* s, M st, size_t n) {
             EXPECT_EQ(dt, M::GPU);
             EXPECT_EQ(st, M::GPU);
-            return dt == M::GPU && st == M::GPU && cudaMemcpy(d, s, n, cudaMemcpyDeviceToDevice) == cudaSuccess;
+            copy_sizes.push_back(n);
+            return dt == M::GPU && st == M::GPU && cudaMemcpy(d, s, n, cudaMemcpyDeviceToDevice) == cudaSuccess
+                   && cudaStreamSynchronize(nullptr) == cudaSuccess;
         },
-        std::make_shared<kvcm::PackedSsdTransferClient::GpuPackingContext>(arena));
+        context);
     BlockBuffers source(2), destination(2);
-    source[0].iovs      = {{M::GPU, src, 17}, {M::GPU, src + 17, 240}};
+    source[0].iovs      = {{M::GPU, src, 17}, {M::GPU, src + 17, 80}, {M::GPU, src + 97, 160}};
     source[1].iovs      = {{M::GPU, src + 257, 513}, {M::GPU, src + 770, 510}};
     destination[0].iovs = {{M::GPU, dst + 2048, 19}, {M::GPU, dst + 2067, 238}};
     destination[1].iovs = {{M::GPU, dst, 13}, {M::GPU, dst + 13, 1010}};
@@ -310,7 +318,94 @@ TEST(NativeSsdGpuPackingTest, GathersAndScattersDifferentGpuIovsWithoutHostPaylo
     ASSERT_EQ(cudaMemcpy(second.data(), dst, second.size(), cudaMemcpyDeviceToHost), cudaSuccess);
     EXPECT_TRUE(std::equal(first.begin(), first.end(), expected.begin()));
     EXPECT_TRUE(std::equal(second.begin(), second.end(), expected.begin() + 257));
+    EXPECT_EQ(copy_sizes, (std::vector<size_t>{257, 1023, 257, 1023}));
 }
+TEST(NativeSsdGpuPackingTest, CopyRunsRespectRegistrationGapsIgnoredOffsetsAliasingAndFailure) {
+    using namespace kv_cache_manager;
+    using Client = kvcm::PackedSsdTransferClient;
+    using M = kv_cache_manager::MemoryType;
+    int device = -1;
+    ASSERT_EQ(cudaGetDevice(&device), cudaSuccess);
+    const auto allocate = [](size_t bytes) {
+        void* p = nullptr;
+        if (cudaMalloc(&p, bytes) != cudaSuccess) throw std::runtime_error("test GPU allocation failed");
+        return std::shared_ptr<void>(p, [](void* v) { cudaFree(v); });
+    };
+    auto arena = allocate(Client::max_operation_bytes), data = allocate(1024);
+    auto* bytes = static_cast<unsigned char*>(data.get());
+    auto* staging = static_cast<unsigned char*>(arena.get());
+    enum Scenario { GAP, SPLIT_REGISTRATION, DEVICE_MISMATCH, IGNORED_READ, STAGING_ALIAS, FAILED_RUN };
+    for (auto scenario : {GAP, SPLIT_REGISTRATION, DEVICE_MISMATCH, IGNORED_READ, STAGING_ALIAS, FAILED_RUN}) {
+        SCOPED_TRACE(scenario);
+        auto context = std::make_shared<Client::GpuPackingContext>(arena, device);
+        context->registered = true;
+        context->registered_gpu_spans = {{data.get(), 1024, device}, {arena.get(), Client::max_operation_bytes, device}};
+        if (scenario == SPLIT_REGISTRATION)
+            context->registered_gpu_spans = {{bytes, 4, device}, {bytes + 4, 4, device}};
+        if (scenario == DEVICE_MISMATCH)
+            context->registered_gpu_spans = {{data.get(), 1024, device + 1}};
+        auto destroyed = std::make_shared<int>(0);
+        auto delegate = std::make_unique<MockTransferClient>(destroyed);
+        const UriStrVec uris{"object"};
+        if (scenario == IGNORED_READ) {
+            EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).WillOnce(Invoke([&](const auto& u, const auto& b, auto) {
+                EXPECT_EQ(u, uris);
+                EXPECT_EQ(b.size(), 1u);
+                EXPECT_EQ(b[0].iovs.size(), 1u);
+                EXPECT_EQ(b[0].iovs[0].size, 12u);
+                EXPECT_EQ(cudaMemset(b[0].iovs[0].base, 0x2a, 12), cudaSuccess);
+                EXPECT_EQ(cudaStreamSynchronize(nullptr), cudaSuccess);
+                return ER_OK;
+            }));
+        } else if (scenario == FAILED_RUN) {
+            EXPECT_CALL(*delegate, SaveKvCaches(_, _, _)).Times(0);
+        } else {
+            EXPECT_CALL(*delegate, SaveKvCaches(_, _, _)).WillOnce(Invoke([&](const auto& u, const auto& b, auto) {
+                EXPECT_EQ(u, uris);
+                EXPECT_EQ(b.size(), 1u);
+                EXPECT_EQ(b[0].iovs.size(), 1u);
+                EXPECT_EQ(b[0].iovs[0].size, 8u);
+                return std::make_pair(ER_OK, u);
+            }));
+        }
+        std::vector<std::tuple<void*, const void*, size_t>> copies;
+        Client client(std::move(delegate), [&](void* d, M dt, const void* s, M st, size_t n) {
+            copies.emplace_back(d, s, n);
+            EXPECT_EQ(dt, M::GPU);
+            EXPECT_EQ(st, M::GPU);
+            if (scenario == FAILED_RUN) return false; // No GPU work submitted by this fake failure.
+            return cudaMemcpy(d, s, n, cudaMemcpyDeviceToDevice) == cudaSuccess
+                   && cudaStreamSynchronize(nullptr) == cudaSuccess;
+        }, context);
+        BlockBuffers buffers(1);
+        buffers[0].iovs = {{M::GPU, bytes, 4}, {M::GPU, bytes + (scenario == GAP ? 8 : 4), 4}};
+        if (scenario == STAGING_ALIAS)
+            buffers[0].iovs = {{M::GPU, staging + 4, 4}, {M::GPU, staging + 8, 4}};
+        if (scenario == IGNORED_READ) {
+            buffers[0].iovs = {{M::GPU, bytes, 4}, {M::GPU, bytes + 4, 4, true}, {M::GPU, bytes + 8, 4}};
+            ASSERT_EQ(cudaMemset(bytes, 0x5a, 12), cudaSuccess);
+            ASSERT_EQ(client.LoadKvCaches(uris, buffers), ER_OK);
+            ASSERT_EQ(copies.size(), 2u);
+            EXPECT_EQ(std::get<1>(copies[1]), staging + 8);
+            EXPECT_EQ(std::get<0>(copies[1]), bytes + 8);
+            std::vector<unsigned char> actual(12);
+            ASSERT_EQ(cudaMemcpy(actual.data(), bytes, 12, cudaMemcpyDeviceToHost), cudaSuccess);
+            EXPECT_EQ(actual, (std::vector<unsigned char>{42,42,42,42,90,90,90,90,42,42,42,42}));
+        } else if (scenario == FAILED_RUN) {
+            EXPECT_EQ(client.SaveKvCaches(uris, buffers).first, ER_CUDAMEMCPY_ERROR);
+            ASSERT_EQ(copies.size(), 1u);
+            EXPECT_EQ(std::get<2>(copies[0]), 8u);
+            EXPECT_EQ(client.SaveKvCaches(uris, buffers).first, ER_INVALID_LOCAL_BUFFERS);
+            EXPECT_EQ(copies.size(), 1u); // The quarantined operation cannot be overwritten.
+        } else {
+            ASSERT_EQ(client.SaveKvCaches(uris, buffers).first, ER_OK);
+            ASSERT_EQ(copies.size(), 2u);
+            EXPECT_EQ(std::get<2>(copies[0]), 4u);
+            EXPECT_EQ(std::get<2>(copies[1]), 4u);
+        }
+    }
+}
+
 TEST(NativeSsdGpuPackingTest, ConcurrentLargeLogicalBatchesReserveOnlyOneGpuObjectEach) {
     using namespace kv_cache_manager;
     using M                       = kv_cache_manager::MemoryType;
