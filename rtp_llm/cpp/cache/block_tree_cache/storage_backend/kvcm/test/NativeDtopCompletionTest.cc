@@ -604,7 +604,7 @@ protected:
 // starts the next SDK load before draining them corrupts the asserted GPU bytes.
 TEST_F(NativeSsdGpuReadWindowTest, ReadPipelineAlternatesBanksAndPreservesAliasedDestinationOrder) {
     for (bool alias : {false, true}) {
-        registerPipelineSpans();
+        ASSERT_NO_FATAL_FAILURE(registerPipelineSpans());
         std::vector<std::string> events;
         std::vector<std::tuple<void*, const void*, size_t>> pending;
         std::vector<void*> banks;
@@ -647,7 +647,7 @@ TEST_F(NativeSsdGpuReadWindowTest, ReadPipelineAlternatesBanksAndPreservesAliase
     }
 }
 TEST_F(NativeSsdGpuReadWindowTest, WritePipelineGathersAheadButKeepsSdkSavesSerialAndBytesReady) {
-    registerPipelineSpans();
+    ASSERT_NO_FATAL_FAILURE(registerPipelineSpans());
     // Count-based windows: 64, 64, 1 objects; no oversized fixture allocation.
     constexpr size_t objects = 129, bytes_per_object = 17, bank_bytes = 64 * bytes_per_object;
     auto buffers = destinations(std::vector<size_t>(objects, bytes_per_object));
@@ -702,7 +702,7 @@ TEST_F(NativeSsdGpuReadWindowTest, PipelineFailureMustDrainCopiesBeforeReturning
     const auto safe = expectedPreflightError(Code::ER_INVALID_LOCAL_BUFFERS);
     if (!kvcm::sdkCodeProvesBufferSafety(safe)) GTEST_SKIP() << "SDK lacks explicit buffer-safe error codes";
     for (bool write : {false, true}) for (int failure = 0; failure < 4; ++failure) {
-        registerPipelineSpans();
+        ASSERT_NO_FATAL_FAILURE(registerPipelineSpans());
         size_t copies = 0, fences = 0, calls = 0, pending = 0;
         const size_t objects = write ? 65 : 2, bank_bytes = write ? 64 * 17 : 17;
         Uris uris(objects, "object"); auto buffers = destinations(std::vector<size_t>(objects, 17));
@@ -744,7 +744,7 @@ TEST_F(NativeSsdGpuReadWindowTest, PipelineFailureMustDrainCopiesBeforeReturning
     }
 }
 TEST_F(NativeSsdGpuReadWindowTest, PipelineDrainsItsPendingCopyWhenAnotherReaderBecomesUnknown) {
-    registerPipelineSpans();
+    ASSERT_NO_FATAL_FAILURE(registerPipelineSpans());
     struct State {
         std::promise<void> entered, release, done;
         std::shared_future<void> released = release.get_future().share(), finished = done.get_future().share();
@@ -781,9 +781,10 @@ TEST_F(NativeSsdGpuReadWindowTest, PipelineDrainsItsPendingCopyWhenAnotherReader
     EXPECT_EQ(leasedBytes(), 17u); // Only b's one-bank UNKNOWN, not a's double bank.
     client.reset(); EXPECT_EQ(leasedBytes(), 0u);
 }
-TEST_F(NativeSsdGpuReadWindowTest, PipelineCopyAndFenceExceptionsKeepBothBanks) {
-    for (bool write : {false, true}) for (bool fence_throws : {false, true}) {
-        registerPipelineSpans();
+TEST_F(NativeSsdGpuReadWindowTest, PipelineCopyFailuresAndFenceExceptionsKeepBothBanks) {
+    for (bool write : {false, true}) for (int failure = 0; failure < 3; ++failure) {
+        const bool fence_throws = failure == 2;
+        ASSERT_NO_FATAL_FAILURE(registerPipelineSpans());
         const size_t count = write ? 65 : 2, bank_bytes = write ? 64 * 17 : 17;
         size_t copied = 0, fences = 0;
         auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
@@ -793,14 +794,25 @@ TEST_F(NativeSsdGpuReadWindowTest, PipelineCopyAndFenceExceptionsKeepBothBanks) 
             .WillRepeatedly(Return(Code::ER_OK));
         {
             Client client(std::move(delegate), [&](auto, auto, auto, auto, size_t) {
-                if (++copied == (write ? 65u : 1u) && !fence_throws) throw std::runtime_error("copy enqueue");
+                if (++copied == (write ? 65u : 1u) && !fence_throws) {
+                    if (!failure) return false;
+                    throw std::runtime_error("copy enqueue");
+                }
                 return true; // Fake copy, so no DMA survives the test.
             }, context, 1, [&] {
                 if (++fences == (write ? 2u : 1u) && fence_throws) throw std::runtime_error("copy fence");
                 return true;
             }, true);
-            if (write) EXPECT_THROW(client.SaveKvCaches(Uris(count, "one"), destinations(std::vector<size_t>(count, 17))), std::runtime_error);
-            else EXPECT_THROW(client.LoadKvCaches(Uris(count, "one"), destinations(std::vector<size_t>(count, 17))), std::runtime_error);
+            auto buffers = destinations(std::vector<size_t>(count, 17));
+            if (!failure) {
+                const auto result = write ? client.SaveKvCaches(Uris(count, "one"), buffers).first :
+                                            client.LoadKvCaches(Uris(count, "one"), buffers);
+                EXPECT_EQ(result, Code::ER_CUDAMEMCPY_ERROR);
+            } else if (write) {
+                EXPECT_THROW(client.SaveKvCaches(Uris(count, "one"), buffers), std::runtime_error);
+            } else {
+                EXPECT_THROW(client.LoadKvCaches(Uris(count, "one"), buffers), std::runtime_error);
+            }
             EXPECT_EQ(leasedBytes(), 2 * bank_bytes);
             EXPECT_EQ(fences, (write ? 1u : 0u) + (fence_throws ? 2u : 1u));
         }
@@ -809,7 +821,7 @@ TEST_F(NativeSsdGpuReadWindowTest, PipelineCopyAndFenceExceptionsKeepBothBanks) 
 }
 TEST_F(NativeSsdGpuReadWindowTest, PipelineFallsBackWithoutRejectingSerialGeometryOrArenaCapacity) {
     for (int reason = 0; reason < 6; ++reason) {
-        registerPipelineSpans();
+        ASSERT_NO_FATAL_FAILURE(registerPipelineSpans());
         auto buffers = destinations({17, 17});
         if (reason == 0) { // Only one bank fits; optional second-bank reservation must roll back.
             context->free_ranges = {{0, 17}};
@@ -834,6 +846,49 @@ TEST_F(NativeSsdGpuReadWindowTest, PipelineFallsBackWithoutRejectingSerialGeomet
             EXPECT_EQ(context->free_ranges, (std::vector<std::pair<size_t, size_t>>{{0, 17}}));
         }
     }
+}
+
+TEST_F(NativeSsdGpuReadWindowTest, PipelineProcessBudgetFallsBackToOneBankWithoutLeakingTheFailedCharge) {
+    ASSERT_NO_FATAL_FAILURE(registerPipelineSpans());
+    std::vector<std::shared_ptr<Client>> held;
+    // Independent real arenas; eight no-DMA mock UNKNOWNs leave exactly 17 B
+    // below the existing 512 MiB process cap. Never reset the global counter.
+    for (size_t index = 0; index < 8; ++index) {
+        void* memory = nullptr;
+        ASSERT_EQ(cudaMalloc(&memory, Client::max_operation_bytes), cudaSuccess);
+        auto storage = std::shared_ptr<void>(memory, [](void* p) { cudaFree(p); });
+        auto holder_context = std::make_shared<Client::GpuPackingContext>(storage);
+        auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+        EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).WillOnce(Return(Code::ER_SDK_TIMEOUT));
+        auto client = std::make_shared<Client>(std::move(delegate),
+            [](auto, auto, auto, auto, size_t) { return true; }, holder_context);
+        Buffers buffers(1);
+        buffers[0].iovs = {{M::GPU, memory, Client::max_operation_bytes - (index == 7 ? 17 : 0), false}};
+        ASSERT_EQ(client->LoadKvCaches({"held"}, buffers), Code::ER_SDK_TIMEOUT);
+        held.push_back(std::move(client));
+    }
+    size_t calls = 0, fences = 0;
+    auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(4).WillRepeatedly(Invoke([&](auto, auto, auto) {
+        EXPECT_EQ(fences, calls == 3 ? 2u : calls);
+        EXPECT_EQ(leasedBytes(), calls < 2 ? 17u : 34u);
+        ++calls; return Code::ER_OK;
+    }));
+    Client client(std::move(delegate), [](auto, auto, auto, auto, size_t) { return true; }, context, 1,
+                  [&] { ++fences; return true; }, true);
+    EXPECT_EQ(client.LoadKvCaches({"a", "b"}, destinations({17, 17})), Code::ER_OK);
+    EXPECT_EQ(calls, 2u); EXPECT_EQ(fences, 2u); EXPECT_EQ(leasedBytes(), 0u);
+    held.clear(); // The mock SDK has no DMA and all calls have returned.
+    // Normal admission must again work after all process charges are returned.
+    EXPECT_EQ(client.LoadKvCaches({"a", "b"}, destinations({17, 17})), Code::ER_OK);
+    EXPECT_EQ(calls, 4u); EXPECT_EQ(fences, 4u); EXPECT_EQ(leasedBytes(), 0u);
+}
+TEST_F(NativeSsdGpuReadWindowTest, PipelineRequiresAFenceEvenBeforeAnyOperationStarts) {
+    auto delegate = std::make_unique<kv_cache_manager::MockTransferClient>(destroyed);
+    EXPECT_CALL(*delegate, LoadKvCaches(_, _, _)).Times(0);
+    EXPECT_CALL(*delegate, SaveKvCaches(_, _, _)).Times(0);
+    EXPECT_THROW(Client(std::move(delegate), copy, context, 1, {}, true), std::invalid_argument);
+    EXPECT_EQ(context->active_reservations, 0u);
 }
 
 TEST_F(NativeSsdGpuReadWindowTest, ExplicitSafeSdkFailureReleasesArenaAndPermitsRetry) {
