@@ -74,8 +74,10 @@ private:
     std::vector<std::pair<std::string, std::string>> requests_;
 };
 
-TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings) {
-    for (int mode = 0; mode < 8; ++mode) {
+TEST(KVCMLocalTest, ManagerPreservesExplicitControlAndOriginalPrefillDisabledPublisher) {
+    autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
+    ::rtp_llm::test::withDecodePublicationStartup([&] {
+    for (int mode = 0; mode < 10; ++mode) {
         SCOPED_TRACE(mode);
         auto environment = makeBackendEnvironment("kvcm_control_only_" + std::to_string(mode));
         auto client = std::make_shared<MockClientWrapper>();
@@ -90,7 +92,10 @@ TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings
         config.kvcm_server_address = "outer-rpc";
         config.kv_cache_event_host_ip_port = "127.0.0.1:19999";
         config.kv_cache_event_snapshot_interval_ms = mode == 4 ? 0 : 600000;
-        config.kv_cache_event_publisher_type = mode == 0 ? "none" : (mode == 6 ? "unknown" : "kvcm");
+        config.kv_cache_event_publisher_type = (mode == 0 || mode == 9) ? "none" :
+            (mode == 8 ? "" : (mode == 6 ? "unknown" : "kvcm"));
+        auto parallel = singleRankConfig();
+        parallel.role_type = mode == 9 ? RoleType::DECODE : RoleType::PREFILL;
         config.reuse_cache = mode != 1;
         config.enable_device_cache = mode != 2;
         if (mode != 0 && mode != 3) {
@@ -110,7 +115,7 @@ TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings
             config.kvcm_client_config = autil::legacy::ToJsonString(kvcm::ClientWrapper::ConfigMap{{"alias", custom}});
         }
         auto backend = std::make_shared<KVCMStorageBackend>(
-            environment.cache_config, config, runtime, singleRankConfig(),
+            environment.cache_config, config, runtime, parallel,
             SpeculativeExecutionConfig{}, nullptr, false, nullptr, client);
         ASSERT_FALSE(backend->controlConfig().has_value());
         ASSERT_TRUE(initSingleRank(*backend, environment));
@@ -130,7 +135,7 @@ TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings
             auto layers = manager_config.topology().layers();
             manager_config.setTopology(std::move(groups), std::move(layers));
         }
-        KVCacheManager manager(manager_config, false, nullptr, config, singleRankConfig(), runtime);
+        KVCacheManager manager(manager_config, false, nullptr, config, parallel, runtime);
         auto full = std::make_shared<FullGroupSet>(
             std::vector<DeviceBlockPoolPtr>{environment.device_pool}, nullptr, nullptr);
         full->initialize(0, manager_config.topologyPtr(), {"default"});
@@ -138,6 +143,16 @@ TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings
         manager.block_tree_cache_->storage_backend_ = backend;
         auto reporter = std::make_shared<ControlOnlyReporter>();
         manager.initCacheEventPublisher(reporter);
+        if (mode == 0 || mode == 8) {
+            // Original P disabled publisher: no implicit control thread, RPC,
+            // heartbeat or admission disable. D's none case (9) stays active.
+            EXPECT_EQ(manager.cache_event_publisher_, nullptr);
+            EXPECT_TRUE(backend->remoteCacheEnabled());
+            EXPECT_EQ(manager.block_tree_cache_->tree()->event_publisher_, nullptr);
+            EXPECT_TRUE(reporter->requests().empty());
+            manager.stopCacheEventPublisher();
+            continue;
+        }
         ASSERT_NE(manager.cache_event_publisher_, nullptr);
         ASSERT_TRUE(reporter->waitFor("EVENT_NODE_REGISTER"));
         const auto waitForRemoteState = [&](bool expected) {
@@ -186,6 +201,7 @@ TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings
         }
         EXPECT_EQ(registration_count, 1u);
     }
+    });
 }
 
 double snapshotGauge(kmonitor::MutableMetric* metric) {
@@ -1616,7 +1632,12 @@ TEST(KVCMLocalTest, PrefillInlineSettlementBypassesCompletionPostAndKeepsTimeout
                 EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
                     .WillOnce(Return(std::make_pair(true, location)));
                 if (unknown) {
-                    EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).Times(0);
+                    // This is a returned legacy SDK_TIMEOUT, not the distinct
+                    // exceptional UNKNOWN tested above: original P attempts
+                    // exactly one zero-mask close and still freezes the source.
+                    EXPECT_CALL(*client, finishWrite(_, _, "fallback-open-session",
+                        ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{0}}),
+                        ::testing::IsEmpty())).WillOnce(Return(true));
                 } else {
                     EXPECT_CALL(*client, finishWrite(_, _, "fallback-open-session",
                         ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{1}}), _))
