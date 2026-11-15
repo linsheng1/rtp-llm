@@ -176,6 +176,7 @@ class OutputDispatchTest: public NormalBatchStreamProcessorTest, public ::testin
 
 INSTANTIATE_TEST_SUITE_P(SerialAndParallel, OutputDispatchTest, ::testing::Values(0, 2));
 
+#if USING_CUDA
 TEST_P(OutputDispatchTest, CpuOutputsWaitForWriterOnlyWhenRequested) {
     class RecordingStream final: public NormalGenerateStream {
     public:
