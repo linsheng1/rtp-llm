@@ -313,6 +313,8 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
         handoff && *handoff >= 0 && static_cast<uint64_t>(*handoff) <= actual_computed_end) {
         request.prefill_computed_tokens = *handoff;
     }
+    auto peer_blocks = std::make_shared<DecodePeerBlocks>();
+    request.decode_peer_blocks = peer_blocks;
     size_t                                                                       bytes = 0;
     std::unordered_map<const DeviceBlockPool*, std::unordered_set<BlockIdxType>> charged_blocks;
     size_t                                                                       unique_pages = 0;
@@ -336,20 +338,22 @@ StorageRequest planCompletedDecode(const BatchKVCacheResource& resource, size_t 
                 ++unique_pages;
             }
         };
+        auto* projected = spec.is_full ? &(*peer_blocks)[spec.tag] : nullptr;
+        if (projected) projected->resize(request.keys->size());
         for (size_t key = first; key < request.keys->size(); ++key) {
             StorageBlockHandle handle;
             handle.tag = spec.tag;
             if (spec.is_full) {
                 for (int peer = 0; peer < target_prefill_tp_; ++peer)
-                    handle.peer_blocks.push_back(
+                    projected->at(key).push_back(
                         blocks.at(target_physical_shards_ * key + (target_physical_shards_ > 1 ? peer : 0)));
-                handle.block = handle.peer_blocks.front();
+                handle.block = projected->at(key).front();
             } else {
                 handle.block = blocks.at((key + 1) * canonical_unit / group.seqSizePerBlock() - 1);
             }
             charge(handle.block);
-            for (auto peer : handle.peer_blocks)
-                charge(peer);
+            if (spec.is_full)
+                for (auto peer : projected->at(key)) charge(peer);
             request.handles[key].push_back(std::move(handle));
         }
     }

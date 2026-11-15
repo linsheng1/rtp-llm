@@ -1600,7 +1600,7 @@ TEST_F(StreamCacheResourceTest, StorageMatchDefersReusePublicationUntilReadCompl
     EXPECT_EQ(resource.kvCache().cacheResource(0).storageBackendReuseBlockNum(), 2u);
 }
 
-TEST_F(StreamCacheResourceTest, RequestFinishPreservesOriginalPrefixWritesAcrossRolesAndReplicas) {
+TEST_F(StreamCacheResourceTest, RequestFinishFiltersRemoteReuseOnlyForSingleReplicaPrefill) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
     for (const auto role : {RoleType::PREFILL, RoleType::PDFUSION, RoleType::DECODE}) {
@@ -1616,8 +1616,9 @@ TEST_F(StreamCacheResourceTest, RequestFinishPreservesOriginalPrefixWritesAcross
             counts.setStorageBackendReuseBlockNum(1);
             auto expected = counts.cacheKeys();
             ASSERT_EQ(expected.size(), 3u);
-            // Original P publishes the complete prefix, including remote
-            // reuse, for every replica policy. Reuse counts remain observable.
+            if (role == RoleType::PREFILL && replicas <= 1) {
+                expected.erase(expected.begin() + 1);
+            }
             stream_->generate_status_->status = StreamState::FINISHED;
             stream_->fillSubGenerateStatus(StreamState::FINISHED);
             stream_->releaseResource();
@@ -1712,7 +1713,7 @@ TEST_F(StreamCacheResourceTest, PublicationFreshnessRequiresSingleRowAndExisting
     }, [&] { TearDown(); stream_.reset(); cache_manager_.reset(); });
 }
 
-TEST_F(StreamCacheResourceTest, AdoptedRemoteCountsKeepOriginalPrefillPrefixRefresh) {
+TEST_F(StreamCacheResourceTest, AdoptedRemoteCountsControlRequestFinishWrites) {
     for (const int outcome : {0, 1, 2}) {
         SCOPED_TRACE(outcome);  // Success, read failure, read timeout.
         auto backend = prepareStorageBackendResource(false, true, RoleType::PREFILL);
@@ -1731,8 +1732,9 @@ TEST_F(StreamCacheResourceTest, AdoptedRemoteCountsKeepOriginalPrefillPrefixRefr
         EXPECT_EQ(counts.storageBackendReuseBlockNum(), outcome == 0 ? 1u : 0u);
         auto expected = counts.cacheKeys();
         ASSERT_EQ(expected.size(), 3u);
-        // Successful remote reuse and failed/timeout fallback all retain the
-        // original full-prefix publication; source counts above stay distinct.
+        if (outcome == 0) {
+            expected.erase(expected.begin() + 1);
+        }
         stream_->generate_status_->status = StreamState::FINISHED;
         stream_->fillSubGenerateStatus(StreamState::FINISHED);
         stream_->releaseResource();

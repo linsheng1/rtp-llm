@@ -153,64 +153,38 @@ initializeClient(bool                                                  enable_vi
     return wrapper;
 }
 
-TEST(ClientWrapperTest, PrefillUsesOriginalAddressListAndGrpcRecoveryWithoutBlockingTransfer) {
+TEST(ClientWrapperTest, PrefillUsesCommonEndpointBindingAndLeavesGrpcRecoveryToSdk) {
     using namespace kv_cache_manager;
     std::array<char, 32> data{};
     RegistSpan span{data.data(), data.size()};
     InitObservation observation;
-    MockMetaClient* old = nullptr;
+    MockMetaClient* meta = nullptr;
     MockTransferClient* transfer = nullptr;
-    MockClientFactory* factory = nullptr;
     auto attempts = std::make_shared<std::atomic<int>>(0);
-    auto wrapper = initializeClient(false, "old", span, observation, std::make_shared<int>(0), &old,
-        attempts, &transfer, nullptr, std::chrono::milliseconds(80), &factory, {"old", "standby"}, false);
+    auto wrapper = initializeClient(false, "old", span, observation, std::make_shared<int>(0), &meta,
+        attempts, &transfer, nullptr, std::chrono::milliseconds(80), nullptr, {"old", "standby"}, false);
     ASSERT_NE(wrapper, nullptr);
     EXPECT_NE(observation.initial_meta_config.find("\"old\""), std::string::npos);
-    EXPECT_NE(observation.initial_meta_config.find("\"standby\""), std::string::npos);
-    EXPECT_CALL(*factory, getLeaderAddress(_, _, _)).Times(0);
-    auto next = std::make_unique<MockMetaClient>();
-    EXPECT_CALL(*next, FinishWrite("ready", _, _, _)).WillOnce(Return(ER_OK));
-    std::promise<void> entered, release;
-    auto started = entered.get_future();
-    auto released = release.get_future().share();
-    block_tree_cache_detail::ScopeRollback unblock([&] { release.set_value(); });
-    block_tree_cache_detail::ScopeRollback cleanup([&] { unblock.run(); wrapper->shutdown(); });
-    EXPECT_CALL(*factory, createMetaClient(_, _)).WillOnce(Invoke([&](const std::string& config, const auto&) {
-        EXPECT_NE(config.find("\"old\""), std::string::npos);
-        EXPECT_NE(config.find("\"standby\""), std::string::npos);
-        entered.set_value();
-        released.wait();
-        return std::move(next);
-    }));
-    EXPECT_CALL(*old, FinishWrite("grpc", _, _, _)).Times(3).WillRepeatedly(Return(ER_INVALID_GRPCSTATUS));
-    EXPECT_FALSE(wrapper->finishWrite("", "grpc", "session", {}, {}));
-    EXPECT_FALSE(wrapper->finishWrite("", "grpc", "session", {}, {}));
-    EXPECT_EQ(started.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
-    EXPECT_FALSE(wrapper->finishWrite("", "grpc", "session", {}, {}));
-    ASSERT_EQ(started.wait_for(std::chrono::seconds(3)), std::future_status::ready);
-    // Original metadata re-registration exclusion is fail-fast; transfer uses
-    // its separate shared lock and remains available during this recovery.
-    EXPECT_FALSE(wrapper->finishWrite("", "during-recovery", "session", {}, {}));
+    EXPECT_EQ(observation.initial_meta_config.find("\"standby\""), std::string::npos);
+    EXPECT_CALL(*meta, FinishWrite("grpc", _, _, _)).Times(3).WillRepeatedly(Return(ER_INVALID_GRPCSTATUS));
+    for (int i = 0; i < 3; ++i) EXPECT_FALSE(wrapper->finishWrite("", "grpc", "session", {}, {}));
+    // Ordinary transport errors do not schedule metadata replacement; explicit
+    // NOT_LEADER and registration recovery are covered for both SDK modes below.
+    EXPECT_CALL(*meta, FinishWrite("still-serving", _, _, _)).WillOnce(Return(ER_OK));
+    EXPECT_TRUE(wrapper->finishWrite("", "still-serving", "session", {}, {}));
     BlockBuffers buffers(1);
     buffers[0].iovs.push_back({MemoryType::CPU, data.data(), data.size(), false});
     EXPECT_CALL(*transfer, LoadKvCaches(_, _, _)).WillOnce(Return(ER_OK));
     EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("default", {"uri"}, buffers), ER_OK);
-    unblock.run();
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-    bool ready = false;
-    while (!ready && std::chrono::steady_clock::now() < deadline) {
-        ready = wrapper->finishWrite("", "ready", "session", {}, {});
-        if (!ready) std::this_thread::yield();
-    }
-    EXPECT_TRUE(ready);
-    EXPECT_EQ(attempts->load(), 0); // No fallback or repeated re-registration needed.
+    wrapper->shutdown();
+    EXPECT_EQ(attempts->load(), 0);
 }
 
-class MetadataRecoveryTest: public ::testing::Test {
+class MetadataRecoveryTest: public ::testing::TestWithParam<bool> {
 protected:
     void SetUp() override {
         wrapper = initializeClient(false, "old", span, observation, std::make_shared<int>(0), &meta, nullptr,
-                                   nullptr, nullptr, interval, &factory, {"old", "standby"});
+                                   nullptr, nullptr, interval, &factory, {"old", "standby"}, GetParam());
         ASSERT_NE(wrapper, nullptr);
         EXPECT_CALL(*factory, getLeaderAddress(_, _, _)).Times(0);
     }
@@ -237,7 +211,7 @@ protected:
     std::shared_ptr<ClientWrapper> wrapper;
 };
 
-TEST_F(MetadataRecoveryTest, OnlyRegistrationErrorsRecoverAndEveryAttemptIsRateLimited) {
+TEST_P(MetadataRecoveryTest, OnlyRegistrationErrorsRecoverAndEveryAttemptIsRateLimited) {
     using Clock = std::chrono::steady_clock;
     auto first = std::make_unique<kv_cache_manager::MockMetaClient>();
     auto second = std::make_unique<kv_cache_manager::MockMetaClient>();
@@ -273,7 +247,7 @@ TEST_F(MetadataRecoveryTest, OnlyRegistrationErrorsRecoverAndEveryAttemptIsRateL
     EXPECT_GE(attempts[2] - attempts[1], interval);
 }
 
-TEST_F(MetadataRecoveryTest, RecoveryCoalescesSignalsKeepsServingAndStopsOnShutdown) {
+TEST_P(MetadataRecoveryTest, RecoveryCoalescesSignalsKeepsServingAndStopsOnShutdown) {
     using block_tree_cache_test::BoundedThread;
     auto candidate = std::make_unique<kv_cache_manager::MockMetaClient>();
     std::promise<void> entered, release;
@@ -312,7 +286,7 @@ TEST_F(MetadataRecoveryTest, RecoveryCoalescesSignalsKeepsServingAndStopsOnShutd
     EXPECT_FALSE(wrapper->finishWrite("", "stopped", "session", {}, {}));
 }
 
-TEST_F(MetadataRecoveryTest, NotLeaderDiscoversOnDemandAndFallsBackWhenAdvertisedAddressIsUnreachable) {
+TEST_P(MetadataRecoveryTest, NotLeaderDiscoversOnDemandAndFallsBackWhenAdvertisedAddressIsUnreachable) {
     auto next = std::make_unique<kv_cache_manager::MockMetaClient>();
     EXPECT_CALL(*factory, getLeaderAddress("old", _, _))
         .Times(2).WillRepeatedly(Return(std::string("unreachable-leader")));
@@ -333,6 +307,8 @@ TEST_F(MetadataRecoveryTest, NotLeaderDiscoversOnDemandAndFallsBackWhenAdvertise
     EXPECT_TRUE(awaitFinish("read"));
     std::this_thread::sleep_for(interval * 3);
 }
+
+INSTANTIATE_TEST_SUITE_P(PrefillAndDecodeSdkModes, MetadataRecoveryTest, ::testing::Bool());
 
 template<typename Match>
 Match hostStateFixture(const std::string& host, int64_t local, int64_t remote) {

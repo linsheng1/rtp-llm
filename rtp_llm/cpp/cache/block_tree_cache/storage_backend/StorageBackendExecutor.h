@@ -44,7 +44,7 @@ private:
     std::atomic<bool> bound_to_backend_{false};
 };
 std::shared_ptr<StorageBackendExecutor> makeStorageBackendExecutor(size_t thread_count, size_t queue_size,
-                                                                  bool async_payload = true);
+                                                                  bool reserve_completion = true);
 std::shared_ptr<StorageBackendExecutor> makeDefaultStorageBackendExecutor();
 
 }  // namespace rtp_llm

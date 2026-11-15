@@ -74,7 +74,7 @@ private:
     std::vector<std::pair<std::string, std::string>> requests_;
 };
 
-TEST(KVCMLocalTest, ManagerPreservesExplicitControlAndOriginalPrefillDisabledPublisher) {
+TEST(KVCMLocalTest, ManagerKeepsRemoteControlIndependentOfHbmPublicationSettings) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
     for (int mode = 0; mode < 10; ++mode) {
@@ -143,16 +143,6 @@ TEST(KVCMLocalTest, ManagerPreservesExplicitControlAndOriginalPrefillDisabledPub
         manager.block_tree_cache_->storage_backend_ = backend;
         auto reporter = std::make_shared<ControlOnlyReporter>();
         manager.initCacheEventPublisher(reporter);
-        if (mode == 0 || mode == 8) {
-            // Original P disabled publisher: no implicit control thread, RPC,
-            // heartbeat or admission disable. D's none case (9) stays active.
-            EXPECT_EQ(manager.cache_event_publisher_, nullptr);
-            EXPECT_TRUE(backend->remoteCacheEnabled());
-            EXPECT_EQ(manager.block_tree_cache_->tree()->event_publisher_, nullptr);
-            EXPECT_TRUE(reporter->requests().empty());
-            manager.stopCacheEventPublisher();
-            continue;
-        }
         ASSERT_NE(manager.cache_event_publisher_, nullptr);
         ASSERT_TRUE(reporter->waitFor("EVENT_NODE_REGISTER"));
         const auto waitForRemoteState = [&](bool expected) {
@@ -869,6 +859,7 @@ TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWire
             {"csa_kv", 36864}, {"hca_kv", 73728}, {"indexer_kv", 34816},
             {"csa_state", state_bytes}, {"swa_kv", swa_bytes * (bounded ? 4 : (dspark ? 8 : 5))}};
         kvcm::KVCMConfig::LocationSpecInfoMap expected_infos;
+        const bool merged = !ssd && (custom.empty() || custom.find("F_TP0") != std::string::npos);
         for (const auto& [tag, bytes] : expected_bytes) {
             const bool full = tag != "swa_kv" && tag != "csa_state";
             const auto& group = cache.topology().group(tag);
@@ -876,7 +867,7 @@ TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWire
             EXPECT_EQ(cache.blockSizeBytesForGroup(tag),
                       bytes * (role == RoleType::DECODE && !full ? shards : 1));
             for (int rank = 0; rank < cp; ++rank)
-                expected_infos[kvcm::genLocationSpecName(rank, (full ? "F" : "L") + tag, "DeepSeekV41")] = bytes;
+                expected_infos[kvcm::genLocationSpecName(rank, (full ? "F" : "L") + tag, "DeepSeekV41", merged)] += bytes;
         }
         if (bounded) {
             EXPECT_FALSE(cache.topology().group("decoder_swa_kv").policy.enable_prefix_reuse);
@@ -917,18 +908,54 @@ TEST(KVCMLocalTest, MirroredNativeV41DescriptorsGiveMatchingPrefillAndDecodeWire
         EXPECT_EQ(observed.backend_type, ssd ? "pace_ssd" : "pace");
         EXPECT_FALSE(observed.identity.empty());
         EXPECT_EQ(observed.infos, expected_infos);
-        // Location groups retain the original full tag names, independently
-        // of the compact KVCacheEvent schema used by the existing publisher.
-        EXPECT_EQ(observed.groups.count("F"), 0u);
-        EXPECT_EQ(observed.groups.count("FL"), 0u);
-        for (const auto& [tag, bytes] : expected_bytes) {
-            (void)bytes;
-            const bool full = tag != "swa_kv" && tag != "csa_state";
-            const std::string name = (full ? "F" : "L") + tag;
-            std::vector<std::string> specs;
-            for (int rank = 0; rank < cp; ++rank)
-                specs.push_back(kvcm::genLocationSpecName(rank, name, "DeepSeekV41"));
-            EXPECT_EQ(observed.groups.at(name), specs);
+        EXPECT_EQ(observed.groups.count("F"), 1u);
+        EXPECT_EQ(observed.groups.count("FL"), 1u);
+        EXPECT_EQ(observed.groups.count("F0"), merged ? 0u : 1u);
+        EXPECT_EQ(observed.groups.count("F1"), merged ? 0u : 1u);
+        EXPECT_EQ(observed.groups.count("F2"), merged ? 0u : 1u);
+        EXPECT_EQ(observed.groups.at("L3").size(), static_cast<size_t>(cp));
+        EXPECT_EQ(observed.groups.at("L4").size(), static_cast<size_t>(cp));
+        if (role == RoleType::PREFILL && cp == 1 && bounded && dspark && merged && custom.empty()) {
+            RemoteOperationRequestPB grouped;
+            grouped.set_op(REMOTE_OPERATION_READ);
+            grouped.set_timeout_ms(1000);
+            grouped.add_uris("pace://merged-full");
+            grouped.add_uri_block_counts(3);
+            for (const auto* tag : {"csa_kv", "hca_kv", "indexer_kv"}) {
+                grouped.add_group_tags(tag);
+                grouped.add_block_ids(environment.block_id);
+            }
+            EXPECT_CALL(*client, loadKvCachesForTag("csa_kv", kv_cache_manager::UriStrVec{"pace://merged-full"}, _, _))
+                .WillOnce(Invoke([&](const auto&, const auto&, auto& buffers, const auto&) {
+                    EXPECT_EQ(buffers.size(), 1u);
+                    if (buffers.size() != 1) return false;
+                    size_t bytes = 0, previous = 0;
+                    for (const auto& iov : buffers.front().iovs) {
+                        EXPECT_NE(iov.base, nullptr);
+                        EXPECT_GE(iov.size, previous);
+                        previous = iov.size;
+                        bytes += iov.size;
+                    }
+                    EXPECT_EQ(bytes, expected_bytes.at("csa_kv") + expected_bytes.at("hca_kv")
+                                     + expected_bytes.at("indexer_kv"));
+                    return true;
+                }));
+            RemoteOperationResponsePB response;
+            EXPECT_TRUE(backend->execute(grouped, response));
+            EXPECT_TRUE(response.payload_buffer_safe());
+            for (const uint32_t invalid : {0u, 2u, 4u}) {
+                auto malformed = grouped;
+                malformed.set_uri_block_counts(0, invalid);
+                RemoteOperationResponsePB rejected;
+                EXPECT_FALSE(backend->execute(malformed, rejected));
+                EXPECT_TRUE(rejected.payload_buffer_safe());
+            }
+            auto reversed = grouped;
+            reversed.set_group_tags(0, "hca_kv");
+            reversed.set_group_tags(1, "csa_kv");
+            RemoteOperationResponsePB rejected;
+            EXPECT_FALSE(backend->execute(reversed, rejected));
+            EXPECT_TRUE(rejected.payload_buffer_safe());
         }
         backend.backend->shutdown();
         return observed;
@@ -1299,7 +1326,7 @@ std::vector<std::pair<Code, bool>> failedCompletionCases(bool write = false) {
     return cases;
 }
 
-TEST(KVCMLocalTest, PrefillRestoresPlainSdkFailureAndTimeoutFreezeWithEitherSwitch) {
+TEST(KVCMLocalTest, PrefillUsesExplicitBufferProofForFailureAndTimeoutWithEitherSwitch) {
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
     using EC = kv_cache_manager::ClientErrorCode;
     for (const bool enabled : {false, true}) {
@@ -1307,7 +1334,6 @@ TEST(KVCMLocalTest, PrefillRestoresPlainSdkFailureAndTimeoutFreezeWithEitherSwit
             SCOPED_TRACE(::testing::Message() << "enabled=" << enabled << " ec=" << static_cast<int>(ec));
             autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
             const auto code = ec;
-            (void)safe; // P uses the original status contract, independent of D safety fields.
             ::rtp_llm::test::withDecodePublicationStartup([&] {
             auto            environment = makeBackendEnvironment("kvcm_completion_proof");
             auto            client      = std::make_shared<MockClientWrapper>();
@@ -1326,7 +1352,7 @@ TEST(KVCMLocalTest, PrefillRestoresPlainSdkFailureAndTimeoutFreezeWithEitherSwit
             const auto error    = readResult(*backend.backend, request, std::move(observation.match_meta));
             EXPECT_FALSE(error.ok());
             ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-            const bool unknown = code == EC::ER_SDK_TIMEOUT;
+            const bool unknown = !safe;
             EXPECT_FALSE(backend.backend->protected_quarantine_);
             EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), unknown);
             EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + (unknown ? 1u : 0u));
@@ -1334,7 +1360,48 @@ TEST(KVCMLocalTest, PrefillRestoresPlainSdkFailureAndTimeoutFreezeWithEitherSwit
             EXPECT_EQ(
                 backend.backend->quarantined_breakdown_[0][static_cast<size_t>(StorageQuarantineReason::SDK_TIMEOUT)]
                     .task_count,
-                unknown ? 1u : 0u);
+                unknown && code == EC::ER_SDK_TIMEOUT ? 1u : 0u);
+            });
+        }
+    }
+}
+
+TEST(KVCMLocalTest, PrefillRpcRequiresBufferProofIndependentlyOfTransferStatus) {
+    for (const bool enabled : {false, true}) for (const bool safe : {false, true}) {
+        for (const auto status : {REMOTE_TRANSFER_STATUS_FAILED, REMOTE_TRANSFER_STATUS_TIMEOUT}) {
+            autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
+            ::rtp_llm::test::withDecodePublicationStartup([&] {
+                auto environment = makeBackendEnvironment("prefill_rpc_buffer_proof");
+                auto first = std::make_shared<KVCMBroadcastState>();
+                auto second = std::make_shared<KVCMBroadcastState>();
+                second->execute = [=](const auto&, auto& response) {
+                    response.set_transfer_status(status);
+                    response.set_payload_buffer_safe(safe);
+                };
+                KVCMBroadcastRpcServer rank0(0, first), rank1(1, second);
+                ASSERT_TRUE(rank0.start()); ASSERT_TRUE(rank1.start());
+                auto broadcast = std::make_shared<BroadcastManager>(std::vector<std::string>{rank0.address(), rank1.address()});
+                ASSERT_TRUE(broadcast->init());
+                auto client = std::make_shared<MockClientWrapper>();
+                EXPECT_CALL(*client, initForPools(_, _, _, _)).WillOnce(Return(true));
+                EXPECT_CALL(*client, shutdown()).Times(1);
+                auto parallel = singleRankConfig();
+                parallel.role_type = RoleType::PREFILL;
+                parallel.tp_size = 2;
+                auto backend = makeBackend(environment, parallel, client, broadcast);
+                ASSERT_TRUE(initSingleRank(*backend.backend, environment));
+                const kv_cache_manager::Locations locations{{{"tp0_Fdefault", "pace://rank0"}, {"tp1_Fdefault", "pace://rank1"}}};
+                EXPECT_CALL(*client, match(_, _, _, _, _, _)).WillOnce(Return(std::make_pair(true, locations)));
+                auto request = makeStorageRequest(environment);
+                auto matched = match(*backend.backend, request);
+                ASSERT_TRUE(matched.success);
+                const auto refs = environment.device_pool->refCount(environment.block_id);
+                EXPECT_FALSE(readResult(*backend.backend, request, matched.match_meta).ok());
+                ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+                EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), !safe);
+                EXPECT_EQ(environment.device_pool->refCount(environment.block_id), refs + (safe ? 0u : 1u));
+                EXPECT_FALSE(backend.backend->protected_quarantine_);
+                backend.backend->shutdown();
             });
         }
     }
@@ -1345,7 +1412,9 @@ TEST(KVCMLocalTest, PrefillRpcPreservesExceptionalUnknownFromRawSdkAndStillAccep
     for (const bool enabled : {false, true}) {
         for (const bool throws : {false, true}) {
           for (const bool write : {false, true}) {
-            SCOPED_TRACE(::testing::Message() << "enabled=" << enabled << " throws=" << throws << " write=" << write);
+           for (const bool peer_rpc_failure : {false, true}) {
+            SCOPED_TRACE(::testing::Message() << "enabled=" << enabled << " throws=" << throws << " write=" << write
+                                                << " peer_rpc_failure=" << peer_rpc_failure);
             autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
             ::rtp_llm::test::withDecodePublicationStartup([&] {
                 auto destination = makeBackendEnvironment("prefill_rpc_destination");
@@ -1386,6 +1455,7 @@ TEST(KVCMLocalTest, PrefillRpcPreservesExceptionalUnknownFromRawSdkAndStillAccep
                 ASSERT_TRUE(initSingleRank(*worker.backend, worker_environment));
                 auto rank0 = std::make_shared<KVCMBroadcastState>();
                 auto rank1 = std::make_shared<KVCMBroadcastState>();
+                rank0->fail = peer_rpc_failure;
                 std::atomic<int> exceptional{0}, ordinary{0};
                 rank1->execute = [&](const auto& request, auto& response) {
                     (void)worker.backend->execute(request, response);
@@ -1417,7 +1487,7 @@ TEST(KVCMLocalTest, PrefillRpcPreservesExceptionalUnknownFromRawSdkAndStillAccep
                     allocation.write_session_id = "exception-boundary-session";
                     allocation.block_mask = kv_cache_manager::BlockMaskOffset{0};
                     allocation.locations = locations;
-                    EXPECT_CALL(*controller_client, getWriteLocation(_, _, _, _, _, 600, 0))
+                    EXPECT_CALL(*controller_client, getWriteLocation(_, _, _, _, _, 40, 0))
                         .WillOnce(Return(std::make_pair(true, allocation)));
                     if (throws) {
                         EXPECT_CALL(*controller_client, finishWrite(_, _, _, _, _)).Times(0);
@@ -1434,9 +1504,10 @@ TEST(KVCMLocalTest, PrefillRpcPreservesExceptionalUnknownFromRawSdkAndStillAccep
                 ASSERT_TRUE(waitForBackendOperationsForTest(*controller.backend));
                 EXPECT_EQ(exceptional.load(), throws ? 1 : 0);
                 EXPECT_EQ(ordinary.load(), throws ? 0 : 1);
-                EXPECT_EQ(destination.device_pool->isFrozen(destination.block_id), throws);
-                EXPECT_EQ(destination.device_pool->refCount(destination.block_id), refs + (throws ? 1u : 0u));
+                EXPECT_TRUE(destination.device_pool->isFrozen(destination.block_id));
+                EXPECT_EQ(destination.device_pool->refCount(destination.block_id), refs + 1u);
                 EXPECT_FALSE(controller.backend->protected_quarantine_);
+                rank0->fail = false; // The independent next request must still make progress.
                 ScopedReferencedBlocks next_destination(destination, 1), next_worker(worker_environment, 1);
                 ASSERT_EQ(next_destination.get(), next_worker.get());
                 auto next = makeStorageRequest(destination, {102}, 0, next_destination.get());
@@ -1448,19 +1519,19 @@ TEST(KVCMLocalTest, PrefillRpcPreservesExceptionalUnknownFromRawSdkAndStillAccep
                 controller.backend->shutdown();
                 worker.backend->shutdown();
             });
+           }
           }
         }
     }
 }
 
-TEST(KVCMLocalTest, PrefillFailedPayloadClosesOnceAndFreezesOnlyOriginalTimeout) {
+TEST(KVCMLocalTest, PrefillFailedPayloadClosesOnceAndFreezesOnlyUnprovenBuffers) {
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
     using EC = kv_cache_manager::ClientErrorCode;
     for (const bool enabled : {false, true}) {
         for (const auto& [ec, safe] : failedCompletionCases<EC>(/*write=*/true)) {
             autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
             const auto code = ec;
-            (void)safe;
             ::rtp_llm::test::withDecodePublicationStartup([&] {
             auto            environment = makeBackendEnvironment("kvcm_write_completion_proof");
             auto            client      = std::make_shared<MockClientWrapper>();
@@ -1474,7 +1545,7 @@ TEST(KVCMLocalTest, PrefillFailedPayloadClosesOnceAndFreezesOnlyOriginalTimeout)
             allocation.locations        = {{{"tp0_Fdefault", "pace://write_uri"}}};
             EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
                 .WillOnce(Return(std::make_pair(true, allocation)));
-            const bool unknown = code == EC::ER_SDK_TIMEOUT;
+            const bool unknown = !safe;
             // Original P policy: best-effort zero-mask close, even on timeout.
             // The mock performs no DMA; this does not establish SDK quiescence.
             EXPECT_CALL(*client, finishWrite(_, _, "pending-session",
@@ -1611,7 +1682,7 @@ private:
     std::shared_ptr<StorageBackendExecutor> delegate_;
 };
 
-TEST(KVCMLocalTest, PrefillInlineSettlementBypassesCompletionPostAndKeepsTimeoutFreeze) {
+TEST(KVCMLocalTest, RejectedPrefillCompletionPostDoesNoMetadataIoAndKeepsTimeoutFreeze) {
     for (const bool enabled : {false, true}) {
         for (const bool unknown : {false, true}) {
             autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", enabled ? "1" : "0");
@@ -1631,23 +1702,12 @@ TEST(KVCMLocalTest, PrefillInlineSettlementBypassesCompletionPostAndKeepsTimeout
                 location.locations = {{{"tp0_Fdefault", "pace://allocated"}}};
                 EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, _, 0))
                     .WillOnce(Return(std::make_pair(true, location)));
-                if (unknown) {
-                    // This is a returned legacy SDK_TIMEOUT, not the distinct
-                    // exceptional UNKNOWN tested above: original P attempts
-                    // exactly one zero-mask close and still freezes the source.
-                    EXPECT_CALL(*client, finishWrite(_, _, "fallback-open-session",
-                        ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{0}}),
-                        ::testing::IsEmpty())).WillOnce(Return(true));
-                } else {
-                    EXPECT_CALL(*client, finishWrite(_, _, "fallback-open-session",
-                        ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{1}}), _))
-                        .WillOnce(Return(true));
-                }
+                EXPECT_CALL(*client, finishWrite(_, _, _, _, _)).Times(0);
                 client->save_status = unknown ? kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT :
                                                kv_cache_manager::ClientErrorCode::ER_OK;
                 ASSERT_TRUE(backend.backend->write(backend.backend->prepareWrite(makeStorageRequest(environment))));
                 ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-                EXPECT_EQ(executor->rejected.load(), 0);
+                EXPECT_EQ(executor->rejected.load(), 1);
                 EXPECT_EQ(environment.device_pool->refCount(environment.block_id), refs + (unknown ? 1u : 0u));
                 EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), unknown);
                 EXPECT_FALSE(backend.backend->protected_quarantine_);
@@ -1799,7 +1859,7 @@ TEST(KVCMLocalTest, PrefillQueueRejectAndExpiryNeverStartSessionOrRetainUnknown)
                 block_tree_cache_detail::ScopeRollback unblock([&] { release.set_value(); });
                 block_tree_cache_detail::ScopeRollback cleanup([&] { unblock.run(); backend.backend->shutdown(); });
                 std::atomic<int> starts{0}, saves{0}, commits{0}, closes{0};
-                EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, 600, 0))
+                EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, 40, 0))
                     .WillRepeatedly(Invoke([&](const auto&, const auto&, const auto&, const auto&, const auto&, auto, auto) {
                         kv_cache_manager::WriteLocation value;
                         value.write_session_id = "prefill-" + std::to_string(++starts);
@@ -2195,7 +2255,7 @@ TEST(KVCMLocalTest, PrefillWorkerReportsSdkDispositionWithoutBackendWideStop) {
     });
 }
 
-TEST(KVCMLocalTest, PrefillFailedPaceBatchReleasesEveryDestinationGroupWithoutGlobalStop) {
+TEST(KVCMLocalTest, PrefillUnsafePaceBatchFreezesEveryDestinationGroupWithoutGlobalStop) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
@@ -2233,13 +2293,13 @@ TEST(KVCMLocalTest, PrefillFailedPaceBatchReleasesEveryDestinationGroupWithoutGl
     EXPECT_FALSE(backend.backend->protected_quarantine_);
     for (const auto& [tag, pool] : environment.pools_by_tag) {
         SCOPED_TRACE(tag);
-        EXPECT_FALSE(pool->isFrozen(environment.block_id));
-        EXPECT_EQ(pool->refCount(environment.block_id), references.at(tag));
+        EXPECT_TRUE(pool->isFrozen(environment.block_id));
+        EXPECT_EQ(pool->refCount(environment.block_id), references.at(tag) + 1u);
     }
     EXPECT_FALSE(backend.backend->hasUnresolvedExternalIo());
     backend.backend->shutdown();
     for (const auto& [tag, pool] : environment.pools_by_tag)
-        EXPECT_EQ(pool->refCount(environment.block_id), references.at(tag));
+        EXPECT_EQ(pool->refCount(environment.block_id), references.at(tag) + 1u);
     });
 }
 
@@ -2370,7 +2430,7 @@ TEST(KVCMLocalTest, InvalidMatchLocationReportsNoHitAndDoesNotDispatchPayload) {
     EXPECT_EQ(observation.match_meta, nullptr);
 }
 
-TEST(KVCMLocalTest, TP2PrefillUsesOriginalWorkersAndShutdownDrainsInlineSettlement) {
+TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement) {
     autil::EnvGuard decode_publish("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
     ::rtp_llm::test::withDecodePublicationStartup([&] {
     for (const auto& [write, late] : {std::make_pair(false, false), std::make_pair(false, true),
@@ -2401,7 +2461,7 @@ TEST(KVCMLocalTest, TP2PrefillUsesOriginalWorkersAndShutdownDrainsInlineSettleme
         auto parallel    = singleRankConfig();
         parallel.tp_size = 2;
         KVCacheConfig config;
-        config.kvcm_asyncwrapper_thread_num = 2;
+        config.kvcm_asyncwrapper_thread_num = 1;
         config.kvcm_asyncwrapper_queue_size = 0;
         auto backend =
             std::make_shared<BackendHandle>(makeBackend(*environment, parallel, client, broadcast, nullptr, false, config));
@@ -2473,12 +2533,25 @@ TEST(KVCMLocalTest, TP2PrefillUsesOriginalWorkersAndShutdownDrainsInlineSettleme
         ASSERT_EQ(next.wait_for(std::chrono::seconds(5)), std::future_status::ready);
         EXPECT_TRUE(next.get());
         if (late) {
-            // Delay the payload itself past the business deadline; Prefill has
-            // no async completion queue to park. The RPC budget stays distinct.
-            std::promise<void> never;
-            auto deadline_wait = never.get_future();
-            EXPECT_EQ(deadline_wait.wait_until(request.transfer_task->deadline()), std::future_status::timeout);
+            auto worker_entered = std::make_shared<std::promise<void>>();
+            auto worker = worker_entered->get_future();
+            std::promise<void> release_worker;
+            auto worker_released = release_worker.get_future().share();
+            block_tree_cache_detail::ScopeRollback unblock_worker([&] { release_worker.set_value(); });
+            ASSERT_TRUE(backend->backend->executor_->submit([worker_entered, worker_released] {
+                worker_entered->set_value();
+                worker_released.wait();
+            }, BlockTreeTaskClass::LOAD));
+            ASSERT_EQ(worker.wait_for(std::chrono::seconds(5)), std::future_status::ready);
             unblock.run();
+            const auto deadline = request.transfer_task->deadline();
+            // Observe successful RPC completion queued before the deadline, then
+            // delay only its settlement. A transport timeout is a different case.
+            while (backend->backend->executor_->queueSizes().completion == 0
+                   && std::chrono::steady_clock::now() < deadline)
+                ASSERT_EQ(result.wait_for(std::chrono::milliseconds(1)), std::future_status::timeout);
+            ASSERT_EQ(backend->backend->executor_->queueSizes().completion, 1u);
+            ASSERT_EQ(result.wait_until(deadline), std::future_status::timeout);
         }
         block_tree_cache_test::BoundedThread<void> stopping([backend, environment] { backend->backend->shutdown(); });
         if (!late) {
@@ -2501,14 +2574,25 @@ TEST(KVCMLocalTest, TP2PrefillUsesOriginalWorkersAndShutdownDrainsInlineSettleme
         stop_profile.dismiss();
         const std::string io_stage = write ? "write_io" : "read_io";
         const auto count = std::count_if(events.begin(), events.end(), [&](const auto& event) {
-            return event.record.stage == io_stage && event.record.kind == AsyncProfileKind::Execution;
+            return event.record.stage == io_stage && event.record.kind == AsyncProfileKind::Lifecycle;
         });
         EXPECT_EQ(count, write ? 2 : 1);
-        for (const auto& event : events) {
-            EXPECT_NE(event.record.stage, write ? "write_submit" : "read_submit");
-            EXPECT_NE(event.record.stage, write ? "write_complete" : "read_complete");
+        const auto trace = mergeAsyncProfileTrace(R"({"traceEvents":[]})", events);
+        EXPECT_EQ(trace.find("cache.transfer.storage_backend." + io_stage + "("), std::string::npos);
+        for (const auto* stage : {write ? "write_submit" : "read_submit", write ? "write_complete" : "read_complete"}) {
+            size_t executions = 0;
+            for (const auto& event : events) {
+                if (event.record.stage != stage)
+                    continue;
+                ++executions;
+                EXPECT_EQ(event.record.kind, AsyncProfileKind::Execution);
+                EXPECT_GT(event.record.start_tid, 0);
+                EXPECT_EQ(event.record.start_tid, event.end_tid);
+                EXPECT_GE(event.record.request_id, 0);
+                EXPECT_NE(trace.find(event.name), std::string::npos);
+            }
+            EXPECT_EQ(executions, write ? 2u : 1u) << stage;
         }
-
     }
     });
 }
@@ -2568,10 +2652,11 @@ TEST(KVCMLocalTest, PayloadReadFailurePropagatesToCompletion) {
     const auto error = readResult(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta));
     EXPECT_EQ(error.code(), ErrorCode::EXECUTION_EXCEPTION);
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-    // Ordinary Prefill SDK failures retain the baseline task-local cleanup policy.
-    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before);
-    EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
-    EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), tree_refs_before);
+    // A returned error without explicit buffer safety follows the upstream
+    // task-local freeze policy; it must not be downgraded to ordinary failure.
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
+    EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), tree_refs_before + 1);
 }
 
 TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {

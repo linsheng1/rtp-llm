@@ -176,7 +176,7 @@ TEST(KVCMInternalTest, FullLinearPolicyPreservesTheSameCanonicalFullIdentityAndS
                                         "tp1_Lz_linear"}));
 }
 
-TEST(KVCMInternalTest, Dsv41OriginalLocationGroupsPreserveSpecsAndWriteSelection) {
+TEST(KVCMInternalTest, Dsv41CompactGroupsPreserveSpecsAndWriteSelection) {
     const std::vector<std::string> tags{"hca_kv", "csa_kv", "indexer_kv", "csa_state", "swa_kv"};
     std::vector<GroupBase> groups;
     for (size_t i = 0; i < tags.size(); ++i) {
@@ -192,22 +192,34 @@ TEST(KVCMInternalTest, Dsv41OriginalLocationGroupsPreserveSpecsAndWriteSelection
     auto all_handles = full_handles;
     all_handles.insert(all_handles.end(), {{tags[3], 1}, {tags[4], 1}});
     GroupPolicy::LocationSpecGroups location_groups;
-    ASSERT_TRUE(policy.buildLocationSpecGroups(1, location_groups, "DeepSeekV41"));
-    const GroupPolicy::SpecNames full_specs{"F1_TP0", "F0_TP0", "F2_TP0"};
-    auto all_specs = full_specs;
-    all_specs.insert(all_specs.end(), {"S3_TP0", "S4_TP0"});
-    const std::string full_group = "Fcsa_kvFhca_kvFindexer_kv";
-    const std::string all_group = full_group + "Lcsa_stateLswa_kv";
-    const GroupPolicy::LocationSpecGroups expected{
-        {full_group, full_specs}, {all_group, all_specs},
-        {"Fhca_kv", {"F0_TP0"}}, {"Fcsa_kv", {"F1_TP0"}}, {"Findexer_kv", {"F2_TP0"}},
-        {"Lcsa_state", {"S3_TP0"}}, {"Lswa_kv", {"S4_TP0"}}};
-    EXPECT_EQ(location_groups, expected);
-    ASSERT_EQ(policy.spec_info_map().size(), 5u);
-    EXPECT_EQ(policy.groups().at(policy.spec_info_map().at("F0_TP0").group_id).tag, "hca_kv");
-    std::vector<std::string> selected;
-    ASSERT_TRUE(policy.getNeedWriteGroups(makeStorageRequest({full_handles, all_handles}), 2, selected));
-    EXPECT_EQ(selected, (std::vector<std::string>{full_group, all_group}));
+    for (const bool merge_full : {false, true}) {
+        SCOPED_TRACE(merge_full);
+        ASSERT_TRUE(policy.buildLocationSpecGroups(1, location_groups, "DeepSeekV41", merge_full));
+        const GroupPolicy::SpecNames full_specs = merge_full ? GroupPolicy::SpecNames{"F_TP0"} :
+                                                               GroupPolicy::SpecNames{"F1_TP0", "F0_TP0", "F2_TP0"};
+        auto all_specs = full_specs;
+        all_specs.insert(all_specs.end(), {"S3_TP0", "S4_TP0"});
+        GroupPolicy::LocationSpecGroups expected{
+            {"F", full_specs}, {"FL", all_specs}, {"L3", {"S3_TP0"}}, {"L4", {"S4_TP0"}}};
+        if (!merge_full) {
+            expected.insert({{"F0", {"F0_TP0"}}, {"F1", {"F1_TP0"}}, {"F2", {"F2_TP0"}}});
+        }
+        EXPECT_EQ(location_groups, expected);
+        ASSERT_EQ(policy.spec_info_map().size(), merge_full ? 3u : 5u);
+        if (merge_full) {
+            std::vector<std::string> members;
+            for (const auto id : policy.spec_info_map().at("F_TP0").group_ids)
+                members.push_back(policy.groups().at(id).tag);
+            EXPECT_EQ(members, (std::vector<std::string>{"csa_kv", "hca_kv", "indexer_kv"}));
+        } else {
+            const auto& info = policy.spec_info_map().at("F0_TP0");
+            EXPECT_EQ(policy.groups().at(info.group_id).tag, "hca_kv");
+            EXPECT_EQ(info.group_ids, (std::vector<int32_t>{info.group_id}));
+        }
+        std::vector<std::string> selected;
+        ASSERT_TRUE(policy.getNeedWriteGroups(makeStorageRequest({full_handles, all_handles}), 2, selected));
+        EXPECT_EQ(selected, (std::vector<std::string>{"F", "FL"}));
+    }
 }
 
 TEST(KVCMInternalTest, InvalidAggregateBuildDoesNotPublishPartialState) {

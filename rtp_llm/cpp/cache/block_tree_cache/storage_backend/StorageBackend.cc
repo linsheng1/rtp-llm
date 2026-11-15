@@ -44,12 +44,13 @@ struct StorageTaskState {
     struct Pin {
         DeviceBlockPoolPtr pool;
         BlockIdxType       block;
-        RemotePublicationPin publication;
     };
 
     StorageRequest   request;
     uint64_t                          trace_id{0};
     std::vector<Pin> pins;
+    // Allocated only for protected Decode I/O, never in each Prefill pin.
+    std::unique_ptr<std::vector<RemotePublicationPin>> publication_pins;
     std::shared_ptr<void> completion_resources;
     std::shared_ptr<StorageTaskState> quarantine_next;
     bool completion_protected{false};
@@ -58,12 +59,11 @@ struct StorageTaskState {
     std::atomic<bool>                 completion_started{false};
     void             finish() {
         std::call_once(finish_once, [this] {
-            for (Pin& pin : pins) {
-                if (pin.publication) {
-                    pin.publication.reset();
-                } else {
+            if (publication_pins) {
+                publication_pins->clear();
+            } else {
+                for (Pin& pin : pins)
                     pin.pool->decRef(pin.block, DeviceBlockRefType::REMOTE_CONNECTOR);
-                }
             }
             pins.clear();
             request.completion_admission.reset();
@@ -152,13 +152,12 @@ StorageWriteTask::StorageWriteTask(std::shared_ptr<storage_backend_detail::Stora
 StorageBackend::StorageBackend(std::shared_ptr<StorageBackendExecutor>        executor,
                                std::shared_ptr<BlockTreeCacheMetricsReporter> reporter,
                                int64_t                                        world_rank,
-                               std::chrono::milliseconds                      timeout,
-                               BlockTreeTaskClass read_task_class):
+                               std::chrono::milliseconds                      timeout):
     executor_(std::move(executor)),
     stage_metrics_reporter_(std::move(reporter)),
     stage_metrics_enabled_(stage_metrics_reporter_ && stage_metrics_reporter_->stageMetricsEnabled()),
     world_rank_(world_rank),
-    timeout_(timeout), read_task_class_(read_task_class) {}
+    timeout_(timeout) {}
 
 void StorageBackend::setStageMetricsReporter(std::shared_ptr<BlockTreeCacheMetricsReporter> reporter) {
     const bool enabled = reporter && reporter->stageMetricsEnabled();
@@ -475,23 +474,28 @@ StorageBackend::prepare(StorageRequest request, bool for_write, uint64_t trace_i
         // In particular, recording an acquired pin cannot allocate or lose it.
         std::unordered_set<BlockKey, BlockKeyHash> seen;
         std::vector<storage_backend_detail::StorageTaskState::Pin> sources;
-        for (const auto& row : state->request.handles) {
+        for (size_t key = 0; key < state->request.handles.size(); ++key) {
+            const auto& row = state->request.handles[key];
             for (const auto& handle : row) {
                 const auto& pool = devicePool(handle.tag);
                 auto add = [&](BlockIdxType block) {
                     if (seen.insert({pool.get(), block}).second) {
-                        sources.push_back({pool, block, {}});
+                        sources.push_back({pool, block});
                     }
                 };
                 add(handle.block);
-                for (const auto block : handle.peer_blocks) {
-                    add(block);
+                if (state->request.decode_peer_blocks) {
+                    const auto found = state->request.decode_peer_blocks->find(handle.tag);
+                    if (found != state->request.decode_peer_blocks->end())
+                        for (const auto block : found->second.at(key)) add(block);
                 }
             }
         }
+        state->publication_pins = std::make_unique<std::vector<RemotePublicationPin>>();
+        state->publication_pins->reserve(sources.size());
         state->pins.reserve(sources.size());
         for (auto& pin : sources) {
-            pin.publication = pin.pool->pinForRemotePublication(pin.block);
+            state->publication_pins->push_back(pin.pool->pinForRemotePublication(pin.block));
             state->pins.push_back(std::move(pin));
         }
         timer.finish(true);
@@ -520,6 +524,22 @@ void StorageBackend::validateRequest(const StorageRequest& request, bool allow_n
                             request.keys->size(),
                             request.handles.size());
     RTP_LLM_CHECK_WITH_INFO(!request.decode_completion || for_write, "Decode publication is write-only");
+    if (request.decode_peer_blocks) {
+        RTP_LLM_CHECK_WITH_INFO(for_write && request.decode_completion,
+                                "peer source blocks require a completed Decode write");
+        for (const auto& [tag, rows] : *request.decode_peer_blocks) {
+            RTP_LLM_CHECK_WITH_INFO(rows.size() == request.handles.size(), "Decode peer key count mismatch");
+            for (size_t key = 0; key < rows.size(); ++key) {
+                if (rows[key].empty()) continue;
+                const auto& handles = request.handles[key];
+                const auto found = std::find_if(handles.begin(), handles.end(),
+                                                [&](const auto& handle) { return handle.tag == tag; });
+                RTP_LLM_CHECK_WITH_INFO(found != handles.end(), "Decode peers have no source handle");
+                for (const auto peer : rows[key])
+                    RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(peer), "null Decode peer source block");
+            }
+        }
+    }
     for (size_t key_index = 0; key_index < request.handles.size(); ++key_index) {
         std::unordered_set<std::string> seen_tags;
         for (const auto& handle : request.handles[key_index]) {
@@ -533,11 +553,6 @@ void StorageBackend::validateRequest(const StorageRequest& request, bool allow_n
                                     "storage request has null block for tag=%s at key=%zu",
                                     handle.tag.c_str(),
                                     key_index);
-            RTP_LLM_CHECK_WITH_INFO(handle.peer_blocks.empty() || (for_write && request.decode_completion),
-                                    "peer source blocks require a completed Decode write");
-            for (const auto peer : handle.peer_blocks) {
-                RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(peer), "null Decode peer source block");
-            }
         }
     }
 }
@@ -573,7 +588,6 @@ void StorageBackend::match(StorageRequest request, MatchDone done) {
     auto       total    = stageTimer("match_total", request, "match", trace_id, AsyncProfileKind::Lifecycle);
     auto       queue    = stageTimer("match_queue_wait", request, "match", trace_id, AsyncProfileKind::Wait);
     const bool skip_remote = !remoteCacheEnabled();
-    const auto task_class = read_task_class_;
     dispatch([this, skip_remote, request = std::move(request), done = std::move(done), trace_id, total, queue](
                  Lifecycle outcome, Task finished) mutable {
         block_tree_cache_detail::ScopeRollback retire(std::move(finished));
@@ -605,7 +619,7 @@ void StorageBackend::match(StorageRequest request, MatchDone done) {
             callback.finish(true);
         }
         total.finish(success);
-    }, task_class, skip_remote);
+    }, BlockTreeTaskClass::LOAD, skip_remote);
 }
 
 void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done) {
@@ -617,7 +631,6 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
     auto       state    = prepare(std::move(request), false, trace_id);
     auto       queue    = stageTimer("read_queue_wait", state->request, "read", trace_id, AsyncProfileKind::Wait);
     const auto deadline    = state->request.transfer_task->deadline();
-    const auto task_class = read_task_class_;
     const bool skip_remote = !remoteCacheEnabled();
     dispatch(
         [this,
@@ -705,21 +718,6 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                     total.finish(success);
                 });
             };
-            if (!usesAsyncPayload(state->request, /*is_write=*/false) && !state->request.decode_completion) {
-                // Original synchronous payload: execute and settle on this
-                // worker, without allocating or posting an async continuation.
-                Task payload;
-                if (error.ok()) {
-                    try {
-                        payload = [this, state, match_meta] { readImpl(state->request, match_meta); };
-                    } catch (...) {
-                        settle_read({}, true, true, std::current_exception());
-                        return;
-                    }
-                }
-                settle_read(std::move(payload), true);
-                return;
-            }
             std::function<void(Task, bool, std::exception_ptr)> complete_read;
             try {
                 complete_read = storage_backend_detail::makeIoCompletion<Task>(
@@ -750,7 +748,7 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                 complete_read({}, false, std::current_exception());
             }
         },
-        task_class,
+        BlockTreeTaskClass::LOAD,
         skip_remote,
         deadline);
 }
@@ -848,17 +846,6 @@ bool StorageBackend::write(StorageWriteTask task) {
         };
         if (!run) {
             settle_write({}, true);
-            return;
-        }
-        if (!usesAsyncPayload(state->request, /*is_write=*/true) && !state->request.decode_completion) {
-            WriteResult payload;
-            try {
-                payload = [this, state](bool) { writeImpl(state->request); };
-            } catch (...) {
-                settle_write({}, true, true, std::current_exception());
-                return;
-            }
-            settle_write(std::move(payload), true);
             return;
         }
         std::function<void(WriteResult, bool, std::exception_ptr)> complete;

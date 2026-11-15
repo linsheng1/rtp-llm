@@ -36,9 +36,6 @@ class SharedTransferStageTimer;
 struct StorageBlockHandle {
     std::string  tag;
     BlockIdxType block{NULL_BLOCK_IDX};
-    // A Decode source owns all target P peers locally; replicas can name the
-    // same page. Only completed-Decode writes may carry this projection.
-    std::vector<BlockIdxType> peer_blocks;
 };
 
 struct StorageBackendMatchMeta {
@@ -103,6 +100,10 @@ struct StorageMatchResult {
     std::shared_ptr<StorageBackendMatchMeta> match_meta;
 };
 
+// Decode-only projected pages, indexed by group tag and canonical key.
+// Ordinary Prefill handles retain their original (tag, block) representation.
+using DecodePeerBlocks = std::unordered_map<std::string, std::vector<BlockIndicesType>>;
+
 struct StorageRequest {
     std::shared_ptr<const CacheKeysType> keys;
     // handles[i] contains every group block associated with (*keys)[i].
@@ -113,6 +114,7 @@ struct StorageRequest {
     std::optional<int64_t> request_id;
     std::optional<TransferTask> transfer_task;
     bool decode_completion{false};
+    std::shared_ptr<const DecodePeerBlocks> decode_peer_blocks;
     size_t computed_tokens{0};
     size_t published_tokens{0};
     std::optional<int64_t> prefill_computed_tokens;
@@ -181,8 +183,7 @@ public:
     explicit StorageBackend(std::shared_ptr<StorageBackendExecutor>        executor         = nullptr,
                             std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
                             int64_t                                        world_rank       = -1,
-                            std::chrono::milliseconds                      timeout = std::chrono::seconds(10),
-                            BlockTreeTaskClass read_task_class = BlockTreeTaskClass::LOAD);
+                            std::chrono::milliseconds                      timeout = std::chrono::seconds(10));
     virtual ~StorageBackend();
     // Atomic replacement allows attaching the cache reporter before or after init.
     void setStageMetricsReporter(std::shared_ptr<BlockTreeCacheMetricsReporter> reporter);
@@ -312,7 +313,6 @@ private:
     std::atomic<bool>                              stage_metrics_enabled_{false};
     const int64_t                                  world_rank_;
     const std::chrono::milliseconds                 timeout_;
-    const BlockTreeTaskClass read_task_class_;
     bool                                    init_attempted_{false};
     bool                                    initialized_{false};
 

@@ -10,10 +10,10 @@ namespace {
 
 class DefaultStorageBackendExecutor final: public StorageBackendExecutor {
 public:
-    DefaultStorageBackendExecutor(size_t thread_count, size_t queue_size, bool async_payload):
+    DefaultStorageBackendExecutor(size_t thread_count, size_t queue_size, bool reserve_completion):
         pool_(std::make_shared<BlockTreeTaskPool>(thread_count, queue_size, "remote_cache",
-                                                async_payload ? queue_size : 0)),
-        has_completion_reservations_(async_payload && queue_size != 0) {}
+                                                reserve_completion ? queue_size : 0)),
+        has_completion_reservations_(reserve_completion && queue_size != 0) {}
 
     ~DefaultStorageBackendExecutor() override {
         shutdown();
@@ -70,24 +70,21 @@ private:
 }  // namespace
 
 std::shared_ptr<StorageBackendExecutor> makeStorageBackendExecutor(size_t thread_count, size_t queue_size,
-                                                                  bool async_payload) {
+                                                                  bool reserve_completion) {
     if (thread_count == 0) {
         throw std::invalid_argument("StorageBackendExecutor thread count must be positive");
     }
-    // Original Prefill uses the configured pool size verbatim. In particular,
-    // its existing BACKGROUND limit is Q-64 when Q>64, exactly as in 9115.
-    if (!async_payload)
-        return std::make_shared<DefaultStorageBackendExecutor>(thread_count, queue_size, false);
-    // Decode retains background capacity plus reserved LOAD slots.
+    // Preserve upstream LOAD headroom on both roles; only Decode requires
+    // pre-I/O completion reservations.
     constexpr size_t reserve = BlockTreeTaskPool::kLoadReservedSlots;
     if (queue_size > std::numeric_limits<size_t>::max() - reserve) {
         throw std::invalid_argument("StorageBackendExecutor queue size is too large");
     }
-    return std::make_shared<DefaultStorageBackendExecutor>(thread_count, queue_size == 0 ? 0 : queue_size + reserve, true);
+    return std::make_shared<DefaultStorageBackendExecutor>(thread_count, queue_size == 0 ? 0 : queue_size + reserve, reserve_completion);
 }
 
 std::shared_ptr<StorageBackendExecutor> makeDefaultStorageBackendExecutor() {
-    return makeStorageBackendExecutor(/*thread_count=*/4, /*queue_size=*/1024);
+    return makeStorageBackendExecutor(/*thread_count=*/4, BlockTreeTaskPool::kDefaultQueueSize);
 }
 
 }  // namespace rtp_llm

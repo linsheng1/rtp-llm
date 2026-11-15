@@ -136,7 +136,7 @@ TEST(StorageBackendExecutorTest, PostedRecordDoesNotOwnPoolAndShutdownWaitsForIt
     record.reset();
 }
 
-TEST(StorageBackendExecutorTest, OriginalPrefillQueueCapacityAndDecodeReservationStaySeparate) {
+TEST(StorageBackendExecutorTest, UpstreamLoadHeadroomAndDecodeCompletionReservationStaySeparate) {
     for (const bool async_payload : {false, true}) {
         auto executor = makeStorageBackendExecutor(1, 66, async_payload);
         std::promise<void> entered, release;
@@ -148,9 +148,8 @@ TEST(StorageBackendExecutorTest, OriginalPrefillQueueCapacityAndDecodeReservatio
         ASSERT_TRUE(executor->start());
         ASSERT_TRUE(executor->submit([&] { entered.set_value(); released.wait(); }));
         ASSERT_EQ(started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-        // 9115 passed Q=66 unchanged, with two BACKGROUND slots after its
-        // existing LOAD reserve. Decode retains the current expanded queue.
-        const size_t expected = async_payload ? 66 : 2;
+        // Both roles retain upstream Q background entries plus 64 LOAD slots.
+        const size_t expected = 66;
         for (size_t i = 0; i < expected; ++i)
             ASSERT_TRUE(executor->submit([&] { ++completed; }, BlockTreeTaskClass::BACKGROUND));
         EXPECT_FALSE(executor->submit([] {}, BlockTreeTaskClass::BACKGROUND));
@@ -1016,7 +1015,8 @@ TEST(StorageBackendTest, CompletedDecodePinsUniquePeersAndReleasesBudgetOnReject
     request.decode_completion = true;
     request.completion_admission = budget->tryAcquire(32, std::nullopt);
     ASSERT_TRUE(request.completion_admission);
-    for (auto& row : request.handles) { row.front().peer_blocks = {first, second, first}; }
+    request.decode_peer_blocks = std::make_shared<DecodePeerBlocks>(DecodePeerBlocks{
+        {request.handles.front().front().tag, {{first, second, first}, {first, second, first}}}});
     auto task = backend.prepareWrite(std::move(request));
     EXPECT_EQ(pool->refCount(first), 2u);
     EXPECT_EQ(pool->refCount(second), 2u);
@@ -1052,7 +1052,8 @@ TEST(StorageBackendTest, MidPreparePinFailureRollsBackRecordedPinsAndBudgetExact
     auto budget = std::make_shared<kvcm::DecodePublicationAccounting>(32, 1);
     auto request = makeRequest(first);
     request.decode_completion = true;
-    request.handles.front().front().peer_blocks = {first, second};
+    request.decode_peer_blocks = std::make_shared<DecodePeerBlocks>(DecodePeerBlocks{
+        {request.handles.front().front().tag, {{first, second}}}});
     request.completion_admission = budget->tryAcquire(32, std::nullopt);
     ASSERT_TRUE(request.completion_admission);
     EXPECT_THROW(backend.prepareWrite(std::move(request)), std::bad_alloc);
@@ -1098,7 +1099,8 @@ TEST(StorageBackendTest, PeerProjectionRejectedForReadsAndOrdinaryWritesBeforePi
     ProtectedBackend backend;
     ASSERT_TRUE(initBackend(backend, pool));
     auto request = makeRequest(block);
-    request.handles.front().front().peer_blocks = {block};
+    request.decode_peer_blocks = std::make_shared<DecodePeerBlocks>(DecodePeerBlocks{
+        {request.handles.front().front().tag, {{block}}}});
     EXPECT_ANY_THROW(backend.prepareWrite(request));
     EXPECT_ANY_THROW(backend.read(request, nullptr, {}));
     request.decode_completion = true;
