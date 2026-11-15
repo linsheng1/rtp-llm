@@ -44,12 +44,13 @@ struct StorageTaskState {
     struct Pin {
         DeviceBlockPoolPtr pool;
         BlockIdxType       block;
-        std::function<void()> publication_release;
     };
 
     StorageRequest   request;
     uint64_t                          trace_id{0};
     std::vector<Pin> pins;
+    // Allocated only for protected Decode I/O, never in each Prefill pin.
+    std::unique_ptr<std::vector<RemotePublicationPin>> publication_pins;
     std::shared_ptr<void> completion_resources;
     std::shared_ptr<StorageTaskState> quarantine_next;
     bool completion_protected{false};
@@ -58,15 +59,13 @@ struct StorageTaskState {
     std::atomic<bool>                 completion_started{false};
     void             finish() {
         std::call_once(finish_once, [this] {
-            for (const Pin& pin : pins) {
-                if (pin.publication_release) {
-                    pin.publication_release();
-                } else {
+            if (publication_pins) {
+                publication_pins->clear();
+            } else {
+                for (Pin& pin : pins)
                     pin.pool->decRef(pin.block, DeviceBlockRefType::REMOTE_CONNECTOR);
-                }
             }
             pins.clear();
-            request.completion_budget_lease.reset();
             request.completion_admission.reset();
             completion_resources.reset();
         });
@@ -80,20 +79,49 @@ struct StorageTaskState {
 // Keep one copy of the settlement state across the worker and RPC callback.
 template<typename Result, typename Settle>
 auto makeIoCompletion(std::shared_ptr<StorageBackendExecutor> executor,
-                      std::shared_ptr<StorageTaskState> state, Settle settle) {
-    auto continuation = std::make_shared<Settle>(std::move(settle));
-    return [executor = std::move(executor), state = std::move(state), continuation](Result result, bool asynchronous) {
+                      std::shared_ptr<StorageTaskState> state, Settle settle,
+                      BlockTreeTaskClass task_class) {
+    struct Continuation {
+        Settle settle;
+        Result result{};
+        // Carry failures directly: building a throwing std::function in a
+        // bad_alloc catch can itself allocate and lose lifecycle retirement.
+        std::exception_ptr error;
+        explicit Continuation(Settle&& value): settle(std::move(value)) {}
+    };
+    // One pre-I/O allocation holds both the settlement and its terminal result.
+    auto continuation = std::make_shared<Continuation>(std::move(settle));
+    std::shared_ptr<BlockTreeTaskPool::Completion> reservation;
+    if (state->request.decode_completion && executor->hasCompletionReservations()) {
+        reservation = executor->reserveCompletion([continuation]() mutable {
+            continuation->settle(std::move(continuation->result), true, false, std::move(continuation->error));
+        }, task_class);
+        if (!reservation) throw StorageOperationBufferSafeFailure("storage business completion capacity rejected before I/O");
+    }
+    return [executor = std::move(executor), state = std::move(state), continuation,
+            reservation = std::move(reservation)](Result result, bool asynchronous, std::exception_ptr error) mutable {
         if (state->completion_started.exchange(true))
             return;
+        if (asynchronous && reservation) {
+            continuation->result = std::move(result);
+            continuation->error = std::move(error);
+            // This accepted obligation cannot be rejected by stopAdmission or
+            // a deque allocation at terminal CQ time. Never settle SDK/metadata
+            // business on a notifying CQ/driver lane.
+            RTP_LLM_CHECK(reservation->post());
+            reservation.reset();
+            return;
+        }
+        reservation.reset(); // Synchronous/no-I/O result abandons the unused reservation.
         if (asynchronous) {
             try {
-                if (executor->submitCompletion([continuation, result]() mutable {
-                        (*continuation)(std::move(result), true);
+                if (executor->submitCompletion([continuation, result, error]() mutable {
+                        continuation->settle(std::move(result), true, false, std::move(error));
                     }))
                     return;
             } catch (...) {}
         }
-        (*continuation)(std::move(result), !asynchronous);
+        continuation->settle(std::move(result), !asynchronous, false, std::move(error));
     };
 }
 
@@ -446,23 +474,28 @@ StorageBackend::prepare(StorageRequest request, bool for_write, uint64_t trace_i
         // In particular, recording an acquired pin cannot allocate or lose it.
         std::unordered_set<BlockKey, BlockKeyHash> seen;
         std::vector<storage_backend_detail::StorageTaskState::Pin> sources;
-        for (const auto& row : state->request.handles) {
+        for (size_t key = 0; key < state->request.handles.size(); ++key) {
+            const auto& row = state->request.handles[key];
             for (const auto& handle : row) {
                 const auto& pool = devicePool(handle.tag);
                 auto add = [&](BlockIdxType block) {
                     if (seen.insert({pool.get(), block}).second) {
-                        sources.push_back({pool, block, {}});
+                        sources.push_back({pool, block});
                     }
                 };
                 add(handle.block);
-                for (const auto block : handle.peer_blocks) {
-                    add(block);
+                if (state->request.decode_peer_blocks) {
+                    const auto found = state->request.decode_peer_blocks->find(handle.tag);
+                    if (found != state->request.decode_peer_blocks->end())
+                        for (const auto block : found->second.at(key)) add(block);
                 }
             }
         }
+        state->publication_pins = std::make_unique<std::vector<RemotePublicationPin>>();
+        state->publication_pins->reserve(sources.size());
         state->pins.reserve(sources.size());
         for (auto& pin : sources) {
-            pin.publication_release = pin.pool->pinForRemotePublication(pin.block);
+            state->publication_pins->push_back(pin.pool->pinForRemotePublication(pin.block));
             state->pins.push_back(std::move(pin));
         }
         timer.finish(true);
@@ -491,6 +524,22 @@ void StorageBackend::validateRequest(const StorageRequest& request, bool allow_n
                             request.keys->size(),
                             request.handles.size());
     RTP_LLM_CHECK_WITH_INFO(!request.decode_completion || for_write, "Decode publication is write-only");
+    if (request.decode_peer_blocks) {
+        RTP_LLM_CHECK_WITH_INFO(for_write && request.decode_completion,
+                                "peer source blocks require a completed Decode write");
+        for (const auto& [tag, rows] : *request.decode_peer_blocks) {
+            RTP_LLM_CHECK_WITH_INFO(rows.size() == request.handles.size(), "Decode peer key count mismatch");
+            for (size_t key = 0; key < rows.size(); ++key) {
+                if (rows[key].empty()) continue;
+                const auto& handles = request.handles[key];
+                const auto found = std::find_if(handles.begin(), handles.end(),
+                                                [&](const auto& handle) { return handle.tag == tag; });
+                RTP_LLM_CHECK_WITH_INFO(found != handles.end(), "Decode peers have no source handle");
+                for (const auto peer : rows[key])
+                    RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(peer), "null Decode peer source block");
+            }
+        }
+    }
     for (size_t key_index = 0; key_index < request.handles.size(); ++key_index) {
         std::unordered_set<std::string> seen_tags;
         for (const auto& handle : request.handles[key_index]) {
@@ -504,11 +553,6 @@ void StorageBackend::validateRequest(const StorageRequest& request, bool allow_n
                                     "storage request has null block for tag=%s at key=%zu",
                                     handle.tag.c_str(),
                                     key_index);
-            RTP_LLM_CHECK_WITH_INFO(handle.peer_blocks.empty() || (for_write && request.decode_completion),
-                                    "peer source blocks require a completed Decode write");
-            for (const auto peer : handle.peer_blocks) {
-                RTP_LLM_CHECK_WITH_INFO(!isNullBlockIdx(peer), "null Decode peer source block");
-            }
         }
     }
 }
@@ -613,7 +657,8 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
             auto io = error.ok() ? stageTimer("read_io", state->request, "read", state->trace_id, io_kind) :
                                    SharedTransferStageTimer{};
             auto settle_read = [this, state, error, done = std::move(done), total, io, io_kind,
-                                finished = std::move(finished)](Task result, bool) mutable {
+                                finished = std::move(finished)](Task result, bool, bool before_io = false,
+                                                               std::exception_ptr failure = {}) mutable {
                 block_tree_cache_detail::ScopeRollback retire(std::move(finished));
                 storage_backend_detail::invokeCallback(this, [&] {
                     std::optional<StorageQuarantineReason> quarantine_reason;
@@ -624,47 +669,45 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                                 complete.emplace(nullptr, "read_complete", state->request.request_id.value_or(-1), 0,
                                                  state->request.handles.size(), world_rank_, "storage_backend",
                                                  state->trace_id, CacheStageContext::storage("read"));
+                            if (failure) std::rethrow_exception(failure);
                             result();
                             if (state->request.transfer_task->expired()) {
                                 error = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, "storage read deadline exceeded");
                             }
                         } catch (const StorageOperationTimeout& exception) {
-                            if (state->completion_protected) {
-                                quarantineTask(state, /*is_write=*/false, exception.reason());
+                            if (!before_io) {
+                                quarantine_reason = exception.reason();
+                                quarantineTask(state, /*is_write=*/false, *quarantine_reason);
                             }
-                            error             = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, exception.what());
-                            quarantine_reason = exception.reason();
+                            error = ErrorInfo(ErrorCode::DEADLINE_EXCEEDED, exception.what());
                         } catch (const StorageOperationCompletionUnknown& exception) {
-                            if (state->completion_protected) {
-                                quarantineTask(state, /*is_write=*/false, exception.reason());
+                            if (!before_io) {
+                                quarantine_reason = exception.reason();
+                                quarantineTask(state, /*is_write=*/false, *quarantine_reason);
                             }
-                            error             = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
-                            quarantine_reason = exception.reason();
+                            error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
                         } catch (const StorageOperationBufferSafeFailure& exception) {
                             error = ErrorInfo(state->request.transfer_task->expired() ? ErrorCode::DEADLINE_EXCEEDED :
                                                                                         ErrorCode::EXECUTION_EXCEPTION,
                                               exception.what());
                         } catch (const std::exception& exception) {
-                            if (state->completion_protected) {
-                                quarantineTask(state, /*is_write=*/false, StorageQuarantineReason::INVALID_RESPONSE);
+                            if (!before_io && state->completion_protected) {
                                 quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
+                                quarantineTask(state, /*is_write=*/false, *quarantine_reason);
                             }
                             error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, exception.what());
                         } catch (...) {
-                            if (state->completion_protected) {
-                                quarantineTask(state, /*is_write=*/false, StorageQuarantineReason::INVALID_RESPONSE);
+                            if (!before_io && state->completion_protected) {
                                 quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
+                                quarantineTask(state, /*is_write=*/false, *quarantine_reason);
                             }
                             error = ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "unknown storage read failure");
                         }
                         io.finish(error.ok());
                     }
                     auto settle = stageValue("read_settle", state->request, "read", state->trace_id);
-                    if (quarantine_reason) {
-                        quarantineTask(state, /*is_write=*/false, *quarantine_reason);
-                    } else {
-                        state->finish();
-                    }
+                    // A recorded reason was already quarantined before fallible reporting.
+                    if (!quarantine_reason) state->finish();
                     settle.finish(true);
                     const bool success = error.ok();
                     if (done) {
@@ -675,9 +718,18 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                     total.finish(success);
                 });
             };
-            auto complete_read = storage_backend_detail::makeIoCompletion<Task>(executor_, state, std::move(settle_read));
+            std::function<void(Task, bool, std::exception_ptr)> complete_read;
+            try {
+                complete_read = storage_backend_detail::makeIoCompletion<Task>(
+                    executor_, state, settle_read, BlockTreeTaskClass::LOAD);
+            } catch (...) {
+                // Completion preparation failed before readAsyncImpl/readImpl.
+                // No external I/O can own the destination, even on bad_alloc.
+                settle_read({}, false, true, std::current_exception());
+                return;
+            }
             if (!error.ok()) {
-                complete_read({}, false);
+                complete_read({}, false, {});
                 return;
             }
             try {
@@ -688,12 +740,12 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                                    state->request.handles.size(), world_rank_, "storage_backend",
                                    state->trace_id, CacheStageContext::storage("read"));
                 if (readAsyncImpl(state->request, match_meta, [complete_read](Task result) mutable {
-                        complete_read(std::move(result), true);
+                        complete_read(std::move(result), true, {});
                     }))
                     return;
-                complete_read([this, state, match_meta] { readImpl(state->request, match_meta); }, false);
+                complete_read([this, state, match_meta] { readImpl(state->request, match_meta); }, false, {});
             } catch (...) {
-                complete_read([error = std::current_exception()] { std::rethrow_exception(error); }, false);
+                complete_read({}, false, std::current_exception());
             }
         },
         BlockTreeTaskClass::LOAD,
@@ -738,7 +790,8 @@ bool StorageBackend::write(StorageWriteTask task) {
         auto io = run ? stageTimer("write_io", state->request, "write", state->trace_id, io_kind) :
                         SharedTransferStageTimer{};
         auto settle_write = [this, state, total, io, io_kind, run, finished = std::move(finished)](
-                                WriteResult result, bool on_worker) mutable {
+                                WriteResult result, bool on_worker, bool before_io = false,
+                                std::exception_ptr failure = {}) mutable {
             block_tree_cache_detail::ScopeRollback retire(std::move(finished));
             storage_backend_detail::invokeCallback(this, [&] {
                 bool success = false;
@@ -750,32 +803,33 @@ bool StorageBackend::write(StorageWriteTask task) {
                             complete.emplace(nullptr, "write_complete", state->request.request_id.value_or(-1), 0,
                                              state->request.handles.size(), world_rank_, "storage_backend",
                                              state->trace_id, CacheStageContext::storage("write"));
+                        if (failure) std::rethrow_exception(failure);
                         if (result)
                             result(on_worker);
                         success = !state->request.transfer_task->expired();
                     } catch (const StorageOperationTimeout& error) {
-                        quarantine_reason = error.reason();
-                        if (state->completion_protected) {
+                        if (!before_io) {
+                            quarantine_reason = error.reason();
                             quarantineTask(state, /*is_write=*/true, *quarantine_reason);
                         }
-                        RTP_LLM_LOG_WARNING("StorageBackend write timed out; quarantining request pins: %s", error.what());
+                        RTP_LLM_LOG_WARNING("StorageBackend write timed out: %s", error.what());
                     } catch (const StorageOperationCompletionUnknown& error) {
-                        quarantine_reason = error.reason();
-                        if (state->completion_protected) {
+                        if (!before_io) {
+                            quarantine_reason = error.reason();
                             quarantineTask(state, /*is_write=*/true, *quarantine_reason);
                         }
-                        RTP_LLM_LOG_WARNING("StorageBackend write completion is unknown; quarantining request pins: %s",
+                        RTP_LLM_LOG_WARNING("StorageBackend write completion is unknown: %s",
                                             error.what());
                     } catch (const StorageOperationBufferSafeFailure& error) {
                         RTP_LLM_LOG_WARNING("StorageBackend payload-safe write failure: %s", error.what());
                     } catch (const std::exception& error) {
-                        if (state->completion_protected) {
+                        if (!before_io && state->completion_protected) {
                             quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
                             quarantineTask(state, /*is_write=*/true, *quarantine_reason);
                         }
                         RTP_LLM_LOG_ERROR("StorageBackend write failed: %s", error.what());
                     } catch (...) {
-                        if (state->completion_protected) {
+                        if (!before_io && state->completion_protected) {
                             quarantine_reason = StorageQuarantineReason::INVALID_RESPONSE;
                             quarantineTask(state, /*is_write=*/true, *quarantine_reason);
                         }
@@ -784,11 +838,8 @@ bool StorageBackend::write(StorageWriteTask task) {
                     io.finish(success);
                 }
                 auto settle = stageValue("write_settle", state->request, "write", state->trace_id);
-                if (quarantine_reason) {
-                    quarantineTask(state, /*is_write=*/true, *quarantine_reason);
-                } else {
-                    state->finish();
-                }
+                // A recorded reason was already quarantined before fallible reporting.
+                if (!quarantine_reason) state->finish();
                 settle.finish(true);
                 total.finish(success);
             });
@@ -797,7 +848,16 @@ bool StorageBackend::write(StorageWriteTask task) {
             settle_write({}, true);
             return;
         }
-        auto complete = storage_backend_detail::makeIoCompletion<WriteResult>(executor_, state, std::move(settle_write));
+        std::function<void(WriteResult, bool, std::exception_ptr)> complete;
+        try {
+            complete = storage_backend_detail::makeIoCompletion<WriteResult>(
+                executor_, state, settle_write, BlockTreeTaskClass::BACKGROUND);
+        } catch (...) {
+            // No startWriteImpl/writeImpl call has occurred. Preserve the
+            // original error without manufacturing an UNKNOWN buffer owner.
+            settle_write({}, false, true, std::current_exception());
+            return;
+        }
         try {
             std::optional<TransferStageTimer> submit;
             if (io_kind == AsyncProfileKind::Lifecycle)
@@ -806,13 +866,13 @@ bool StorageBackend::write(StorageWriteTask task) {
                                state->trace_id, CacheStageContext::storage("write"));
             if (state->request.completion_admission)
                 state->request.completion_admission->onRunning();
-            if (startWriteImpl(state->request, [complete](WriteResult result) { complete(std::move(result), true); }))
+            if (startWriteImpl(state->request, [complete](WriteResult result) { complete(std::move(result), true, {}); }))
                 return;
         } catch (...) {
-            complete([error = std::current_exception()](bool) { std::rethrow_exception(error); }, false);
+            complete({}, false, std::current_exception());
             return;
         }
-        complete({}, false);
+        complete({}, false, {});
     }, BlockTreeTaskClass::BACKGROUND, skip_remote, state->request.transfer_task->deadline());
     return admitted && !skip_remote;
 }

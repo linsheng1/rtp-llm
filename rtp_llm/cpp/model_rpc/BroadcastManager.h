@@ -21,6 +21,12 @@
 
 namespace rtp_llm {
 
+// Only a local preflight which has not entered gRPC may give this proof.
+class BroadcastRpcNotStarted: public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+
 inline bool isGrpcConnectFailure(const grpc::Status& status) {
     if (status.error_code() != grpc::StatusCode::UNAVAILABLE) {
         return false;
@@ -33,7 +39,7 @@ inline bool isGrpcConnectFailure(const grpc::Status& status) {
 }
 
 template<typename RequestPB, typename ResponsePB>
-class BroadcastResult {
+class BroadcastResult: public std::enable_shared_from_this<BroadcastResult<RequestPB, ResponsePB>> {
 public:
     using DoneCallback = std::function<void()>;
 
@@ -223,6 +229,22 @@ public:
         }
     }
 
+    // CQ is terminal even if allocating a diagnostic string failed. Preserve
+    // the original callback obligation with a conservative aggregate failure.
+    void finishRankWithoutSummary(size_t rank) noexcept {
+        std::vector<DoneCallback> callbacks;
+        {
+            std::lock_guard<std::mutex> lock(wait_done_mutex_);
+            if (already_done_.load()) return;
+            grpc_status_failure_seen_ = true;
+            if (rank < finished_.size() && !finished_[rank]) { finished_[rank] = true; ++finished_count_; }
+            if (rank < rpc_succeeded_.size()) rpc_succeeded_[rank] = false;
+            if (finished_count_ == static_cast<int>(finished_.size())) finishLocked(callbacks);
+        }
+        wait_done_cv_.notify_all();
+        for (auto& callback : callbacks) { try { callback(); } catch (...) {} }
+    }
+
 private:
     friend class BroadcastManager;
 
@@ -335,22 +357,33 @@ public:
         }
 
         auto result = std::make_shared<ResultT>(contexts, request_id, std::move(direction), connect_failure_reporter_);
+        std::vector<std::shared_ptr<CompletionTag<ResultT>>> tags;
+        tags.reserve(worker_size);
+        for (size_t rank = 0; rank < worker_size; ++rank) tags.push_back(std::make_shared<CompletionTag<ResultT>>(result, rank));
         for (int rank = 0; rank < worker_size; ++rank) {
             auto& ctx = result->worker_contexts_.at(rank);
             try {
-                auto reader = rpc_call(ctx->stub, ctx->client_context, ctx->request, completion_queue_.get());
+                // Prepared ownership exists before gRPC may retain a raw tag/context.
+                // Ambiguous throws keep this anchor until a real CQ completion.
+                tags[rank]->anchor = tags[rank];
+                auto reader = [&] {
+                    try { return rpc_call(ctx->stub, ctx->client_context, ctx->request, completion_queue_.get()); }
+                    catch (const BroadcastRpcNotStarted&) {
+                        tags[rank]->anchor.reset(); // No Finish/raw tag handoff and no CQ can arrive.
+                        throw;
+                    }
+                }();
                 if (!reader) {
                     throw std::runtime_error("broadcast rpc call returned null reader");
                 }
-                auto tag = std::make_unique<CompletionTag<ResultT>>(result, static_cast<size_t>(rank));
-                reader->Finish(&ctx->response, &ctx->status, tag.get());
-                (void)tag.release();
+                reader->Finish(&ctx->response, &ctx->status, tags[rank].get());
             } catch (const std::exception& error) {
                 if (fatal_on_error) {
                     RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d err=%s %s", rank, error.what(), rpc_tag.c_str());
                 }
                 for (size_t pending = rank; pending < worker_size; ++pending) {
-                    result->finishRank(pending, false);
+                    try { result->finishRank(pending, false); }
+                    catch (...) { result->finishRankWithoutSummary(pending); }
                 }
                 break;
             } catch (...) {
@@ -358,7 +391,8 @@ public:
                     RTP_LLM_FAIL("broadcast rpc dispatch failed, rank=%d unknown error %s", rank, rpc_tag.c_str());
                 }
                 for (size_t pending = rank; pending < worker_size; ++pending) {
-                    result->finishRank(pending, false);
+                    try { result->finishRank(pending, false); }
+                    catch (...) { result->finishRankWithoutSummary(pending); }
                 }
                 break;
             }
@@ -375,6 +409,7 @@ private:
     struct CompletionTagBase {
         virtual ~CompletionTagBase() = default;
         virtual void complete(bool ok) = 0;
+        virtual void releaseFromCq() noexcept { delete this; }
     };
 
     template<typename ResultT>
@@ -382,8 +417,11 @@ private:
         CompletionTag(std::shared_ptr<ResultT> result, size_t rank): result(std::move(result)), rank(rank) {}
 
         void complete(bool ok) override {
-            result->finishRank(rank, ok);
+            try { result->finishRank(rank, ok); }
+            catch (...) { result->finishRankWithoutSummary(rank); }
         }
+        void releaseFromCq() noexcept override { auto keep_alive = std::move(anchor); }
+        std::shared_ptr<CompletionTag> anchor;
 
         std::shared_ptr<ResultT> result;
         size_t                   rank;
@@ -393,7 +431,8 @@ private:
         void* raw_tag = nullptr;
         bool  ok      = false;
         while (completion_queue_->Next(&raw_tag, &ok)) {
-            std::unique_ptr<CompletionTagBase> tag(static_cast<CompletionTagBase*>(raw_tag));
+            std::unique_ptr<CompletionTagBase, void (*)(CompletionTagBase*)> tag(
+                static_cast<CompletionTagBase*>(raw_tag), [](CompletionTagBase* value) { value->releaseFromCq(); });
             try {
                 tag->complete(ok);
             } catch (const std::exception& error) {

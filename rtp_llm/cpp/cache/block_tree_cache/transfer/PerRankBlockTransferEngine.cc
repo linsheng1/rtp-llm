@@ -19,8 +19,6 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
-#include "rtp_llm/cpp/utils/RemoteCacheConfig.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferBatchAsyncContext.h"
 
 namespace rtp_llm {
 
@@ -29,91 +27,6 @@ namespace {
 std::shared_ptr<TransferAsyncContext> invalidTransferContext(size_t block_count) {
     return std::make_shared<CompletedTransferAsyncContext>(
         ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid block transfer request"), block_count);
-}
-
-// Metadata follows the same physical allocations as the payload. HOST/DISK
-// records pack multiple member tags; keep those regions independent. Existing
-// task references, not this callback, protect the source/destination buffers.
-struct RegionOriginTransfer {
-    std::shared_ptr<IBlockPool>   source;
-    std::shared_ptr<IBlockPool>   target;
-    BlockIdxType                  source_block;
-    BlockIdxType                  target_block;
-    uint64_t                      source_incarnation;
-    uint64_t                      target_incarnation;
-    std::string                   tag;
-    PhysicalDecodeOrigins::Origin origin;
-};
-
-std::shared_ptr<IBlockPool> originPool(const GroupSet& group, Tier tier, size_t member) {
-    if (tier == Tier::DEVICE)
-        return group.devicePools().at(member);
-    if (tier == Tier::HOST)
-        return group.hostPool();
-    if (tier == Tier::DISK)
-        return group.diskPool();
-    return nullptr;
-}
-
-std::vector<RegionOriginTransfer> prepareOriginTransfers(const std::vector<TransferDescriptor>& descriptors,
-                                                         const std::vector<const GroupSet*>&    groups) {
-    std::vector<RegionOriginTransfer> transfers;
-    bool                              collect = true;
-    for (size_t index = 0; index < descriptors.size(); ++index) {
-        const auto&  descriptor   = descriptors[index];
-        const auto&  group        = *groups[index];
-        const size_t source_count = descriptor.source_tier == Tier::DEVICE ? group.groupTags().size() : 1;
-        const size_t target_count = descriptor.target_tier == Tier::DEVICE ? group.groupTags().size() : 1;
-        if (descriptor.source_blocks.size() != source_count || descriptor.target_blocks.size() != target_count
-            || ((descriptor.source_tier == Tier::DEVICE || descriptor.target_tier == Tier::DEVICE)
-                && group.devicePools().size() != group.groupTags().size()))
-            continue;  // Let the existing executor validate malformed payload geometry.
-        for (size_t member = 0; member < group.groupTags().size(); ++member) {
-            const auto source = originPool(group, descriptor.source_tier, member);
-            const auto target = originPool(group, descriptor.target_tier, member);
-            if (!source || !target)
-                continue;
-            const auto  source_block = descriptor.source_blocks.at(descriptor.source_tier == Tier::DEVICE ? member : 0);
-            const auto  target_block = descriptor.target_blocks.at(descriptor.target_tier == Tier::DEVICE ? member : 0);
-            const auto& tag          = group.groupTags()[member];
-            const auto  source_incarnation = source->decodeOriginIncarnation(source_block);
-            const auto  origin             = source->decodeOrigin(source_block, tag);
-            if (origin && collect)
-                (void)target->enableDecodeOriginTracking();
-            const auto target_incarnation = target->decodeOriginIncarnation(target_block);
-            // Unknown sources and failed transfers must not inherit a previous
-            // destination's source assertion. Never clear a newer allocation.
-            target->bindDecodeOrigin(target_block, target_incarnation, tag, nullptr);
-            if (origin && collect && source_incarnation != 0 && target_incarnation != 0) {
-                try {
-                    transfers.push_back({source,
-                                         target,
-                                         source_block,
-                                         target_block,
-                                         source_incarnation,
-                                         target_incarnation,
-                                         tag,
-                                         origin});
-                } catch (const std::bad_alloc&) {
-                    transfers.clear();
-                    collect = false;
-                }
-            }
-        }
-    }
-    return transfers;
-}
-
-void completeOriginTransfers(const std::vector<RegionOriginTransfer>& transfers, bool success) {
-    if (!success)
-        return;
-    for (const auto& transfer : transfers) {
-        if (transfer.source->decodeOriginIncarnation(transfer.source_block) == transfer.source_incarnation
-            && transfer.source->decodeOrigin(transfer.source_block, transfer.tag) == transfer.origin) {
-            transfer.target->bindDecodeOrigin(
-                transfer.target_block, transfer.target_incarnation, transfer.tag, transfer.origin);
-        }
-    }
 }
 
 // One loop pair owns this many blocks, split equally by direction. Every group
@@ -188,7 +101,6 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
     max_descriptors_per_batch_(max_descriptors_per_batch),
     enable_disk_cache_(enable_disk_cache),
     transfer_worker_count_(transfer_worker_count),
-    track_decode_origins_(remoteCacheDecodePublicationEnabled()),
     crc_slot_count_(btc_crc_slot_count) {
     RTP_LLM_CHECK(max_descriptors_per_batch > 0);
     RTP_LLM_CHECK(transfer_worker_count > 0 && transfer_worker_count <= std::numeric_limits<size_t>::max() / 2);
@@ -389,48 +301,12 @@ std::shared_ptr<TransferAsyncContext> PerRankBlockTransferEngine::execute(Transf
            }))
         return invalidTransferContext(descriptors.size());
     if (async_) {
-        TransferWorkLoop::BeforeCompleteCallback before_complete;
-        if (track_decode_origins_) {
-            auto origins    = prepareOriginTransfers(descriptors, group_sets);
-            before_complete = [origins = std::move(origins)](const TransferResult& result) {
-                completeOriginTransfers(origins, result.ok());
-            };
-        }
         auto&      loops  = isLoadTransfer(source, target) ? load_loops_ : offload_loops_;
         auto&      next   = isLoadTransfer(source, target) ? next_load_ : next_offload_;
         const auto worker = loops.size() == 1 ? 0 : next.fetch_add(1, std::memory_order_relaxed) % loops.size();
-        return loops[worker]->execute(std::move(task), std::move(before_complete));
+        return loops[worker]->execute(std::move(task));
     }
-    const auto submit = [&] { return legacy_->execute(std::move(task), group_sets); };
-    if (!track_decode_origins_)
-        return submit();
-    auto origins = prepareOriginTransfers(descriptors, group_sets);
-    if (origins.empty())
-        return submit();
-    std::shared_ptr<TransferBatchAsyncContext> observed;
-    try {
-        observed = std::make_shared<TransferBatchAsyncContext>(descriptors.size());
-    } catch (const std::bad_alloc&) {
-        // Attribution is optional; the already-cleared destination remains
-        // unknown and ordinary transfer semantics stay unchanged.
-        return submit();
-    }
-    auto context = submit();
-    if (!context)
-        return context;
-    context->onDone([observed, origins = std::move(origins)](TransferResult result) {
-        try {
-            completeOriginTransfers(origins, result.ok());
-        } catch (const std::exception& error) {
-            RTP_LLM_LOG_WARNING("local transfer source attribution unavailable: %s", error.what());
-        } catch (...) {
-            RTP_LLM_LOG_WARNING("local transfer source attribution unavailable");
-        }
-        // Do not expose completion to waitDone/done/result/onDone callers
-        // before the metadata settlement above. No new GPU sync is needed.
-        observed->complete(std::move(result));
-    });
-    return observed;
+    return legacy_->execute(std::move(task), group_sets);
 }
 
 void PerRankBlockTransferEngine::waitForIdle() {
