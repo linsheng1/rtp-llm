@@ -2494,12 +2494,16 @@ TEST(KVCMLocalTest, PayloadReadFailurePropagatesToCompletion) {
     ASSERT_NE(observation.match_meta, nullptr);
 
     const auto ref_count_before = environment.device_pool->refCount(environment.block_id);
+    const auto tree_refs_before = environment.device_pool->treeRefCount(environment.block_id);
     EXPECT_CALL(*client_wrapper, loadKvCachesForTag("default", kv_cache_manager::UriStrVec{"read_uri"}, _, _))
         .WillOnce(Return(false));
-    EXPECT_FALSE(read(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta)));
-    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + 1);
-    EXPECT_TRUE(environment.device_pool->isFrozen(environment.block_id));
-    EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), 1u);
+    const auto error = readResult(*backend.backend, makeStorageRequest(environment), std::move(observation.match_meta));
+    EXPECT_EQ(error.code(), ErrorCode::EXECUTION_EXCEPTION);
+    ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
+    // Ordinary Prefill SDK failures retain the baseline task-local cleanup policy.
+    EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before);
+    EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+    EXPECT_EQ(environment.device_pool->treeRefCount(environment.block_id), tree_refs_before);
 }
 
 TEST(KVCMLocalTest, PayloadReadTimeoutFreezesOnlyDestinationBlock) {
