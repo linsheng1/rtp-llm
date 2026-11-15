@@ -39,6 +39,7 @@ cc_test_wrapper(
     deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + [
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:client",
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:subscriber",
+        "//rtp_llm/cpp/cache/block_tree_cache",  # ScopeRollback used by the recovery test.
         "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

@@ -43,7 +43,8 @@ private:
     // Executors cannot be restarted or shared by multiple backend lifecycles.
     std::atomic<bool> bound_to_backend_{false};
 };
-std::shared_ptr<StorageBackendExecutor> makeStorageBackendExecutor(size_t thread_count, size_t queue_size);
+std::shared_ptr<StorageBackendExecutor> makeStorageBackendExecutor(size_t thread_count, size_t queue_size,
+                                                                  bool async_payload = true);
 std::shared_ptr<StorageBackendExecutor> makeDefaultStorageBackendExecutor();
 
 }  // namespace rtp_llm

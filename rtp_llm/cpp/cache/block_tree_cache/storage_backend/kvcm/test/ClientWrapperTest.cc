@@ -13,6 +13,7 @@
 #include <thread>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/ClientWrapper.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/SdkBufferSafety.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/test/MockKVCMClient.h"
@@ -32,6 +33,7 @@ using ::testing::SetArgReferee;
 
 struct InitObservation {
     const kv_cache_manager::RegistSpan* registration_descriptor = nullptr;
+    std::string                         initial_meta_config;
     void*                               registration_base       = nullptr;
     size_t                              registration_size       = 0;
 };
@@ -89,7 +91,7 @@ initializeClient(bool                                                  enable_vi
             .WillRepeatedly(DoAll(SetArgReferee<0>(std::vector<std::string>{endpoint + "_resolved"}), Return(true)));
     } else if (reinit_attempts) {
         EXPECT_CALL(*subscriber_ptr, getAddresses(_))
-            .WillRepeatedly(DoAll(SetArgReferee<0>(std::vector<std::string>{endpoint}), Return(true)));
+            .WillRepeatedly(DoAll(SetArgReferee<0>(endpoints.empty() ? std::vector<std::string>{endpoint} : endpoints), Return(true)));
     } else {
         EXPECT_CALL(*subscriber_ptr, getAddresses(_)).Times(0);
     }
@@ -102,7 +104,8 @@ initializeClient(bool                                                  enable_vi
     EXPECT_CALL(*meta_client, GetStorageConfig()).WillOnce(ReturnRef(storage_config));
     if (reinit_attempts) {
         EXPECT_CALL(*factory_ptr, createMetaClient(_, _))
-            .WillOnce(Invoke([&meta_client](const std::string&, const kv_cache_manager::InitParams&) {
+            .WillOnce(Invoke([&meta_client, &observation](const std::string& config, const kv_cache_manager::InitParams&) {
+                observation.initial_meta_config = config;
                 return std::move(meta_client);
             }))
             .WillRepeatedly(
@@ -118,7 +121,8 @@ initializeClient(bool                                                  enable_vi
                 }));
     } else {
         EXPECT_CALL(*factory_ptr, createMetaClient(_, _))
-            .WillOnce(Invoke([&meta_client](const std::string&, const kv_cache_manager::InitParams&) {
+            .WillOnce(Invoke([&meta_client, &observation](const std::string& config, const kv_cache_manager::InitParams&) {
+                observation.initial_meta_config = config;
                 return std::move(meta_client);
             }));
     }
@@ -147,6 +151,59 @@ initializeClient(bool                                                  enable_vi
         return nullptr;
     }
     return wrapper;
+}
+
+TEST(ClientWrapperTest, PrefillUsesOriginalAddressListAndGrpcRecoveryWithoutBlockingTransfer) {
+    using namespace kv_cache_manager;
+    std::array<char, 32> data{};
+    RegistSpan span{data.data(), data.size()};
+    InitObservation observation;
+    MockMetaClient* old = nullptr;
+    MockTransferClient* transfer = nullptr;
+    MockClientFactory* factory = nullptr;
+    auto attempts = std::make_shared<std::atomic<int>>(0);
+    auto wrapper = initializeClient(false, "old", span, observation, std::make_shared<int>(0), &old,
+        attempts, &transfer, nullptr, std::chrono::milliseconds(80), &factory, {"old", "standby"}, false);
+    ASSERT_NE(wrapper, nullptr);
+    EXPECT_NE(observation.initial_meta_config.find("\"old\""), std::string::npos);
+    EXPECT_NE(observation.initial_meta_config.find("\"standby\""), std::string::npos);
+    EXPECT_CALL(*factory, getLeaderAddress(_, _, _)).Times(0);
+    auto next = std::make_unique<MockMetaClient>();
+    EXPECT_CALL(*next, FinishWrite("ready", _, _, _)).WillOnce(Return(ER_OK));
+    std::promise<void> entered, release;
+    auto started = entered.get_future();
+    auto released = release.get_future().share();
+    block_tree_cache_detail::ScopeRollback unblock([&] { release.set_value(); });
+    block_tree_cache_detail::ScopeRollback cleanup([&] { unblock.run(); wrapper->shutdown(); });
+    EXPECT_CALL(*factory, createMetaClient(_, _)).WillOnce(Invoke([&](const std::string& config, const auto&) {
+        EXPECT_NE(config.find("\"old\""), std::string::npos);
+        EXPECT_NE(config.find("\"standby\""), std::string::npos);
+        entered.set_value();
+        released.wait();
+        return std::move(next);
+    }));
+    EXPECT_CALL(*old, FinishWrite("grpc", _, _, _)).Times(3).WillRepeatedly(Return(ER_INVALID_GRPCSTATUS));
+    EXPECT_FALSE(wrapper->finishWrite("", "grpc", "session", {}, {}));
+    EXPECT_FALSE(wrapper->finishWrite("", "grpc", "session", {}, {}));
+    EXPECT_EQ(started.wait_for(std::chrono::milliseconds(0)), std::future_status::timeout);
+    EXPECT_FALSE(wrapper->finishWrite("", "grpc", "session", {}, {}));
+    ASSERT_EQ(started.wait_for(std::chrono::seconds(3)), std::future_status::ready);
+    // Original metadata re-registration exclusion is fail-fast; transfer uses
+    // its separate shared lock and remains available during this recovery.
+    EXPECT_FALSE(wrapper->finishWrite("", "during-recovery", "session", {}, {}));
+    BlockBuffers buffers(1);
+    buffers[0].iovs.push_back({MemoryType::CPU, data.data(), data.size(), false});
+    EXPECT_CALL(*transfer, LoadKvCaches(_, _, _)).WillOnce(Return(ER_OK));
+    EXPECT_EQ(wrapper->loadKvCachesForTagWithStatus("default", {"uri"}, buffers), ER_OK);
+    unblock.run();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    bool ready = false;
+    while (!ready && std::chrono::steady_clock::now() < deadline) {
+        ready = wrapper->finishWrite("", "ready", "session", {}, {});
+        if (!ready) std::this_thread::yield();
+    }
+    EXPECT_TRUE(ready);
+    EXPECT_EQ(attempts->load(), 0); // No fallback or repeated re-registration needed.
 }
 
 class MetadataRecoveryTest: public ::testing::Test {

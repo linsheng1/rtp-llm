@@ -1,3 +1,4 @@
+#include <limits>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -1218,8 +1219,8 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
     if (request->has_remote_request()
         && (request->remote_request().op() == REMOTE_OPERATION_READ
             || request->remote_request().op() == REMOTE_OPERATION_WRITE)) {
-        if (request->remote_request().timeout_ms() <= 0) {
-            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "remote task budget must be positive");
+        if (request->remote_request().timeout_ms() < 0) {
+            return grpc::Status(grpc::StatusCode::INVALID_ARGUMENT, "remote task budget must not be negative");
         }
         const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                       context->deadline() - std::chrono::system_clock::now())
@@ -1229,7 +1230,9 @@ void LocalRpcServer::reportCacheStatusTime(int64_t request_begin_time_us) {
         }
         bounded_request.CopyFrom(*request);
         bounded_request.mutable_remote_request()->set_timeout_ms(
-            std::min<int64_t>(request->remote_request().timeout_ms(), remaining_ms));
+            std::min<int64_t>(request->remote_request().timeout_ms() > 0 ?
+                                  request->remote_request().timeout_ms() : std::numeric_limits<int32_t>::max(),
+                              remaining_ms));
         request = &bounded_request;
     }
     if (!cache_manager->executeFunction(*request, *response)) {

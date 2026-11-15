@@ -321,8 +321,8 @@ bool KVCacheManager::init() {
     }
 
     coordinator_manager_->setCPSlotMapper(cp_slot_mapper_);
-    coordinator_manager_->setSkipRemoteReusedWrite(pd_sep_config_.role_type == RoleType::PREFILL
-                                                  && kv_cache_config_.kvcm_min_replica_count <= 1);
+    // Preserve original Prefill publication/refresh for remote-loaded prefixes.
+    coordinator_manager_->setSkipRemoteReusedWrite(false);
     RTP_LLM_CHECK_WITH_INFO(coordinator_manager_->init(), "CoordinatorCacheManager init failed");
     // Observe real pool capacity, including asynchronous eviction and lease release.
     const auto capacity_changed = allocationChangeCallback();
@@ -910,6 +910,10 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
 void KVCacheManager::initCacheEventPublisher(std::shared_ptr<KVCacheEventReporter> reporter) {
     try {
         const auto& publisher_type = kv_cache_config_.kv_cache_event_publisher_type;
+        // Original Prefill honors disabled publication without starting an
+        // implicit control/heartbeat service. Explicit kvcm publication remains.
+        if (parallelism_config_.role_type != RoleType::DECODE
+            && (publisher_type.empty() || publisher_type == "none")) return;
         if (warmup_ || parallelism_config_.pp_size != 1 || parallelism_config_.tp_rank != 0 || !block_tree_cache_) {
             return;
         }

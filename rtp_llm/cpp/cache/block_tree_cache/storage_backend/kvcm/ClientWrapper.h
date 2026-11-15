@@ -126,6 +126,11 @@ private:
                   const std::vector<std::string>&      tags);
     using MetaClientMap = std::map<std::string, std::shared_ptr<kv_cache_manager::MetaClient>>;
     bool initMetaClient(const std::string& unique_id, KVCMConfigPtr config);
+    // Original Prefill metadata recovery; Decode's discovery remains separate.
+    bool reinit(const std::string& unique_id, ConfigMap::iterator& config_iter,
+                MetaClientMap::iterator& meta_client_iter);
+    bool tryReinit(const std::string& unique_id);
+    bool reinitAllMetaClients();
     std::shared_ptr<kv_cache_manager::MetaClient> getMetaClient(const std::string& unique_id);
     bool checkError(kv_cache_manager::ClientErrorCode ec,
                     const std::shared_ptr<kv_cache_manager::MetaClient>& client);
@@ -142,6 +147,8 @@ private:
     ConfigMap                config_map_;
     MetaClientMap            meta_client_map_;
     std::vector<std::string> address_snapshot_;
+    std::shared_mutex reinit_mutex_;
+    std::atomic<int> grpc_error_count_{0};
     // Only shutdown takes this lock exclusively; recovery must not reject calls.
     std::shared_mutex rr_mutex_;
     // Transfer I/O remains available while metadata clients are re-registering.

@@ -642,16 +642,16 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         env_name="RECO_ASYNCWRAPPER_THREAD_NUM",
         bind_to=(kv_cache_config, "kvcm_asyncwrapper_thread_num"),
         type=int,
-        default=4,
-        help="Remote Cache 读写共用的业务线程数，独立于 BTC。单 rank 本地搬运池使用相同的线程数。",
+        default=16,
+        help="Remote Cache 原业务线程数，独立于 BTC。Prefill 在业务/RPC线程执行搬运；Decode使用独立搬运池。",
     )
     kv_cache_group.add_argument(
         "--kvcm_asyncwrapper_queue_size",
         env_name="RECO_ASYNCWRAPPER_QUEUE_SIZE",
         bind_to=(kv_cache_config, "kvcm_asyncwrapper_queue_size"),
         type=int,
-        default=10000,
-        help="Remote Cache 业务队列容量，另为读任务预留 64 个位置。各 RTP 搬运池也用此值配置队列容量。0 表示不限长度。",
+        default=1000,
+        help="Remote Cache 原业务池大小。Prefill沿用原BACKGROUND容量；Decode另保留LOAD位置和完成容量。0表示不限长度。",
     )
     kv_cache_group.add_argument(
         "--kvcm_get_broadcast_timeout",
@@ -659,7 +659,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "kvcm_get_broadcast_timeout"),
         type=int,
         default=15000,
-        help="兼容旧参数；BTC remote GET广播使用整体任务剩余预算",
+        help="Prefill remote GET广播超时；Decode使用整体任务剩余预算",
     )
     kv_cache_group.add_argument(
         "--kvcm_put_broadcast_timeout",
@@ -667,7 +667,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "kvcm_put_broadcast_timeout"),
         type=int,
         default=15000,
-        help="兼容旧参数；BTC remote PUT广播使用整体任务剩余预算",
+        help="Prefill remote PUT广播超时；Decode使用整体任务剩余预算",
     )
     kv_cache_group.add_argument(
         "--kvcm_client_config",

@@ -177,6 +177,8 @@ public:
             "KVCM operation failed before submission or after completed payload"));
         completion_unknown_failure_ = std::make_exception_ptr(StorageOperationCompletionUnknown(
             "KVCM payload completion unknown", StorageQuarantineReason::INVALID_RESPONSE));
+        payload_exception_failure_ = std::make_exception_ptr(StorageOperationPayloadExceptionUnknown(
+            "KVCM SDK exception after possible payload submission", StorageQuarantineReason::INVALID_RESPONSE));
         completion_timeout_failure_ = std::make_exception_ptr(StorageOperationTimeout(
             "KVCM payload transfer timed out", StorageQuarantineReason::SDK_TIMEOUT));
     }
@@ -434,7 +436,9 @@ public:
             // pools or change inference/SDK outcomes.
             RTP_LLM_LOG_WARNING("KVCM payload observer unavailable: %s", error.what());
         }
-        {
+        // Original Prefill executes SDK I/O in the RPC/outer worker.
+        // Only Decode needs the separately queued payload execution.
+        if (is_decode_role_) {
             const auto capacity = kv_cache_config_.kvcm_asyncwrapper_queue_size;
             if (parallelism_config_.tp_size > 1) {
                 const auto workers = kv_cache_config_.kvcm_storage_thread_num;
@@ -572,9 +576,8 @@ public:
         return {request.local_matched_blocks_num + locations_view.size(), std::move(meta)};
     }
 
-    bool usesAsyncPayload(const StorageRequest& request, bool is_write) const noexcept {
-        (void)request; (void)is_write;
-        return true;
+    bool usesAsyncPayload(const StorageRequest&, bool) const noexcept {
+        return is_decode_role_;
     }
 
     bool readAsync(const StorageRequest&                           request,
@@ -824,7 +827,7 @@ public:
                 collector.remote_get_write_location_time_us = elapsedTimeUs(stage_start);
             });
             return client_wrapper_->getWriteLocation(
-                "", trace_id, keys, /*tokens=*/{}, location_spec_group_names, /*write_timeout_seconds=*/40,
+                "", trace_id, keys, /*tokens=*/{}, location_spec_group_names, /*write_timeout_seconds=*/is_decode_role_ ? 40 : 600,
                 kv_cache_config_.kvcm_min_replica_count);
         }();
         RTP_LLM_CHECK_WITH_INFO(success, "KVCM StartWrite failed");
@@ -978,6 +981,12 @@ public:
 
     void settleWriteFailure(const StorageRequest& request, WritePublication& write, bool source_may_be_touched) {
         if (!decode_publication_enabled_) {
+            // A caught SDK exception is explicitly UNKNOWN, unlike a returned
+            // legacy FAILED. Keep its destination pending, without replaying
+            // a commit or issuing a zero-mask abort into possible late I/O.
+            try { throw; }
+            catch (const StorageOperationPayloadExceptionUnknown&) { return; }
+            catch (...) {}
             // Preserve the original P best-effort zero-mask close on failure.
             // This legacy policy is not a proof of destination quiescence.
             closeUnusedWrite(write, /*require_not_started=*/false);
@@ -1169,6 +1178,9 @@ public:
         } catch (...) {
             // executePayload records buffer safety even when the SDK throws.
             RTP_LLM_LOG_WARNING("KVCM rank payload execution failed");
+            response.set_transfer_status(response.payload_buffer_safe() ? REMOTE_TRANSFER_STATUS_FAILED :
+                                          REMOTE_TRANSFER_STATUS_EXCEPTION_UNKNOWN);
+            return false;
         }
         response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
         return false;
@@ -1782,27 +1794,35 @@ private:
             return TransferResult::TIMEOUT;
         }
         if (proof) proof->started(); // Before the SDK wrapper can submit, including throw/inline completion.
-        if (operation == REMOTE_OPERATION_READ) {
-            const auto ec = client_wrapper_->loadKvCachesForTagWithStatus(
-                client_tag, uris, buffers, trace_info, &completion,
-                task.deadline());
-            if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
-                return TransferResult::TIMEOUT;
+        try {
+            if (operation == REMOTE_OPERATION_READ) {
+                const auto ec = client_wrapper_->loadKvCachesForTagWithStatus(
+                    client_tag, uris, buffers, trace_info, &completion,
+                    is_decode_role_ ? std::optional<Clock::time_point>(task.deadline()) : std::nullopt);
+                if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
+                    return TransferResult::TIMEOUT;
+                }
+                if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
+                    return TransferResult::FAILED;
+                }
+            } else {
+                auto [ec, result] = client_wrapper_->saveKvCachesForTagWithStatus(
+                    client_tag, uris, buffers, trace_info, &completion,
+                    is_decode_role_ ? std::optional<Clock::time_point>(task.deadline()) : std::nullopt);
+                if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
+                    return TransferResult::TIMEOUT;
+                }
+                if (ec != kv_cache_manager::ClientErrorCode::ER_OK || (!result.empty() && result.size() != uris.size())) {
+                    return TransferResult::FAILED;
+                }
+                actual_uris = std::move(result);
             }
-            if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
-                return TransferResult::FAILED;
+        } catch (...) {
+            if (!decode_publication_enabled_
+                && completion == kvcm::ClientWrapper::TransferCompletion::UNKNOWN) {
+                std::rethrow_exception(payload_exception_failure_);
             }
-        } else {
-            auto [ec, result] = client_wrapper_->saveKvCachesForTagWithStatus(
-                client_tag, uris, buffers, trace_info, &completion,
-                task.deadline());
-            if (ec == kv_cache_manager::ClientErrorCode::ER_SDK_TIMEOUT) {
-                return TransferResult::TIMEOUT;
-            }
-            if (ec != kv_cache_manager::ClientErrorCode::ER_OK || (!result.empty() && result.size() != uris.size())) {
-                return TransferResult::FAILED;
-            }
-            actual_uris = std::move(result);
+            throw;
         }
         collector.remote_sdk_fail_qps = false;
         // SDK success proves this transfer completed. The outer task deadline
@@ -2201,7 +2221,9 @@ private:
             }
         });
         if (proof) proof->pending();
-        const int timeout_ms = remainingTimeout(storage_request, "before payload dispatch");
+        const int timeout_ms = is_decode_role_ ? remainingTimeout(storage_request, "before payload dispatch") :
+            (requests.front().remote_request().op() == REMOTE_OPERATION_READ ?
+                 kv_cache_config_.kvcm_get_broadcast_timeout : kv_cache_config_.kvcm_put_broadcast_timeout);
         for (auto& request : requests) {
             request.mutable_remote_request()->set_timeout_ms(timeout_ms);
         }
@@ -2211,11 +2233,18 @@ private:
                                const std::shared_ptr<grpc::ClientContext>& context,
                                const FunctionRequestPB&                    request,
                                grpc::CompletionQueue*                      queue) {
+                // Keep the proven-not-started/cancellation boundary on both
+                // roles; P's actual RPC budget still comes from its original
+                // independent broadcast timeout, not this remaining budget.
                 const auto remaining = storage_request.transfer_task->remainingTimeout();
                 if (!remaining) {
                     throw BroadcastRpcNotStarted("KVCM task expired before rank submission");
                 }
-                context->set_deadline(std::chrono::system_clock::now() + *remaining);
+                if (is_decode_role_) {
+                    context->set_deadline(std::chrono::system_clock::now() + *remaining);
+                } else {
+                    context->set_deadline(std::chrono::system_clock::now() + std::chrono::milliseconds(timeout_ms));
+                }
                 if (proof) proof->started(); // Sticky if any rank may have handed off.
                 return stub->AsyncExecuteFunction(context.get(), request, queue);
             };
@@ -2283,6 +2312,8 @@ private:
                     case REMOTE_TRANSFER_STATUS_FAILED:
                         failed = true;
                         break;
+                    case REMOTE_TRANSFER_STATUS_EXCEPTION_UNKNOWN:
+                        std::rethrow_exception(payload_exception_failure_);
                     case REMOTE_TRANSFER_STATUS_TIMEOUT:
                         throw StorageOperationTimeout("KVCM transfer timed out", StorageQuarantineReason::SDK_TIMEOUT);
                     default:
@@ -2373,6 +2404,7 @@ private:
     std::atomic<bool> completion_stopped_{false};
     std::shared_ptr<CompletionResources> completion_resources_;
     std::exception_ptr buffer_safe_failure_, completion_unknown_failure_, completion_timeout_failure_;
+    std::exception_ptr payload_exception_failure_;
     StorageBackend::BufferResolver file_resolver_;
     std::shared_ptr<kvcm::DecodePublicationAccounting>   completion_accounting_;
     DecodePublicationLimits                              completion_limits_;
@@ -2420,10 +2452,13 @@ KVCMStorageBackend::KVCMStorageBackend(const CacheConfig&                       
                                        std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter,
                                        std::shared_ptr<kvcm::ClientWrapper>       client_wrapper):
     StorageBackend(makeStorageBackendExecutor(kv_cache_config.kvcm_asyncwrapper_thread_num,
-                                              kv_cache_config.kvcm_asyncwrapper_queue_size),
+                                              kv_cache_config.kvcm_asyncwrapper_queue_size,
+                                              parallelism_config.role_type == RoleType::DECODE),
                    std::make_shared<BlockTreeCacheMetricsReporter>(metrics_reporter),
                    parallelism_config.world_rank,
-                   std::chrono::milliseconds(kv_cache_config.kvcm_task_timeout_ms)),
+                   std::chrono::milliseconds(kv_cache_config.kvcm_task_timeout_ms),
+                   parallelism_config.role_type == RoleType::DECODE ? BlockTreeTaskClass::LOAD :
+                                                                      BlockTreeTaskClass::BACKGROUND),
     impl_(std::make_unique<Impl>(*this,
                                  cache_config,
                                  kv_cache_config,
@@ -2485,6 +2520,10 @@ void KVCMStorageBackend::writeImpl(const StorageRequest& request) {
 }
 
 bool KVCMStorageBackend::startWriteImpl(const StorageRequest& request, WriteCompletion done) {
+    if (!impl_->usesAsyncPayload(request, /*is_write=*/true)) {
+        impl_->write(request);
+        return false;
+    }
     return impl_->write(request, std::move(done));
 }
 
@@ -2533,6 +2572,9 @@ bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, Remote
     }
     try {
         return impl_->execute(request, response);
+    } catch (const StorageOperationPayloadExceptionUnknown&) {
+        response.set_transfer_status(REMOTE_TRANSFER_STATUS_EXCEPTION_UNKNOWN);
+        return false;
     } catch (...) {
         // Preserve the SDK failure flag and buffer-safety proof. Protected
         // payload scopes also retain uncertain SDK access before this guard

@@ -152,12 +152,13 @@ StorageWriteTask::StorageWriteTask(std::shared_ptr<storage_backend_detail::Stora
 StorageBackend::StorageBackend(std::shared_ptr<StorageBackendExecutor>        executor,
                                std::shared_ptr<BlockTreeCacheMetricsReporter> reporter,
                                int64_t                                        world_rank,
-                               std::chrono::milliseconds                      timeout):
+                               std::chrono::milliseconds                      timeout,
+                               BlockTreeTaskClass read_task_class):
     executor_(std::move(executor)),
     stage_metrics_reporter_(std::move(reporter)),
     stage_metrics_enabled_(stage_metrics_reporter_ && stage_metrics_reporter_->stageMetricsEnabled()),
     world_rank_(world_rank),
-    timeout_(timeout) {}
+    timeout_(timeout), read_task_class_(read_task_class) {}
 
 void StorageBackend::setStageMetricsReporter(std::shared_ptr<BlockTreeCacheMetricsReporter> reporter) {
     const bool enabled = reporter && reporter->stageMetricsEnabled();
@@ -572,6 +573,7 @@ void StorageBackend::match(StorageRequest request, MatchDone done) {
     auto       total    = stageTimer("match_total", request, "match", trace_id, AsyncProfileKind::Lifecycle);
     auto       queue    = stageTimer("match_queue_wait", request, "match", trace_id, AsyncProfileKind::Wait);
     const bool skip_remote = !remoteCacheEnabled();
+    const auto task_class = read_task_class_;
     dispatch([this, skip_remote, request = std::move(request), done = std::move(done), trace_id, total, queue](
                  Lifecycle outcome, Task finished) mutable {
         block_tree_cache_detail::ScopeRollback retire(std::move(finished));
@@ -603,7 +605,7 @@ void StorageBackend::match(StorageRequest request, MatchDone done) {
             callback.finish(true);
         }
         total.finish(success);
-    }, BlockTreeTaskClass::LOAD, skip_remote);
+    }, task_class, skip_remote);
 }
 
 void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackendMatchMeta> match_meta, Done done) {
@@ -615,6 +617,7 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
     auto       state    = prepare(std::move(request), false, trace_id);
     auto       queue    = stageTimer("read_queue_wait", state->request, "read", trace_id, AsyncProfileKind::Wait);
     const auto deadline    = state->request.transfer_task->deadline();
+    const auto task_class = read_task_class_;
     const bool skip_remote = !remoteCacheEnabled();
     dispatch(
         [this,
@@ -702,6 +705,21 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                     total.finish(success);
                 });
             };
+            if (!usesAsyncPayload(state->request, /*is_write=*/false) && !state->request.decode_completion) {
+                // Original synchronous payload: execute and settle on this
+                // worker, without allocating or posting an async continuation.
+                Task payload;
+                if (error.ok()) {
+                    try {
+                        payload = [this, state, match_meta] { readImpl(state->request, match_meta); };
+                    } catch (...) {
+                        settle_read({}, true, true, std::current_exception());
+                        return;
+                    }
+                }
+                settle_read(std::move(payload), true);
+                return;
+            }
             std::function<void(Task, bool, std::exception_ptr)> complete_read;
             try {
                 complete_read = storage_backend_detail::makeIoCompletion<Task>(
@@ -732,7 +750,7 @@ void StorageBackend::read(StorageRequest request, std::shared_ptr<StorageBackend
                 complete_read({}, false, std::current_exception());
             }
         },
-        BlockTreeTaskClass::LOAD,
+        task_class,
         skip_remote,
         deadline);
 }
@@ -830,6 +848,17 @@ bool StorageBackend::write(StorageWriteTask task) {
         };
         if (!run) {
             settle_write({}, true);
+            return;
+        }
+        if (!usesAsyncPayload(state->request, /*is_write=*/true) && !state->request.decode_completion) {
+            WriteResult payload;
+            try {
+                payload = [this, state](bool) { writeImpl(state->request); };
+            } catch (...) {
+                settle_write({}, true, true, std::current_exception());
+                return;
+            }
+            settle_write(std::move(payload), true);
             return;
         }
         std::function<void(WriteResult, bool, std::exception_ptr)> complete;

@@ -136,6 +136,32 @@ TEST(StorageBackendExecutorTest, PostedRecordDoesNotOwnPoolAndShutdownWaitsForIt
     record.reset();
 }
 
+TEST(StorageBackendExecutorTest, OriginalPrefillQueueCapacityAndDecodeReservationStaySeparate) {
+    for (const bool async_payload : {false, true}) {
+        auto executor = makeStorageBackendExecutor(1, 66, async_payload);
+        std::promise<void> entered, release;
+        auto started = entered.get_future();
+        auto released = release.get_future().share();
+        std::atomic<size_t> completed{0};
+        block_tree_cache_detail::ScopeRollback unblock([&] { release.set_value(); });
+        block_tree_cache_detail::ScopeRollback cleanup([&] { unblock.run(); executor->shutdown(); });
+        ASSERT_TRUE(executor->start());
+        ASSERT_TRUE(executor->submit([&] { entered.set_value(); released.wait(); }));
+        ASSERT_EQ(started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+        // 9115 passed Q=66 unchanged, with two BACKGROUND slots after its
+        // existing LOAD reserve. Decode retains the current expanded queue.
+        const size_t expected = async_payload ? 66 : 2;
+        for (size_t i = 0; i < expected; ++i)
+            ASSERT_TRUE(executor->submit([&] { ++completed; }, BlockTreeTaskClass::BACKGROUND));
+        EXPECT_FALSE(executor->submit([] {}, BlockTreeTaskClass::BACKGROUND));
+        EXPECT_EQ(executor->queueSizes().background, expected);
+        EXPECT_EQ(executor->hasCompletionReservations(), async_payload);
+        unblock.run();
+        executor->shutdown();
+        EXPECT_EQ(completed.load(), expected);
+    }
+}
+
 TEST(StorageBackendExecutorTest, HonorsConfiguredWorkerAndQueueCapacity) {
     auto executor = makeStorageBackendExecutor(/*thread_count=*/2, /*queue_size=*/1);
     ASSERT_TRUE(executor->start());
@@ -642,6 +668,7 @@ public:
     using ProtectedBackend::ProtectedBackend;
     size_t entries{0};
 protected:
+    bool usesAsyncPayload(const StorageRequest&, bool) const noexcept override { return true; }
     bool readAsyncImpl(const StorageRequest&, const std::shared_ptr<StorageBackendMatchMeta>&,
                        ReadCompletion) override {
         ++entries;

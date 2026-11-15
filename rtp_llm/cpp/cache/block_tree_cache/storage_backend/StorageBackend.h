@@ -76,6 +76,13 @@ private:
     StorageQuarantineReason reason_;
 };
 
+// An exceptional SDK exit after possible submission, distinct from an
+// ordinary returned error. Its pending destination must not be aborted.
+class StorageOperationPayloadExceptionUnknown: public StorageOperationCompletionUnknown {
+public:
+    using StorageOperationCompletionUnknown::StorageOperationCompletionUnknown;
+};
+
 // The transport reported an explicit timeout. Buffer ownership is still
 // unknown, so this remains a completion-unknown failure for quarantine while
 // allowing callers to preserve the timeout error code.
@@ -174,7 +181,8 @@ public:
     explicit StorageBackend(std::shared_ptr<StorageBackendExecutor>        executor         = nullptr,
                             std::shared_ptr<BlockTreeCacheMetricsReporter> metrics_reporter = nullptr,
                             int64_t                                        world_rank       = -1,
-                            std::chrono::milliseconds                      timeout = std::chrono::seconds(10));
+                            std::chrono::milliseconds                      timeout = std::chrono::seconds(10),
+                            BlockTreeTaskClass read_task_class = BlockTreeTaskClass::LOAD);
     virtual ~StorageBackend();
     // Atomic replacement allows attaching the cache reporter before or after init.
     void setStageMetricsReporter(std::shared_ptr<BlockTreeCacheMetricsReporter> reporter);
@@ -304,6 +312,7 @@ private:
     std::atomic<bool>                              stage_metrics_enabled_{false};
     const int64_t                                  world_rank_;
     const std::chrono::milliseconds                 timeout_;
+    const BlockTreeTaskClass read_task_class_;
     bool                                    init_attempted_{false};
     bool                                    initialized_{false};
 

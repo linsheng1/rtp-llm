@@ -975,6 +975,9 @@ enum RemoteTransferStatusPB {
     REMOTE_TRANSFER_STATUS_SUCCESS = 1;
     REMOTE_TRANSFER_STATUS_FAILED = 2;
     REMOTE_TRANSFER_STATUS_TIMEOUT = 3;
+    // Exceptional SDK exit after possible submission, distinct from ordinary
+    // FAILED and legacy responses without buffer-safety fields.
+    REMOTE_TRANSFER_STATUS_EXCEPTION_UNKNOWN = 6;
     // Retired unused statuses; never reuse their wire numbers or names.
     reserved 4, 5;
     reserved "REMOTE_TRANSFER_STATUS_COMPLETION_UNKNOWN", "REMOTE_TRANSFER_STATUS_FAILED_BUFFER_SAFE";
