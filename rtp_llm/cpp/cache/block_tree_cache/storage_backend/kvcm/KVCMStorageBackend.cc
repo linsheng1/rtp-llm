@@ -705,6 +705,8 @@ public:
                     } catch (const StorageOperationCompletionUnknown&) {
                         throw;
                     } catch (...) {
+                        if (!decode_publication_enabled_)
+                            throw; // Preserve the original Prefill failure class and task-local freeze policy.
                         std::rethrow_exception(unknown ? completion_unknown_failure_ : buffer_safe_failure_);
                     }
                 };
@@ -1803,9 +1805,8 @@ private:
             actual_uris = std::move(result);
         }
         collector.remote_sdk_fail_qps = false;
-        if (task.expired()) {
-            return TransferResult::TIMEOUT;
-        }
+        // SDK success proves this transfer completed. The outer task deadline
+        // still rejects late business results without inventing a DMA timeout.
         return TransferResult::SUCCESS;
     }
 
@@ -2222,6 +2223,13 @@ private:
             auto result = broadcast_manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(
                 requests, timeout_ms, rpc_call, storage_request.request_id, direction, /*fatal_on_error=*/false);
             if (result == nullptr) {
+                if (proof) {
+                    proof->notStarted();
+                    if (proof->neverStarted()) {
+                        source_may_be_touched = false;
+                        std::rethrow_exception(buffer_safe_failure_);
+                    }
+                }
                 throw StorageOperationCompletionUnknown("KVCM broadcast dispatch failed",
                                                         StorageQuarantineReason::RPC_ERROR);
             }

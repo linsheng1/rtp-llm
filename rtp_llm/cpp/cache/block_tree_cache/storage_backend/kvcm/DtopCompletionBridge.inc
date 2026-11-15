@@ -201,7 +201,7 @@ size_t publicationWireBytes(const std::string& tag) const {
 }
 
 std::string publicationPeerTag(const std::string& tag, int peer) const {
-    return is_decode_role_ ? tag + "#cp" + std::to_string(peer) : tag;
+    return decode_publication_enabled_ && is_decode_role_ ? tag + "#cp" + std::to_string(peer) : tag;
 }
 
 // Select completed native checkpoints, not the final mutable slot. In
