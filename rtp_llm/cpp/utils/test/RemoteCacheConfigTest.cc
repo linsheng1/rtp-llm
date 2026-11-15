@@ -42,7 +42,9 @@ TEST_F(DecodeBudgetConfigTest, PublicationSettingIsStrictAndReadOncePerProcess) 
             const bool valid = !initial || std::string(initial) == "0" || std::string(initial) == "1";
             const bool enabled = initial && std::string(initial) == "1";
             // Exercise both getter orders; they must share one cached setting.
-            if (enabled) EXPECT_TRUE(remoteCacheDecodePublicationEnabled());
+            if (enabled) {
+                EXPECT_TRUE(remoteCacheDecodePublicationEnabled());
+            }
             EXPECT_EQ(remoteCacheDecodePublicationConfigValid(), valid);
             EXPECT_EQ(remoteCacheDecodePublicationEnabled(), enabled);
             for (const char* later : {"0", "1", "invalid"}) {
