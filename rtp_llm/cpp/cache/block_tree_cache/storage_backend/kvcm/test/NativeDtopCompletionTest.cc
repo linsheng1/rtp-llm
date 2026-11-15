@@ -82,55 +82,6 @@ TEST(ClientFactoryFeatureBoundaryTest, DisabledAndUnsetDelegateConfigurationErro
         });
     }
 }
-TEST(DecodePublicationConfigTest, SingleSwitchNeedsNoCpSpecificFlag) {
-    {
-        autil::EnvGuard off("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "0");
-        ::rtp_llm::test::withDecodePublicationStartup([&] {
-        EXPECT_FALSE(remoteCacheDecodePublicationEnabled());
-        });
-    }
-    {
-        autil::EnvGuard on("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
-        ::rtp_llm::test::withDecodePublicationStartup([&] {
-        EXPECT_TRUE(remoteCacheDecodePublicationEnabled());
-        });
-    }
-}
-TEST(DecodePublicationConfigTest, PendingBudgetsHaveBoundedDefaultsAndStrictOverrides) {
-    EXPECT_EQ(DecodePublicationLimits{}.bytes, 512ULL * 1024 * 1024);
-    EXPECT_EQ(DecodePublicationLimits{}.jobs, 4u);
-    autil::EnvGuard mib("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB", "256");
-    autil::EnvGuard jobs("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS", "8");
-    auto            limits = remoteCacheDecodePublicationLimits();
-    ASSERT_TRUE(limits.has_value());
-    EXPECT_EQ(limits->bytes, 256ULL * 1024 * 1024);
-    EXPECT_EQ(limits->jobs, 8u);
-    for (const char* invalid : {"", "0", "-1", "1.5", " 8", "8x", "18446744073709551616"}) {
-        autil::EnvGuard bad("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB", invalid);
-        EXPECT_FALSE(remoteCacheDecodePublicationLimits().has_value()) << invalid;
-    }
-    autil::EnvGuard too_many("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS", "65");
-    EXPECT_FALSE(remoteCacheDecodePublicationLimits().has_value());
-}
-TEST(DecodePublicationConfigTest, DefaultBudgetTracksPhysicalPoolWithoutRoundingSmallPoolsUp) {
-    autil::EnvGuard mib("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB", "1");
-    autil::EnvGuard jobs("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS", "4");
-    ASSERT_EQ(unsetenv("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_MIB"), 0);
-    ASSERT_EQ(unsetenv("RTP_LLM_REMOTE_CACHE_DECODE_PENDING_JOBS"), 0);
-    EXPECT_FALSE(remoteCacheDecodePublicationLimits(0).has_value());
-    for (const auto& sample :
-         std::vector<std::pair<size_t, size_t>>{{8, 1},
-                                                {8192, 1024},
-                                                {4ULL * 1024 * 1024 * 1024, 512ULL * 1024 * 1024},
-                                                {64ULL * 1024 * 1024 * 1024, 4ULL * 1024 * 1024 * 1024}}) {
-        const auto limits = remoteCacheDecodePublicationLimits(sample.first);
-        ASSERT_TRUE(limits.has_value());
-        EXPECT_EQ(limits->bytes, sample.second);
-        EXPECT_EQ(limits->jobs, 4u);
-    }
-}
-
-
 TEST(FeatureOffNativeTest, PrefillRemoteRoundTripPreservesLocalPrefixPayloadAndReferences) {
     for (const bool unset : {false, true}) {
         SCOPED_TRACE(unset);

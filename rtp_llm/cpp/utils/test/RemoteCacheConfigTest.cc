@@ -58,11 +58,20 @@ TEST_F(DecodeBudgetConfigTest, PublicationSettingIsStrictAndReadOncePerProcess) 
 }
 
 TEST_F(DecodeBudgetConfigTest, UsesNativeCapacityWithoutRoundingSmallPoolsUp) {
+    EXPECT_EQ(DecodePublicationLimits{}.bytes, 512 * MiB);
+    EXPECT_EQ(DecodePublicationLimits{}.jobs, 4u);
+    const auto defaults = remoteCacheDecodePublicationLimits();
+    ASSERT_TRUE(defaults);
+    EXPECT_EQ(defaults->bytes, 512 * MiB);
+    EXPECT_EQ(defaults->jobs, 4u);
     EXPECT_FALSE(remoteCacheDecodePublicationLimits(0));
     for (auto [capacity, expected] : {std::pair<size_t, size_t>{4 * GiB, 512 * MiB},
                                       {8 * GiB, GiB},
                                       {24 * GiB, 3 * GiB},
                                       {48 * GiB, 4 * GiB},
+                                      {64 * GiB, 4 * GiB},
+                                      {8, 1},
+                                      {8192, 1024},
                                       {1024, 128},
                                       {std::numeric_limits<size_t>::max(), 4 * GiB}}) {
         const auto limits = remoteCacheDecodePublicationLimits(capacity);
