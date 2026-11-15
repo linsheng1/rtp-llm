@@ -254,6 +254,7 @@ cc_test_wrapper(
         "//conditions:default": ["@platforms//:incompatible"],
     }),
     deps = ["//rtp_llm/cpp/utils:decode_publication_test_support"] + [d for d in kvcm_backend_test_deps if d != "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:kvcm_storage_backend"] + [
+        "//rtp_llm/cpp/cache/block_tree_cache/test:bounded_thread_test_utils",
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:submission_boundary_test_source",
         "//rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm:sdk_buffer_safety",
     ],
