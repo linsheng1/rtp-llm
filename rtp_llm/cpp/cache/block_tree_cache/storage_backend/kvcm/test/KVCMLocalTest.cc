@@ -1853,11 +1853,16 @@ TEST(KVCMLocalTest, PrefillQueueRejectAndExpiryNeverStartSessionOrRetainUnknown)
                 auto backend = makeBackend(environment, parallel, client, nullptr, nullptr, true, config);
                 ASSERT_TRUE(initSingleRank(*backend.backend, environment));
                 const auto refs = environment.device_pool->refCount(environment.block_id);
-                std::promise<void> release, entered;
+                std::promise<void> release, entered, release_worker, worker_entered;
                 auto released = release.get_future().share();
                 auto started = entered.get_future();
+                auto worker_released = release_worker.get_future().share();
+                auto worker_started = worker_entered.get_future();
                 block_tree_cache_detail::ScopeRollback unblock([&] { release.set_value(); });
-                block_tree_cache_detail::ScopeRollback cleanup([&] { unblock.run(); backend.backend->shutdown(); });
+                block_tree_cache_detail::ScopeRollback unblock_worker([&] { release_worker.set_value(); });
+                block_tree_cache_detail::ScopeRollback cleanup([&] {
+                    unblock.run(); unblock_worker.run(); backend.backend->shutdown();
+                });
                 std::atomic<int> starts{0}, saves{0}, commits{0}, closes{0};
                 EXPECT_CALL(*client, getWriteLocation(_, _, _, _, _, 40, 0))
                     .WillRepeatedly(Invoke([&](const auto&, const auto&, const auto&, const auto&, const auto&, auto, auto) {
@@ -1884,6 +1889,13 @@ TEST(KVCMLocalTest, PrefillQueueRejectAndExpiryNeverStartSessionOrRetainUnknown)
                     }));
                 ASSERT_TRUE(backend.backend->write(backend.backend->prepareWrite(makeStorageRequest(environment))));
                 ASSERT_EQ(started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
+                // SDK work no longer occupies the business worker. Hold that
+                // worker explicitly before filling its one BACKGROUND slot.
+                ASSERT_TRUE(backend.backend->executor_->submit([&] {
+                    worker_entered.set_value();
+                    EXPECT_EQ(worker_released.wait_for(std::chrono::seconds(10)), std::future_status::ready);
+                }, BlockTreeTaskClass::LOAD));
+                ASSERT_EQ(worker_started.wait_for(std::chrono::seconds(5)), std::future_status::ready);
                 auto queued = makeStorageRequest(environment);
                 queued.transfer_task.emplace(std::vector<TransferDescriptor>{},
                     expire_queued ? std::chrono::milliseconds(300) : std::chrono::seconds(30));
@@ -1903,6 +1915,7 @@ TEST(KVCMLocalTest, PrefillQueueRejectAndExpiryNeverStartSessionOrRetainUnknown)
                     EXPECT_EQ(until_deadline.wait_until(queued.transfer_task->deadline()), std::future_status::timeout);
                 }
                 unblock.run();
+                unblock_worker.run();
                 ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
                 EXPECT_EQ(starts.load(), expire_queued ? 1 : 2);
                 EXPECT_EQ(saves.load(), expire_queued ? 1 : 2);
