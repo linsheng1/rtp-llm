@@ -638,8 +638,14 @@ TEST(KVCMLocalTest, DecodePublicationParsesSdkOptionsAndKeepsBackendContracts) {
                 const auto actual = autil::legacy::ToJsonString(sdk_fields.at("sdk_backend_configs"));
                 EXPECT_EQ(actual, autil::legacy::ToJsonString(expected.sdk_backend_configs()));
                 if (value.json.find("sdk_log_file_path") != std::string::npos) {
-                    EXPECT_NE(actual.find("logs/pace client.log"), std::string::npos);
-                    EXPECT_NE(actual.find("INFO"), std::string::npos);
+                    const auto backends = autil::legacy::AnyCast<autil::legacy::json::JsonArray>(
+                        sdk_fields.at("sdk_backend_configs"));
+                    EXPECT_EQ(backends.size(), 1u);
+                    if (backends.size() != 1u) return false;
+                    const auto fields = autil::legacy::AnyCast<autil::legacy::json::JsonMap>(backends.front());
+                    EXPECT_EQ(autil::legacy::AnyCast<std::string>(fields.at("sdk_log_file_path")),
+                              "logs/pace client.log");
+                    EXPECT_EQ(autil::legacy::AnyCast<std::string>(fields.at("sdk_log_level")), "INFO");
                 }
                 return true;
             }));
@@ -1383,20 +1389,8 @@ TEST(KVCMLocalTest, PrefillCommitAckFailureRemainsSingleFinishWithoutDmaQuaranti
                 return false;
             }));
         client->save_status = kv_cache_manager::ClientErrorCode::ER_OK;
-        std::mutex               events_mutex;
-        std::vector<std::string> outcomes;
-        auto                     accounting = std::make_shared<kvcm::DecodePublicationAccounting>(
-            1024,
-            1,
-            kvcm::DecodePublicationAccounting::SnapshotObserver{},
-            [&](const char* outcome, std::optional<int64_t> latency) {
-                std::lock_guard<std::mutex> lock(events_mutex);
-                outcomes.emplace_back(outcome);
-                EXPECT_FALSE(latency.has_value());
-            });
-        auto request                 = makeStorageRequest(environment);
-        request.completion_admission = accounting->tryAcquire(128, kvcm::DecodePublicationAccounting::Clock::now());
-        ASSERT_TRUE(request.completion_admission);
+        // Production P requests carry no D-only admission lease.
+        auto request = makeStorageRequest(environment);
         const auto refs_before = environment.device_pool->refCount(environment.block_id);
         auto       task        = backend.backend->prepareWrite(std::move(request));
         ASSERT_TRUE(static_cast<bool>(task));
@@ -1404,14 +1398,10 @@ TEST(KVCMLocalTest, PrefillCommitAckFailureRemainsSingleFinishWithoutDmaQuaranti
         ASSERT_TRUE(backend.backend->write(std::move(task)));
         ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
         EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
-        EXPECT_EQ(accounting->snapshot().quarantined, 0u);
+        EXPECT_FALSE(backend.backend->protected_quarantine_);
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), refs_before);
         // Join the worker before inspecting ownership of its retired closure.
         backend.backend->shutdown();
-        EXPECT_EQ(accounting->snapshot().bytes, 0u);
-        EXPECT_EQ(accounting->snapshot().jobs, 0u);
-        std::lock_guard<std::mutex> lock(events_mutex);
-        EXPECT_TRUE(outcomes.empty()); // P no longer emits D-only outcome events.
     }
     });
 }
@@ -1705,7 +1695,7 @@ TEST(KVCMLocalTest, ConfirmedLocalRejectAndExpiryCloseSessionsWithoutUnknownRete
                     } else {
                         ++commits;
                         EXPECT_EQ(offset, 1u);
-                        EXPECT_FALSE(locations.empty());
+                        EXPECT_TRUE(locations.empty()); // Same SDK URIs: original P sends no overrides.
                     }
                     return true;
                 }));
@@ -2356,7 +2346,10 @@ TEST(KVCMLocalTest, TP2PayloadWaitReleasesCoordinatorAndShutdownDrainsSettlement
                 }));
             auto acknowledge = ::testing::InvokeWithoutArgs([completed] { completed->set_value(); return true; });
             if (late) {
-                EXPECT_CALL(*client, finishWrite(_, _, "deferred-write", _, _)).Times(0);
+                EXPECT_CALL(*client, finishWrite(_, _, "deferred-write", all_written, _)).Times(0);
+                EXPECT_CALL(*client, finishWrite(_, _, "deferred-write",
+                            ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{0}}),
+                            ::testing::IsEmpty())).WillOnce(acknowledge);
             } else {
                 EXPECT_CALL(*client, finishWrite(_, _, "deferred-write", all_written, _))
                     .WillOnce(acknowledge);

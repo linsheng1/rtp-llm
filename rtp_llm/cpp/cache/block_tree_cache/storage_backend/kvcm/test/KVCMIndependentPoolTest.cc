@@ -322,7 +322,7 @@ TEST_F(KVCMIndependentPoolTest, FactoryPublishesHeterogeneousSpecsAndRoundTripsE
     EXPECT_EQ(state_->destroyed, 3u);
 }
 
-TEST_F(KVCMIndependentPoolTest, PartialWriteFailureAbortsSessionAndQuarantinesPins) {
+TEST_F(KVCMIndependentPoolTest, PrefillPartialWriteFailureClosesSessionAndReleasesPins) {
     ASSERT_TRUE(initialize());
     kv_cache_manager::WriteLocation proposal;
     proposal.write_session_id = "failed_session";
@@ -342,8 +342,8 @@ TEST_F(KVCMIndependentPoolTest, PartialWriteFailureAbortsSessionAndQuarantinesPi
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend_));
     EXPECT_EQ(state_->writes, (std::vector<size_t>{1, 0, 0}));
     for (size_t group = 0; group < pools_.size(); ++group) {
-        EXPECT_TRUE(pools_[group]->isFrozen(blocks_[group]));
-        EXPECT_EQ(pools_[group]->refCount(blocks_[group]), 2u);
+        EXPECT_FALSE(pools_[group]->isFrozen(blocks_[group]));
+        EXPECT_EQ(pools_[group]->refCount(blocks_[group]), 1u);
     }
     backend_->shutdown();
     EXPECT_EQ(state_->destroyed, 3u);

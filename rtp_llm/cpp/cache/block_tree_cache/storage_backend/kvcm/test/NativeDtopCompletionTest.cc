@@ -204,7 +204,7 @@ TEST(FeatureOffNativeTest, PrefillRemoteRoundTripPreservesLocalPrefixPayloadAndR
                 return std::make_pair(true, uris);
             }));
         EXPECT_CALL(*client, finishWrite(_, _, "feature-off-acknowledged",
-                    ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{2}}), locations))
+                    ::testing::Eq(kv_cache_manager::BlockMask{kv_cache_manager::BlockMaskOffset{2}}), ::testing::IsEmpty()))
             .WillOnce(Return(true));
         auto task = backend.backend->prepareWrite(makeStorageRequest(env, {102, 103}, 0, {ids[1], ids[2]}));
         ASSERT_TRUE(static_cast<bool>(task));
@@ -437,7 +437,9 @@ TEST(NativeEndpointPublicationTest, CapturedDsparkEndpointOwnsPagesThroughEosTra
         auto parallel = singleRankConfig();
         parallel.role_type = RoleType::DECODE;
         parallel.prefill_cp_config.prefill_cp_size = 1;
-        auto manager = std::make_shared<KVCacheManager>(cache, false, nullptr, KVCacheConfig{}, parallel);
+        auto manager = std::make_shared<KVCacheManager>(cache, false, nullptr, KVCacheConfig{}, parallel,
+            RuntimeConfig{}, SpeculativeExecutionConfig{}, PDSepConfig{}, CacheStoreConfig{},
+            /*use_device_malloc_block_pool=*/true);
         ASSERT_TRUE(manager->init());
         BackendEnvironment env;
         env.cache_config = manager->cacheConfig();

@@ -396,7 +396,7 @@ TEST(KVCMMockOnlyFullTest, BackendLookupIgnoresLocalHitsAndRejectsMalformedRequi
     auto* metrics = reporter->getMetricsGroup<RtpLLMRemoteCacheOutcomeMetrics>();
     ASSERT_NE(metrics, nullptr);
     for (const auto& [outcome, count] : std::vector<std::tuple<const char*, double>>{
-             {"not_found", 1}, {"found_unusable", 0}, {"failed", 3}}) {
+             {"not_found", 0}, {"found_unusable", 0}, {"failed", 0}}) {
         kmonitor::MetricsTags tags("stage", "lookup");
         tags.AddTag("outcome", outcome);
         EXPECT_DOUBLE_EQ(snapshotMetric(metrics->outcome_qps_metric, tags), count);
@@ -1168,7 +1168,7 @@ TEST(KVCMMockOnlyFullTest, TransferFailureAbortsWriteSession) {
         .WillOnce(Return(std::make_pair(true, write_location)));
     EXPECT_CALL(*client_wrapper, saveKvCachesForTag("default", kv_cache_manager::UriStrVec{"write_uri"}, _, _))
         .WillOnce(Return(std::make_pair(false, kv_cache_manager::UriStrVec{})));
-    // An unknown payload keeps the existing single Finish(0) attempt.
+    // Original Prefill closes a failed write once; ordinary SDK failure is not a timeout.
     EXPECT_CALL(*client_wrapper, finishWrite(_, _, "abort_session", _, _))
         .WillOnce(Invoke([](const std::string&,
                             const std::string&,
@@ -1185,7 +1185,7 @@ TEST(KVCMMockOnlyFullTest, TransferFailureAbortsWriteSession) {
         }));
     backend->write(backend->prepareWrite(makeStorageRequest(environment)));
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-    EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 1u);
+    EXPECT_EQ(environment.device_pool->referencedBlocksNum(BlockTreeRefType::FROZEN), 0u);
 }
 
 TEST(KVCMMockOnlyFullTest, FinishWriteFailureIsNotRetried) {

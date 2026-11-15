@@ -484,7 +484,7 @@ TEST_F(KVCMSubmissionBoundaryTest, ParallelPeersHoldSourcesAndPublishOnceAfterBo
             [&](const auto&, const auto&, const auto&, const auto& mask, const auto& locations) {
                 ++s.closes;
                 const auto* offset = std::get_if<kv_cache_manager::BlockMaskOffset>(&mask);
-                s.bad_close = locations.empty() || !offset || *offset != 1;
+                s.bad_close = !locations.empty() || !offset || *offset != 1; // Unchanged URIs need no overrides.
                 return true;
             }));
         block_tree_cache_detail::ScopeRollback unblock([mutex, cv, release] {
@@ -623,12 +623,15 @@ TEST_F(KVCMSubmissionBoundaryTest, ProjectedWireSizeUsesRegisteredContractAndSti
         EXPECT_EQ(groups.begin()->second.tag, "default");
         EXPECT_EQ(groups.begin()->second.block_size_bytes, 64u); // K+V, 8 tokens, head dimension 2, FP16.
         const auto parts = environmentBuffers(s.env, 0, "default", s.env.block_id);
-        ASSERT_EQ(parts.size(), 2u);
+        ASSERT_FALSE(parts.empty());
+        size_t total_bytes = 0;
         for (const auto& part : parts) {
             ASSERT_TRUE(part.is_cuda);
             ASSERT_NE(part.addr, nullptr);
-            ASSERT_EQ(part.size_bytes, 32u);
+            ASSERT_GT(part.size_bytes, 0u);
+            total_bytes += part.size_bytes;
         }
+        ASSERT_EQ(total_bytes, 64u); // Native K/V may be contiguous; the wire contract is unchanged.
         RemoteOperationRequestPB request;
         request.add_uris("pace://wire-size-check");
         for (int peer : {0, 1}) {

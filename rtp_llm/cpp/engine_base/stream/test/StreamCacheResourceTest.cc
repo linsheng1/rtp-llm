@@ -1680,7 +1680,8 @@ TEST_F(StreamCacheResourceTest, CompletedPublicationRefreshesChangedKeysBeforeLo
         EXPECT_EQ(resource.cacheKeys(0), expected->cacheKeys());
         stream_->releaseResource();
         backend->shutdown();
-        EXPECT_EQ(backend->writtenKeyValues(), expected->cacheKeys());
+        EXPECT_EQ(backend->writtenKeyValues(), (CacheKeysType{partial_keys[0], partial_keys[1]}));
+        // Key refresh for local insertion must not extend an already-admitted remote endpoint.
     }, [&] { TearDown(); stream_.reset(); cache_manager_.reset(); });
 }
 
