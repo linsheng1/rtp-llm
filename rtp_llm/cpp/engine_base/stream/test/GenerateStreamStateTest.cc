@@ -201,7 +201,9 @@ TEST_F(GenerateStreamStateTest, UnknownWriterReportsErrorAndSurvivesBothReleaseP
             auto output = stream->nextOutput(/*wait_timeout_ms=*/1);
             EXPECT_FALSE(output.ok());
             EXPECT_EQ(output.status().code(), expected);
-            if (cancelled) EXPECT_EQ(output.status().ToString(), "original cancellation");
+            if (cancelled) {
+                EXPECT_EQ(output.status().ToString(), "original cancellation");
+            }
             worker.reset(); // UNKNOWN must still protect pages once the ordinary count reaches zero.
             ASSERT_FALSE(stream->hasPendingAsyncBookkeeping());
             EXPECT_EQ(stream->moveToNext(), StreamState::FINISHED);
