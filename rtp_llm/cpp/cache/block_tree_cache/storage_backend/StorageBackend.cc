@@ -50,8 +50,6 @@ struct StorageTaskState {
     StorageRequest   request;
     uint64_t                          trace_id{0};
     std::vector<Pin> pins;
-    std::shared_ptr<void> completion_resources;
-    std::shared_ptr<StorageTaskState> quarantine_next;
     bool completion_protected{false};
     bool quarantined{false};
     std::once_flag   finish_once;
@@ -68,7 +66,6 @@ struct StorageTaskState {
             pins.clear();
             request.completion_budget_lease.reset();
             request.completion_admission.reset();
-            completion_resources.reset();
         });
     }
 
@@ -343,21 +340,6 @@ void StorageBackend::shutdown() {
         lifecycle_ = Lifecycle::FINALIZING;
     }
     executor->shutdown();
-    std::shared_ptr<storage_backend_detail::StorageTaskState> retired;
-    {
-        std::unique_lock<std::mutex> lock(quarantine_mutex_);
-        // No forced teardown: an unresolved operation keeps this complete
-        // backend session alive, including the actual SDK registration owner.
-        quarantine_cv_.wait(lock, [this] {
-            return (!protected_quarantine_ && !hasUnresolvedExternalIo()) || quiesceUnknownOperations();
-        });
-        retired = std::move(protected_quarantine_);
-    }
-    while (retired) {
-        auto next = std::move(retired->quarantine_next);
-        retired->finish();
-        retired = std::move(next);
-    }
     shutdownImpl();
     uint64_t quarantine_generation;
     {
@@ -381,30 +363,21 @@ void StorageBackend::quarantineTask(
     bool                                                             is_write,
     StorageQuarantineReason                                          reason,
     StorageLocalTargetProtection                                     local_target_protection) {
-    if (!state) {
+    if (!state || state->quarantined) {
         return;
     }
+    state->quarantined = true;
     const size_t pinned_block_count = state->pins.size();
     if (state->request.completion_admission)
         state->request.completion_admission->onQuarantined();
-    if (state->completion_protected) {
-        // Anchor before any log, observer, allocation or cleanup. This link
-        // only copies/moves already-existing shared ownership and is acyclic.
-        std::lock_guard<std::mutex> lock(quarantine_mutex_);
-        if (state->quarantined) {
-            return;
+    // Target-side proofs do not discharge protected source pins. Transfer their
+    // protection to the existing FROZEN references before normal settlement.
+    if (state->completion_protected || local_target_protection == StorageLocalTargetProtection::LEGACY) {
+        for (const auto& pin : state->pins) {
+            pin.pool->freezeBlock(pin.block);
         }
-        state->quarantine_next = std::move(protected_quarantine_);
-        protected_quarantine_ = state;
-        state->quarantined = true;
-    } else {
-        if (local_target_protection == StorageLocalTargetProtection::LEGACY) {
-            for (const auto& pin : state->pins) {
-                pin.pool->freezeBlock(pin.block);
-            }
-        }
-        state->finish();
     }
+    state->finish();
     size_t task_count;
     size_t block_count;
     uint64_t generation;
@@ -442,11 +415,6 @@ StorageBackend::prepare(StorageRequest request, bool for_write, uint64_t trace_i
     RTP_LLM_CHECK(initialized_);
 
     state->completion_protected = state->request.decode_completion || protectUnknownCompletion();
-    if (state->completion_protected) {
-        state->completion_resources = completionResourceOwner();
-        RTP_LLM_CHECK_WITH_INFO(state->completion_resources != nullptr,
-                                "protected storage I/O requires an actual transport resource owner");
-    }
     if (for_write || state->completion_protected) {
         // All metadata allocation and deduplication precedes pin acquisition.
         // In particular, recording an acquired pin cannot allocate or lose it.

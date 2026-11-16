@@ -327,9 +327,8 @@ public:
         COMPLETION_UNKNOWN,
     };
 
-    // No back-reference to Impl/StorageBackend. A quarantined task can retain
-    // the registered SDK and its unresolved remote session after owner shutdown
-    // was requested. Pool ownership lives in the generic task's pinned pages.
+    // Retain borrowed descriptors and backing pools until normal backend teardown.
+    // SDK ownership and shutdown stay with Impl, as on the original Prefill path.
     struct CompletionResources {
         struct Operation {
             std::vector<std::string>             tags;
@@ -337,14 +336,12 @@ public:
             kv_cache_manager::UriStrVec          uris;
             kv_cache_manager::BlockBuffers       buffers;
             std::vector<DeviceBlockPoolPtr>      pools;
-            std::shared_ptr<kvcm::ClientWrapper> client;
             std::shared_ptr<Operation>           next;
         };
         struct Session {
             std::string              id;
             std::shared_ptr<Session> next;
         };
-        explicit CompletionResources(std::shared_ptr<kvcm::ClientWrapper> value): client(std::move(value)) {}
         void holdSession(const std::shared_ptr<Session>& session, std::string id) {
             // Preserve identity without allocating after StartWrite. This does
             // not renew the unchanged Manager lease or prove destination drain.
@@ -371,7 +368,6 @@ public:
         void completeOperation(const std::shared_ptr<Operation>& operation, bool unknown) noexcept {
             std::lock_guard<std::mutex> lock(mutex);
             if (unknown) {
-                ++unresolved;
                 return;
             }
             auto* link = &operations;
@@ -380,11 +376,9 @@ public:
             if (*link)
                 *link = std::move(operation->next);
         }
-        std::shared_ptr<kvcm::ClientWrapper> client;
         std::mutex                           mutex;
         std::shared_ptr<Session>             sessions;
         std::shared_ptr<Operation>           operations;
-        std::atomic<size_t>                  unresolved{0};
     };
 
     Impl(const StorageBackend&                      backend,
@@ -665,7 +659,7 @@ public:
             }
         }
         if (decode_publication_enabled_)
-            completion_resources_ = std::make_shared<CompletionResources>(client_wrapper_);
+            completion_resources_ = std::make_shared<CompletionResources>();
         if (completion_accounting_)
             completion_accounting_->startSampling();
         const auto tp_rank = parallelism_config_.tp_rank;
@@ -1858,12 +1852,11 @@ public:
             response.set_transfer_status(REMOTE_TRANSFER_STATUS_SUCCESS);
             return true;
         }
-        operation->client = client_wrapper_;
         for (const auto& pool : pools_by_tag_)
             operation->pools.push_back(pool.second);
         // The controller's prepared task pins the globally shared block IDs.
-        // This independent local record retains the worker's actual backing,
-        // SDK registrations and borrowed IOV/URI descriptors across UNKNOWN.
+        // This independent local record retains the worker's actual backing
+        // and borrowed IOV/URI descriptors across UNKNOWN, without owning the SDK.
         bool unknown = false;
         completion_resources_->holdOperation(operation);
         block_tree_cache_detail::ScopeRollback retain_worker_unknown([&] {
@@ -1930,12 +1923,6 @@ public:
 
     bool protectsUnknownCompletion() const noexcept {
         return decode_publication_enabled_;
-    }
-    std::shared_ptr<void> completionResourceOwner() const {
-        return completion_resources_;
-    }
-    bool hasUnresolvedExternalIo() const noexcept {
-        return completion_resources_ && completion_resources_->unresolved.load() > 0;
     }
 
 #include "rtp_llm/cpp/cache/block_tree_cache/storage_backend/kvcm/DtopCompletionBridge.inc"
@@ -3080,14 +3067,6 @@ bool KVCMStorageBackend::protectUnknownCompletion() const noexcept {
     return impl_->protectsUnknownCompletion();
 }
 
-std::shared_ptr<void> KVCMStorageBackend::completionResourceOwner() const {
-    return impl_->completionResourceOwner();
-}
-
-bool KVCMStorageBackend::hasUnresolvedExternalIo() const noexcept {
-    return impl_->hasUnresolvedExternalIo();
-}
-
 void KVCMStorageBackend::onQuarantined(bool is_write, StorageQuarantineReason reason, size_t block_count) noexcept {
     impl_->reportQuarantineEvent(is_write, reason, block_count);
 }
@@ -3134,9 +3113,9 @@ bool KVCMStorageBackend::execute(const RemoteOperationRequestPB& request, Remote
         unsubmitted.dismiss();
         return impl_->execute(request, response, std::move(execution));
     } catch (...) {
-        // Preserve the SDK failure flag and buffer-safety proof. Protected
-        // payload scopes also retain uncertain SDK access before this guard
-        // can let shutdown observe an idle worker.
+        // Preserve the SDK failure flag and buffer-safety proof. Payload scopes
+        // retain borrowed descriptors before this guard retires the active call;
+        // they do not delay the original SDK shutdown after workers drain.
         response.set_transfer_status(REMOTE_TRANSFER_STATUS_FAILED);
         return false;
     }

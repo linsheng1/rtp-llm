@@ -29,7 +29,7 @@ BackendHandle makeRegistryBackend(const BackendEnvironment& environment,
     parallel.prefill_cp_config.prefill_cp_size = 1;
     RuntimeConfig runtime;
     runtime.model_name = "kvcm_test_model";
-    return BackendHandle(std::make_unique<MockQuiescentKVCMBackend>(environment.cache_config,
+    return BackendHandle(std::make_unique<KVCMStorageBackend>(environment.cache_config,
         config, runtime, parallel, SpeculativeExecutionConfig{}, nullptr, true, nullptr, client));
 }
 

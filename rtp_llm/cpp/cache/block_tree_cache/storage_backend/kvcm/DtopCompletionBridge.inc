@@ -343,7 +343,6 @@ std::vector<FunctionResponsePB> transferCompletedDecode(const std::vector<Functi
         const auto& remote = requests[peer].remote_request();
         responses[peer].mutable_remote_response()->set_sdk_failed(false);
         auto operation = std::make_shared<Batch>();
-        operation->client = client_wrapper_;
         for (const auto& pool : pools_by_tag_) operation->pools.push_back(pool.second);
         auto& batch = *operation;
         batch.uris.assign(remote.uris().begin(), remote.uris().end());

@@ -270,21 +270,9 @@ protected:
     virtual void               onQuarantined(bool, StorageQuarantineReason, size_t) noexcept {}
     virtual void               onQuarantineChanged(uint64_t, size_t, size_t,
                                                    const StorageQuarantineBreakdown&) noexcept {}
+    // Conservatively classify untyped payload exceptions and pin their sources;
+    // UNKNOWN uses the same native freeze/settlement path for both roles.
     virtual bool protectUnknownCompletion() const noexcept { return false; }
-    virtual std::shared_ptr<void> completionResourceOwner() const { return {}; }
-    virtual bool hasUnresolvedExternalIo() const noexcept { return false; }
-    // Called only after application I/O callbacks have joined. True requires
-    // actual transport quiescence, not merely SDK method/worker completion.
-    // This is a nonblocking predicate under the quarantine mutex; it must not
-    // invoke notifyCompletionQuiescence or initiate an SDK fence synchronously.
-    virtual bool quiesceUnknownOperations() noexcept { return false; }
-    // Call after publishing proof, without holding transport locks. Taking
-    // this mutex prevents a notification racing the wait predicate from being
-    // lost before the waiter atomically releases the mutex.
-    void notifyCompletionQuiescence() noexcept {
-        std::lock_guard<std::mutex> lock(quarantine_mutex_);
-        quarantine_cv_.notify_all();
-    }
 
 private:
     enum class Lifecycle {
@@ -333,8 +321,6 @@ private:
     size_t                  in_flight_{0};
 
     std::mutex quarantine_mutex_;
-    std::condition_variable quarantine_cv_;
-    std::shared_ptr<storage_backend_detail::StorageTaskState> protected_quarantine_;
     // Preserve the per-operation quarantine metrics and abort threshold.
     size_t                     quarantined_task_count_{0};
     size_t                     quarantined_block_count_{0};

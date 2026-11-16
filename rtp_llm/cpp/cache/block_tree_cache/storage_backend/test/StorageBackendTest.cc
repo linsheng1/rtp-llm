@@ -497,38 +497,9 @@ class ProtectedBackend: public QuarantineObservingBackend {
 public:
     using QuarantineObservingBackend::QuarantineObservingBackend;
     ~ProtectedBackend() override { shutdown(); }
-    std::shared_ptr<void> resources = std::make_shared<int>(1);
-    std::atomic<bool> quiescent{false};
-    std::atomic<bool> external_unknown{false};
     ExternalIoGuard trackWorkerIo() { return trackExternalIo(); }
-    void proveQuiescence() {
-        quiescent.store(true);
-        notifyCompletionQuiescence();
-    }
 protected:
     bool protectUnknownCompletion() const noexcept override { return true; }
-    std::shared_ptr<void> completionResourceOwner() const override { return resources; }
-    bool hasUnresolvedExternalIo() const noexcept override { return external_unknown.load(); }
-    bool quiesceUnknownOperations() noexcept override { return quiescent.load(); }
-};
-
-class PredicateBoundaryBackend: public ProtectedBackend {
-public:
-    using ProtectedBackend::ProtectedBackend;
-    ~PredicateBoundaryBackend() override { shutdown(); }
-    std::promise<void> predicate_entered, resume_predicate;
-    std::shared_future<void> resume = resume_predicate.get_future().share();
-protected:
-    bool quiesceUnknownOperations() noexcept override {
-        const bool safe = quiescent.load();
-        if (!safe && !paused_.exchange(true)) {
-            predicate_entered.set_value();
-            resume.wait();
-        }
-        return safe;
-    }
-private:
-    std::atomic<bool> paused_{false};
 };
 
 std::shared_ptr<const CacheTopology> makeTopology() {
@@ -962,7 +933,6 @@ TEST(StorageBackendTest, WriteMaskQuarantinesOnlyRetainedSourcePins) {
     ProtectedBackend backend(true, executor);
     ASSERT_TRUE(initBackend(backend, pool));
     block_tree_cache_detail::ScopeRollback drain([&] {
-        backend.proveQuiescence();
         backend.shutdown();
     });
     backend.start_write_action = [&](const StorageRequest&, auto, auto retain_pins) -> bool {
@@ -978,7 +948,8 @@ TEST(StorageBackendTest, WriteMaskQuarantinesOnlyRetainedSourcePins) {
     EXPECT_EQ(backend.quarantined_blocks, 1u);
     drain.run();
     EXPECT_EQ(pool->refCount(blocks[0]), 1u);
-    EXPECT_EQ(pool->refCount(blocks[1]), 1u);
+    EXPECT_EQ(pool->refCount(blocks[1]), 2u);
+    EXPECT_TRUE(pool->isFrozen(blocks[1]));
     pool->decRef(blocks);
 }
 
@@ -1016,7 +987,7 @@ TEST(StorageBackendTest, MidPreparePinFailureRollsBackRecordedPinsAndBudgetExact
     backend.shutdown();
 }
 
-TEST(StorageBackendTest, ProtectedReadTimeoutRetainsTargetUntilExplicitQuiescence) {
+TEST(StorageBackendTest, ProtectedReadTimeoutFreezesTargetAcrossShutdown) {
     auto pool = std::make_shared<TestBlockPool>();
     const auto block = pool->malloc().value();
     pool->incRef(block);
@@ -1030,15 +1001,15 @@ TEST(StorageBackendTest, ProtectedReadTimeoutRetainsTargetUntilExplicitQuiescenc
     backend.read(makeRequest(block), nullptr, [&](ErrorInfo error) {
         EXPECT_EQ(error.code(), ErrorCode::DEADLINE_EXCEEDED);
         EXPECT_EQ(pool->refCount(block), 2u);
-        EXPECT_FALSE(pool->isFrozen(block));
+        EXPECT_TRUE(pool->isFrozen(block));
         completed = true;
     });
     ASSERT_EQ(executor->runAll(), 1u);
     EXPECT_TRUE(completed);
     EXPECT_EQ(backend.quarantine_events, 1u);
-    backend.proveQuiescence();
     backend.shutdown();
-    EXPECT_EQ(pool->refCount(block), 1u);
+    EXPECT_EQ(pool->refCount(block), 2u);
+    EXPECT_TRUE(pool->isFrozen(block));
     pool->decRef(block);
 }
 
@@ -1059,7 +1030,7 @@ TEST(StorageBackendTest, PeerProjectionRejectedForReadsAndOrdinaryWritesBeforePi
     backend.shutdown();
 }
 
-TEST(StorageBackendTest, PostEntryAllocationFailureRetainsOwnersUntilExplicitQuiescence) {
+TEST(StorageBackendTest, PostEntryAllocationFailureFreezesSourcesAndSettlesOnce) {
     auto pool = std::make_shared<TestBlockPool>();
     const auto block = pool->malloc().value();
     pool->incRef(block);
@@ -1070,34 +1041,23 @@ TEST(StorageBackendTest, PostEntryAllocationFailureRetainsOwnersUntilExplicitQui
     auto request = makeRequest(block);
     request.decode_completion = true;
     request.completion_budget_lease = budget.tryAcquire(16);
-    std::weak_ptr<void> owner = backend->resources;
     std::weak_ptr<const CacheKeysType> keys = request.keys;
     backend->write_action = [] { throw std::bad_alloc(); };
     ASSERT_TRUE(backend->write(backend->prepareWrite(std::move(request))));
-    backend->resources.reset();
     ASSERT_EQ(executor->runAll(), 1u);
     EXPECT_EQ(backend->quarantine_events, 1u);
-    EXPECT_FALSE(owner.expired());
-    EXPECT_FALSE(keys.expired());
-    EXPECT_EQ(pool->refCount(block), 2u);
-    EXPECT_FALSE(pool->isFrozen(block));
-    EXPECT_EQ(budget.snapshot().jobs, 1u);
-    BoundedThread<void> stopping([backend] { backend->shutdown(); });
-    EXPECT_EQ(stopping.waitFor(std::chrono::milliseconds(20)), std::future_status::timeout);
-    EXPECT_FALSE(backend->shutdownCalled());
-    EXPECT_EQ(pool->refCount(block), 2u);
-    backend->proveQuiescence();
-    ASSERT_EQ(stopping.waitFor(std::chrono::seconds(5)), std::future_status::ready);
-    stopping.get();
-    EXPECT_TRUE(backend->shutdownCalled());
-    EXPECT_TRUE(owner.expired());
     EXPECT_TRUE(keys.expired());
+    EXPECT_EQ(pool->refCount(block), 2u);
+    EXPECT_TRUE(pool->isFrozen(block));
     EXPECT_EQ(budget.snapshot().jobs, 0u);
-    EXPECT_EQ(pool->refCount(block), 1u);
+    backend->shutdown();
+    EXPECT_TRUE(backend->shutdownCalled());
+    EXPECT_EQ(pool->refCount(block), 2u);
+    EXPECT_TRUE(pool->isFrozen(block));
     pool->decRef(block);
 }
 
-TEST(StorageBackendTest, WorkerTransactionRecordsUnknownBeforeShutdownCanDestroyTransport) {
+TEST(StorageBackendTest, WorkerTransactionCompletesBeforeShutdownCanDestroyTransport) {
     auto pool = std::make_shared<TestBlockPool>();
     auto backend = std::make_shared<ProtectedBackend>();
     ASSERT_TRUE(initBackend(*backend, pool));
@@ -1106,49 +1066,11 @@ TEST(StorageBackendTest, WorkerTransactionRecordsUnknownBeforeShutdownCanDestroy
     BoundedThread<void> stopping([backend] { backend->shutdown(); });
     EXPECT_EQ(stopping.waitFor(std::chrono::milliseconds(20)), std::future_status::timeout);
     EXPECT_FALSE(backend->shutdownCalled());
-    backend->external_unknown.store(true);
     transaction = {};
-    EXPECT_EQ(stopping.waitFor(std::chrono::milliseconds(20)), std::future_status::timeout);
-    EXPECT_FALSE(backend->shutdownCalled());
-    backend->proveQuiescence();
     ASSERT_EQ(stopping.waitFor(std::chrono::seconds(5)), std::future_status::ready);
     stopping.get();
     EXPECT_TRUE(backend->shutdownCalled());
     EXPECT_FALSE(backend->trackWorkerIo());
-}
-
-TEST(StorageBackendTest, QuiescenceNotificationCannotBeLostAtPredicateWaitBoundary) {
-    auto pool = std::make_shared<TestBlockPool>();
-    const auto block = pool->malloc().value();
-    pool->incRef(block);
-    auto executor = std::make_shared<HoldingExecutor>();
-    auto backend = std::make_shared<PredicateBoundaryBackend>(true, executor);
-    ASSERT_TRUE(initBackend(*backend, pool));
-    backend->write_action = [] { throw std::bad_alloc(); };
-    auto request = makeRequest(block);
-    request.decode_completion = true;
-    ASSERT_TRUE(backend->write(backend->prepareWrite(std::move(request))));
-    ASSERT_EQ(executor->runAll(), 1u);
-    auto entered = backend->predicate_entered.get_future();
-    BoundedThread<void> stopping([backend] { backend->shutdown(); });
-    ASSERT_EQ(entered.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    auto announced = std::make_shared<std::promise<void>>();
-    auto notifying = announced->get_future();
-    BoundedThread<void> notifier([backend, announced] {
-        announced->set_value();
-        backend->proveQuiescence();
-    });
-    ASSERT_EQ(notifying.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    // The predicate deliberately holds the registry mutex after reading false.
-    // Notification must wait for that mutex, so it cannot slip before wait().
-    EXPECT_EQ(notifier.waitFor(std::chrono::milliseconds(100)), std::future_status::timeout);
-    backend->resume_predicate.set_value();
-    ASSERT_EQ(notifier.waitFor(std::chrono::seconds(5)), std::future_status::ready);
-    notifier.get();
-    ASSERT_EQ(stopping.waitFor(std::chrono::seconds(5)), std::future_status::ready);
-    stopping.get();
-    EXPECT_EQ(pool->refCount(block), 1u);
-    pool->decRef(block);
 }
 
 TEST(StorageBackendTest, ExplicitPayloadSafeFailureReleasesWithoutQuarantine) {
@@ -2272,7 +2194,6 @@ TEST(StorageBackendTest, ProtectedUnknownIgnoresLocalTargetProtectionMarkers) {
             auto executor = std::make_shared<HoldingExecutor>();
             ProtectedBackend backend(true, executor);
             block_tree_cache_detail::ScopeRollback cleanup([&] {
-                backend.proveQuiescence();
                 backend.shutdown();
             });
             ASSERT_TRUE(initBackend(backend, pool));
@@ -2298,8 +2219,8 @@ TEST(StorageBackendTest, ProtectedUnknownIgnoresLocalTargetProtectionMarkers) {
             }
             ASSERT_EQ(executor->runAll(), 1u);
             EXPECT_EQ(callbacks, is_write ? 0u : 1u);
-            EXPECT_FALSE(request_keys.expired());
-            EXPECT_FALSE(pool->isFrozen(block));
+            EXPECT_TRUE(request_keys.expired());
+            EXPECT_TRUE(pool->isFrozen(block));
             EXPECT_EQ(pool->refCount(block), 2u);
             EXPECT_EQ(backend.quarantine_events, 1u);
             EXPECT_EQ(backend.last_quarantine_is_write, is_write);
@@ -2307,7 +2228,8 @@ TEST(StorageBackendTest, ProtectedUnknownIgnoresLocalTargetProtectionMarkers) {
             EXPECT_EQ(backend.quarantined_blocks, 1u);
             cleanup.run();
             EXPECT_TRUE(request_keys.expired());
-            EXPECT_EQ(pool->refCount(block), 1u);
+            EXPECT_EQ(pool->refCount(block), 2u);
+            EXPECT_TRUE(pool->isFrozen(block));
             pool->decRef(block);
         }
     }

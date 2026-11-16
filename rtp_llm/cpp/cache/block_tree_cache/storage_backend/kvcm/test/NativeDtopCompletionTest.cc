@@ -803,7 +803,7 @@ protected:
         BlockIndicesType                    full, state;
         BatchKVCacheResource                resource;
         std::shared_ptr<MockClientWrapper>  client = std::make_shared<MockClientWrapper>();
-        std::unique_ptr<MockQuiescentKVCMBackend> backend;
+        std::unique_ptr<KVCMStorageBackend> backend;
         std::map<std::string, std::string>  specs;
         std::atomic<int>                    starts{0}, saves{0}, finishes{0}, aborts{0};
         bool                                block_start = false, fail_save = false, lose_commit = false;
@@ -935,14 +935,13 @@ protected:
             parallel.prefill_cp_config.kv_cache_sharded = sharded;
             RuntimeConfig rt;
             rt.model_name = "eos_gpu";
-            backend       = std::make_unique<MockQuiescentKVCMBackend>(
+            backend       = std::make_unique<KVCMStorageBackend>(
                 env.cache_config, k, rt, parallel, SpeculativeExecutionConfig{}, nullptr, true, nullptr, client);
             EXPECT_TRUE(initSingleRank(*backend, env));
         }
         ~Scenario() {
             unblock();
             if (backend) {
-                backend->proveMockQuiescence();
                 backend->shutdown();
             }
             dropRequestRefs();
@@ -1092,35 +1091,34 @@ TEST_P(EosGpuCompletionTest, KnownPrefillBoundarySkipsCheckpointWithoutNewDecode
     }
 }
 
-TEST_P(EosGpuCompletionTest, UnknownSdkCompletionRetainsPagesAndWaitsForExplicitMockQuiescence) {
+TEST_P(EosGpuCompletionTest, UnknownSdkCompletionUsesNativeFrozenPagesAcrossShutdown) {
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));
+    // One endpoint suffices for this failure case and stays below the original
+    // pool frozen-ratio limit for every CP layout; do not disable that guard.
+    s.count = 1;
     s.fail_save = true;
     ASSERT_TRUE(s.backend->captureCompletedDecode(s.resource, s.end(), true));
     ASSERT_TRUE(waitForBackendOperationsForTest(*s.backend));
     s.dropRequestRefs();
-    EXPECT_EQ(s.finishes, 0);
-    // Unknown DMA completion must retain the remote WRITING session as well as
-    // local GPU pages. An immediate abort could recycle its destination.
     EXPECT_EQ(s.aborts, 0);
-    for (int i = 0; i < s.count * s.shards; ++i)
+    EXPECT_EQ(s.finishes, 0);
+    EXPECT_TRUE(s.env.pools_by_tag.at("state")->isFrozen(s.state.front()));
+    for (int i = 0; i < s.count * s.shards; ++i) {
+        EXPECT_TRUE(s.env.pools_by_tag.at("full")->isFrozen(s.full[i]));
         EXPECT_TRUE(s.env.pools_by_tag.at("full")->isAllocated(s.full[i]));
-    EXPECT_TRUE(s.backend->protected_quarantine_);
+    }
     EXPECT_EQ(s.backend->quarantined_task_count_, 1u);
     BatchKVCacheResource other        = s.resource;
     other.decodeCompletionSubmitted() = false;
     ASSERT_TRUE(s.backend->captureCompletedDecode(other, s.end(), true));
     EXPECT_FALSE(other.decodeCompletionSubmitted());
     EXPECT_EQ(s.starts, 1);
-    auto stopped = std::async(std::launch::async, [&] { s.backend->shutdown(); });
-    EXPECT_EQ(stopped.wait_for(std::chrono::milliseconds(50)), std::future_status::timeout);
-    for (int i = 0; i < s.count * s.shards; ++i)
+    s.backend->shutdown();
+    EXPECT_TRUE(s.env.pools_by_tag.at("state")->isFrozen(s.state.front()));
+    for (int i = 0; i < s.count * s.shards; ++i) {
+        EXPECT_TRUE(s.env.pools_by_tag.at("full")->isFrozen(s.full[i]));
         EXPECT_TRUE(s.env.pools_by_tag.at("full")->isAllocated(s.full[i]));
-    s.backend->proveMockQuiescence();
-    EXPECT_EQ(stopped.wait_for(std::chrono::seconds(5)), std::future_status::ready);
-    stopped.get();
-    EXPECT_FALSE(s.backend->protected_quarantine_);
-    for (int i = 0; i < s.count * s.shards; ++i)
-        EXPECT_FALSE(s.env.pools_by_tag.at("full")->isAllocated(s.full[i]));
+    }
 }
 TEST_P(EosGpuCompletionTest, DuplicateEosAndFullAdmissionDoNotDoublePinOrPublish) {
     Scenario s(std::get<0>(GetParam()), std::get<1>(GetParam()), true, false, std::get<2>(GetParam()));

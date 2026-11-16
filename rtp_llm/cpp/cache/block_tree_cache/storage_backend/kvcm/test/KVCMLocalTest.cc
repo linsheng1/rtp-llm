@@ -730,7 +730,7 @@ BackendHandle makeCompletionProofBackend(const BackendEnvironment&              
     parallel.prefill_cp_config.prefill_cp_size = 1;
     RuntimeConfig runtime;
     runtime.model_name = "kvcm_test_model";
-    return BackendHandle(std::make_unique<MockQuiescentKVCMBackend>(environment.cache_config,
+    return BackendHandle(std::make_unique<KVCMStorageBackend>(environment.cache_config,
                                                                     config,
                                                                     runtime,
                                                                     parallel,
@@ -883,8 +883,7 @@ TEST(KVCMLocalTest, EnabledReadQuarantinesUnprovenSdkErrorsButNotExplicitSafeRes
             EXPECT_FALSE(error.ok());
             ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
             const bool unknown = !safe;
-            EXPECT_EQ(static_cast<bool>(backend.backend->protected_quarantine_), enabled && unknown);
-            EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), !enabled && unknown);
+            EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), unknown);
             EXPECT_EQ(backend->frozenTasks().size(), !enabled && unknown ? 1u : 0u);
             EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + (unknown ? 1u : 0u));
             std::lock_guard<std::mutex> lock(backend.backend->quarantine_mutex_);
@@ -926,8 +925,7 @@ TEST(KVCMLocalTest, CallerBufferSafetyDoesNotProveRemoteAllocationQuiescence) {
             ASSERT_TRUE(static_cast<bool>(task));
             ASSERT_TRUE(backend.backend->write(std::move(task)));
             ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-            EXPECT_EQ(static_cast<bool>(backend.backend->protected_quarantine_), enabled && unknown);
-            EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
+            EXPECT_EQ(environment.device_pool->isFrozen(environment.block_id), enabled && unknown);
             EXPECT_TRUE(backend->frozenTasks().empty());
             EXPECT_EQ(environment.device_pool->refCount(environment.block_id), ref_count_before + (enabled && unknown ? 1u : 0u));
         }
@@ -1052,7 +1050,6 @@ TEST(KVCMLocalTest, RuntimeDisableAfterAllocationAbortsBeforePayloadAndCanRecove
         ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), refs);
         EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
-        EXPECT_FALSE(backend.backend->protected_quarantine_);
         EXPECT_FALSE(backend.backend->prepareWrite(makeStorageRequest(environment)));
 
         backend.backend->setRemoteCacheEnabled(true);
@@ -1088,7 +1085,6 @@ TEST(KVCMLocalTest, RuntimeDisableAfterMatchSkipsLoadWithoutQuarantine) {
         EXPECT_FALSE(result.ok());
         EXPECT_NE(result.code(), ErrorCode::DEADLINE_EXCEEDED);
         EXPECT_EQ(environment.device_pool->refCount(environment.block_id), refs);
-        EXPECT_FALSE(backend.backend->protected_quarantine_);
         EXPECT_FALSE(environment.device_pool->isFrozen(environment.block_id));
         auto       local_request = makeStorageRequest(environment, {101, 102}, 1);
         const auto local         = match(*backend.backend, std::move(local_request));
@@ -1255,7 +1251,7 @@ TEST(KVCMLocalTest, EnabledReadAndWriteResponsesCarryExplicitCompletionProof) {
     EXPECT_TRUE(response.payload_buffer_safe());
 }
 
-TEST(KVCMLocalTest, UnknownPaceBatchRetainsEveryDestinationGroupUntilQuiescence) {
+TEST(KVCMLocalTest, UnknownPaceBatchFreezesEveryDestinationGroupAcrossShutdown) {
     autil::EnvGuard feature("RTP_LLM_REMOTE_CACHE_ENABLE_DECODE_PUBLISH", "1");
     autil::EnvGuard async("RTP_LLM_STREAM_ASYNC", "0");
     auto            environment = makeHybridBackendEnvironment("kvcm_group_completion_proof");
@@ -1288,18 +1284,16 @@ TEST(KVCMLocalTest, UnknownPaceBatchRetainsEveryDestinationGroupUntilQuiescence)
     const auto error = readResult(*backend.backend, request, std::move(observation.match_meta));
     EXPECT_FALSE(error.ok());
     ASSERT_TRUE(waitForBackendOperationsForTest(*backend.backend));
-    EXPECT_TRUE(backend.backend->protected_quarantine_);
     for (const auto& [tag, pool] : environment.pools_by_tag) {
         SCOPED_TRACE(tag);
-        EXPECT_FALSE(pool->isFrozen(environment.block_id));
+        EXPECT_TRUE(pool->isFrozen(environment.block_id));
         EXPECT_EQ(pool->refCount(environment.block_id), references.at(tag) + 1);
     }
-    auto* mock = dynamic_cast<MockQuiescentKVCMBackend*>(backend.backend.get());
-    ASSERT_NE(mock, nullptr);
-    mock->proveMockQuiescence();
     backend.backend->shutdown();
-    for (const auto& [tag, pool] : environment.pools_by_tag)
-        EXPECT_EQ(pool->refCount(environment.block_id), references.at(tag));
+    for (const auto& [tag, pool] : environment.pools_by_tag) {
+        EXPECT_EQ(pool->refCount(environment.block_id), references.at(tag) + 1);
+        EXPECT_TRUE(pool->isFrozen(environment.block_id));
+    }
 }
 
 TEST(KVCMLocalTest, MatchAndReadUseReturnedLocation) {
