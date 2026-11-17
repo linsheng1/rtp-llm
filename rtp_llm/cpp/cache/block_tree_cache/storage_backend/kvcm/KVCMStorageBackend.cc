@@ -85,6 +85,24 @@ std::string nextTraceId(const char* operation, std::atomic<uint64_t>& sequence) 
     return std::string("block_tree_") + operation + "_" + std::to_string(sequence.fetch_add(1));
 }
 
+// Cache keys are rolling hashes, not token text, so these lines carry no prompt content.
+std::string probeKeys(const CacheKeysType& keys) {
+    std::ostringstream out;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (i != 0) {
+            out << ',';
+        }
+        out << keys[i];
+    }
+    return out.str();
+}
+
+int64_t probeWallUs() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
 struct KVCMMatchMeta final: StorageBackendMatchMeta {
     kv_cache_manager::Locations locations;
     bool                        filtered = false;
@@ -740,17 +758,30 @@ public:
         RtpLLMRemoteCacheMatchMetricsCollector collector;
         const char*                            lookup_outcome = "failed";
         const auto                             start          = Clock::now();
+        const auto                             trace_id       = nextTraceId("match", match_trace_sequence_);
+        size_t                                 probe_raw_locations = 0;
         block_tree_cache_detail::ScopeRollback report([&] {
             collector.remote_match_time_us = elapsedTimeUs(start);
             reportRemoteMetrics<RtpLLMRemoteCacheMatchMetrics>(collector);
-            if (decode_publication_enabled_) {
-                RtpLLMRemoteCacheOutcomeMetricsCollector result;
-                result.stage   = "lookup";
-                result.outcome = lookup_outcome;
-                reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(result);
-            }
+            // Prefill must distinguish not_found from found_unusable as well.
+            RtpLLMRemoteCacheOutcomeMetricsCollector result;
+            result.stage   = "lookup";
+            result.outcome = lookup_outcome;
+            reportRemoteMetrics<RtpLLMRemoteCacheOutcomeMetrics>(result);
+            RTP_LLM_LOG_INFO("KVCM_MATCH_PROBE rid=%ld trace=%s instance=%s rank=%ld keys=%s "
+                             "local_matched=%zu outcome=%s reuse=%ld raw_locations=%zu match_us=%ld end_at=%ld",
+                             static_cast<long>(request.request_id.value_or(-1)),
+                             trace_id.c_str(),
+                             probe_instance_id_.c_str(),
+                             static_cast<long>(parallelism_config_.tp_rank),
+                             probeKeys(keys).c_str(),
+                             request.local_matched_blocks_num,
+                             lookup_outcome,
+                             static_cast<long>(collector.remote_match_reuse_block_num),
+                             probe_raw_locations,
+                             static_cast<long>(collector.remote_match_time_us),
+                             static_cast<long>(probeWallUs()));
         });
-        const auto                             trace_id = nextTraceId("match", match_trace_sequence_);
         auto query_type                                 = static_cast<kv_cache_manager::QueryType>(default_query_type_);
         if (has_swa_) {
             // Fetch FULL and SWA locations, then apply each group's
@@ -792,10 +823,10 @@ public:
         if (!success) {
             return {request.local_matched_blocks_num, nullptr};
         }
-        const bool found_any = decode_publication_enabled_
-            && std::any_of(locations.begin()
-                               + (positional ? std::min(request.local_matched_blocks_num, locations.size()) : 0),
-                           locations.end(), [](const auto& row) { return !row.empty(); });
+        probe_raw_locations = locations.size();
+        const bool found_any = std::any_of(locations.begin()
+                                               + (positional ? std::min(request.local_matched_blocks_num, locations.size()) : 0),
+                                           locations.end(), [](const auto& row) { return !row.empty(); });
         if (positional) {
             auto meta                              = std::make_shared<KVCMMatchMeta>();
             meta->locations                        = reusableLocations(request, std::move(locations));
@@ -1352,6 +1383,28 @@ public:
         if (const auto lease =
                 std::dynamic_pointer_cast<kvcm::DecodePublicationAccounting::Lease>(request.completion_admission))
             lease->recordOutcome("committed", /*acknowledged=*/true);
+        CacheKeysType published_keys;
+        if (request.keys) {
+            published_keys.reserve(write.key_indices.size());
+            for (const size_t index : write.key_indices) {
+                if (index < request.keys->size()) {
+                    published_keys.push_back((*request.keys)[index]);
+                }
+            }
+        }
+        RTP_LLM_LOG_INFO("KVCM_PUBLISH_PROBE rid=%ld session=%s instance=%s rank=%ld keys=%s key_indices=%zu "
+                         "computed=%zu published=%zu locations=%zu finish_us=%ld ack_at=%ld",
+                         static_cast<long>(request.request_id.value_or(-1)),
+                         write.sessionId().c_str(),
+                         probe_instance_id_.c_str(),
+                         static_cast<long>(parallelism_config_.tp_rank),
+                         probeKeys(published_keys).c_str(),
+                         write.key_indices.size(),
+                         request.computed_tokens,
+                         request.published_tokens,
+                         write_location.locations.size(),
+                         static_cast<long>(collector.remote_finish_write_time_us),
+                         static_cast<long>(probeWallUs()));
     }
 
     bool finishSession(WritePublication& write,
@@ -2127,6 +2180,20 @@ private:
             instance_id += '_';
         }
         instance_id += std::to_string(hashString(identity.str()));
+
+        probe_instance_id_ = instance_id;
+        RTP_LLM_LOG_INFO("KVCM_IDENTITY_PROBE instance=%s seed=%ld base_tokens=%zu decode_pub=%d is_decode=%d "
+                         "tp=%ld dp=%ld query_type=%d read_backend=%d has_swa=%d",
+                         instance_id.c_str(),
+                         static_cast<long>(cache_config_.cache_key_hash_seed),
+                         wire_block,
+                         static_cast<int>(decode_publication_enabled_),
+                         static_cast<int>(is_decode_role_),
+                         static_cast<long>(parallelism_config_.tp_size),
+                         static_cast<long>(parallelism_config_.dp_size),
+                         static_cast<int>(default_query_type_),
+                         static_cast<int>(kv_cache_config_.kvcm_read_backend_type),
+                         static_cast<int>(has_swa_));
 
         if (decode_publication_enabled_) {
             RTP_LLM_LOG_INFO("DTOP_GPU identity instance=%s tp=%ld dp=%ld base_tokens=%zu",
@@ -3009,6 +3076,7 @@ private:
     std::unique_ptr<kvcm::GroupPolicy>                  group_policy_;
     std::shared_ptr<kmonitor::MetricsReporter>          metrics_reporter_;
     std::shared_ptr<kvcm::ClientWrapper>                client_wrapper_;
+    std::string                                         probe_instance_id_;
     std::optional<ControlConfig>                        control_config_;
     std::vector<std::string>                            registration_tags_;
     std::unordered_map<std::string, DeviceBlockPoolPtr> pools_by_tag_;
