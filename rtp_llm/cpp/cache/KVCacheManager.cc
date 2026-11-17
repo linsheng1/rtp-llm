@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
 
 #include <algorithm>
+#include <atomic>
 #if USING_CUDA
 #include <cuda_runtime.h>
 #include <ATen/cuda/CUDAContext.h>
@@ -514,6 +515,133 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
                         malloc_info.complete_token_ids,
                         seq_size_per_block,
                         config_.cache_key_hash_seed);
+    }
+    // Observation only. Three independent budgets so unrelated traffic cannot exhaust the
+    // IDS/READ evidence, and every probe is isolated: a diagnostic must never become a malloc
+    // failure. Integrity and lifetime protection are untouched.
+    try {
+        static std::atomic<int> probe_req_budget{256};
+        static std::atomic<int> probe_req_notice{1};
+        static std::atomic<int> probe_ids_budget{128};
+        static std::atomic<int> probe_ids_notice{1};
+        // Watermark pair: one diagnostic request at a time (manual probes are single-concurrency).
+        // A different rid restarts from block 0; the block budget bounds any re-dump.
+        static std::atomic<int64_t> probe_ids_rid{-1};
+        static std::atomic<size_t>  probe_ids_mark{0};
+
+        const auto& probe_res = *malloc_info.batch_kv_cache_resource;
+        const int   probe_ssb = seq_size_per_block;
+        if (probe_ssb > 0 && probe_res.batchSize() > 0 && malloc_info.complete_token_ids) {
+            const auto&  probe_keys = probe_res.cacheKeys(0);
+            const size_t probe_n    = probe_keys.size();
+            // COMPLETE blocks only: initCacheKeys pushes a partial tail that updateCacheKeys later
+            // pops and re-pushes full. The raw count would hide that transition; the trailing
+            // partial block is never part of a canonical key, so it is deliberately not dumped.
+            const size_t probe_complete = probe_n - ((!probe_res.lastBlockAligned() && probe_n > 0) ? 1 : 0);
+            const int    probe_seq_len  = malloc_info.complete_token_ids->seqLength();
+            const long   probe_rid      = static_cast<long>(malloc_info.request_id);
+
+            // Effective switches AFTER the global AND and the decode-first-malloc override.
+            // On DECODE the first malloc can legitimately read reuse_cache=0 even for a request
+            // that asked for reuse; the authoritative bypass signal is the PREFILL line.
+            if (is_first_malloc) {
+                if (probe_req_budget.fetch_sub(1) > 0) {
+                    RTP_LLM_LOG_INFO("KVCM_REQ_PROBE rid=%ld rank=%ld role=%d seq_len=%d reuse_cache=%d "
+                                     "enable_cache_lookup=%d enable_storage_backend=%d keys_init_now=%d "
+                                     "complete_blocks=%zu aligned=%d incr_override=%d",
+                                     probe_rid,
+                                     static_cast<long>(parallelism_config_.tp_rank),
+                                     static_cast<int>(parallelism_config_.role_type),
+                                     probe_seq_len,
+                                     static_cast<int>(malloc_info.reuse_cache),
+                                     static_cast<int>(malloc_info.enable_cache_lookup),
+                                     static_cast<int>(malloc_info.enable_storage_backend),
+                                     static_cast<int>(keys_initialized_now),
+                                     probe_complete,
+                                     static_cast<int>(probe_res.lastBlockAligned()),
+                                     malloc_info.incr_seq_len_override);
+                } else if (probe_req_notice.fetch_sub(1) > 0) {
+                    RTP_LLM_LOG_INFO("KVCM_REQ_PROBE_BUDGET_EXHAUSTED rid=%ld seq_len=%d budget=256 "
+                                     "note=further_requests_unlogged",
+                                     probe_rid,
+                                     probe_seq_len);
+                }
+            }
+
+            // IDS: diagnostic long requests only. Warmup and short prompts stay far below 3072,
+            // so they never consume this budget. Window [0,4096) covers the whole R1 (3634) and
+            // R2 (3639) sequences: probe4 diverged at canonical key 3, probe5 at key 1.
+            if (probe_seq_len >= 3072) {
+                const size_t probe_hi = std::min(probe_complete, static_cast<size_t>(4096 / probe_ssb));
+                size_t       probe_lo = 0;
+                if (probe_ids_rid.load() == probe_rid) {
+                    probe_lo = std::min(probe_ids_mark.load(), probe_hi);
+                }
+                if (probe_lo < probe_hi) {
+                    if (probe_ids_budget.load() <= 0) {
+                        if (probe_ids_notice.fetch_sub(1) > 0) {
+                            RTP_LLM_LOG_INFO("KVCM_IDS_PROBE_BUDGET_EXHAUSTED rid=%ld seq_len=%d "
+                                             "blocks_wanted=%zu budget=128 note=ids_incomplete",
+                                             probe_rid,
+                                             probe_seq_len,
+                                             probe_hi - probe_lo);
+                        }
+                    } else {
+                        const auto* probe_ids  = malloc_info.complete_token_ids->data(0);
+                        size_t      probe_done = probe_lo;
+                        for (size_t b = probe_lo; b < probe_hi; ++b) {
+                            if (probe_ids_budget.fetch_sub(1) <= 0) {
+                                break;
+                            }
+                            const int pos = static_cast<int>(b) * probe_ssb;
+                            const int len = std::min(probe_ssb, probe_seq_len - pos);
+                            if (len <= 0) {
+                                break;
+                            }
+                            RTP_LLM_LOG_INFO("KVCM_IDS_PROBE rid=%ld rank=%ld role=%d block=%zu pos=%d "
+                                             "len=%d seq_len=%d aligned=%d key=%ld",
+                                             probe_rid,
+                                             static_cast<long>(parallelism_config_.tp_rank),
+                                             static_cast<int>(parallelism_config_.role_type),
+                                             b,
+                                             pos,
+                                             len,
+                                             probe_seq_len,
+                                             static_cast<int>(probe_res.lastBlockAligned()),
+                                             static_cast<long>(probe_keys[b]));
+                            for (int off = 0; off < len; off += 128) {
+                                const int   n = std::min(128, len - off);
+                                std::string ids_text;
+                                ids_text.reserve(static_cast<size_t>(n) * 8);
+                                for (int j = 0; j < n; ++j) {
+                                    ids_text += std::to_string(probe_ids[pos + off + j]);
+                                    ids_text += ',';
+                                }
+                                RTP_LLM_LOG_INFO("KVCM_IDS_PROBE rid=%ld rank=%ld block=%zu at=%d ids=%s",
+                                                 probe_rid,
+                                                 static_cast<long>(parallelism_config_.tp_rank),
+                                                 b,
+                                                 pos + off,
+                                                 ids_text.c_str());
+                            }
+                            probe_done = b + 1;
+                        }
+                        probe_ids_rid.store(probe_rid);
+                        probe_ids_mark.store(probe_done);
+                        if (probe_ids_budget.load() <= 0 && probe_ids_notice.fetch_sub(1) > 0) {
+                            RTP_LLM_LOG_INFO("KVCM_IDS_PROBE_BUDGET_EXHAUSTED rid=%ld seq_len=%d "
+                                             "blocks_done=%zu blocks_wanted=%zu budget=128 "
+                                             "note=ids_incomplete",
+                                             probe_rid,
+                                             probe_seq_len,
+                                             probe_done,
+                                             probe_hi);
+                        }
+                    }
+                }
+            }
+        }
+    } catch (...) {
     }
     reportPrefillCacheHitMetrics(malloc_info, keys_initialized_now);
 

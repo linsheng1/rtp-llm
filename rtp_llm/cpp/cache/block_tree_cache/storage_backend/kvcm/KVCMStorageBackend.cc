@@ -982,6 +982,13 @@ public:
                                deadline = request.transfer_task->deadline(),
                                collector,
                                start,
+                               probe_rid = static_cast<long>(request.request_id.value_or(-1)),
+                               trace_id,
+                               probe_remote_blocks = remote_blocks,
+                               probe_local_matched = request.local_matched_blocks_num,
+                               probe_handles = request.handles.size(),
+                               probe_computed = request.computed_tokens,
+                               probe_key0 = (request.keys && !request.keys->empty()) ? (*request.keys)[0] : 0,
                                tokens = remote_blocks * topology_->groups().front().cacheKeyTokenStride()]() mutable {
                     bool                                   sdk_failed = false;
                     block_tree_cache_detail::ScopeRollback report([&] {
@@ -997,6 +1004,37 @@ public:
                             throw StorageOperationBufferSafeFailure("KVCM task deadline exceeded: after read");
                         }
                         collector.remote_read_token_num = static_cast<int64_t>(tokens);
+                        // Positive proof of read success: validateResponses() rethrows on both
+                        // BUFFER_SAFE_FAILURE and UNKNOWN, so only an all-rank SUCCESS reaches here.
+                        // Own try/catch is mandatory: the enclosing catch turns ANY throw into a
+                        // read failure.
+                        try {
+                            static std::atomic<int> probe_read_budget{64};
+                            static std::atomic<int> probe_read_notice{1};
+                            if (probe_read_budget.fetch_sub(1) > 0) {
+                                RTP_LLM_LOG_INFO("KVCM_READ_PROBE rid=%ld trace=%s instance=%s rank=%ld "
+                                                 "remote_blocks=%zu local_matched=%zu handles=%zu "
+                                                 "computed=%zu key0=%ld stride=%zu tokens=%ld "
+                                                 "outcome=read_complete async=1",
+                                                 probe_rid,
+                                                 trace_id.c_str(),
+                                                 probe_instance_id_.c_str(),
+                                                 static_cast<long>(parallelism_config_.tp_rank),
+                                                 probe_remote_blocks,
+                                                 probe_local_matched,
+                                                 probe_handles,
+                                                 probe_computed,
+                                                 static_cast<long>(probe_key0),
+                                                 static_cast<size_t>(topology_->groups().front().cacheKeyTokenStride()),
+                                                 static_cast<long>(tokens));
+                            } else if (probe_read_notice.fetch_sub(1) > 0) {
+                                RTP_LLM_LOG_INFO("KVCM_READ_PROBE_BUDGET_EXHAUSTED rid=%ld trace=%s "
+                                                 "budget=64 note=further_reads_unlogged",
+                                                 probe_rid,
+                                                 trace_id.c_str());
+                            }
+                        } catch (...) {
+                        }
                         collector.remote_read_fail_qps  = false;
                         if (coordinated)
                             coordinated->finalizeForForget();
@@ -1019,6 +1057,35 @@ public:
             static_cast<int64_t>(remote_blocks * topology_->groups().front().cacheKeyTokenStride());
         collector.remote_read_fail_qps = false;
         read_outcome                   = "read_complete";
+        // Same positive proof as the async exit; isolated so a diagnostic cannot fail the read.
+        try {
+            static std::atomic<int> probe_read_budget{64};
+            static std::atomic<int> probe_read_notice{1};
+            if (probe_read_budget.fetch_sub(1) > 0) {
+                RTP_LLM_LOG_INFO("KVCM_READ_PROBE rid=%ld trace=%s instance=%s rank=%ld "
+                                 "remote_blocks=%zu local_matched=%zu handles=%zu "
+                                 "computed=%zu key0=%ld stride=%zu tokens=%ld "
+                                 "outcome=%s async=0",
+                                 static_cast<long>(request.request_id.value_or(-1)),
+                                 trace_id.c_str(),
+                                 probe_instance_id_.c_str(),
+                                 static_cast<long>(parallelism_config_.tp_rank),
+                                 remote_blocks,
+                                 request.local_matched_blocks_num,
+                                 request.handles.size(),
+                                 request.computed_tokens,
+                                 static_cast<long>((request.keys && !request.keys->empty()) ? (*request.keys)[0] : 0),
+                                 static_cast<size_t>(topology_->groups().front().cacheKeyTokenStride()),
+                                 static_cast<long>(collector.remote_read_token_num),
+                                 read_outcome);
+            } else if (probe_read_notice.fetch_sub(1) > 0) {
+                RTP_LLM_LOG_INFO("KVCM_READ_PROBE_BUDGET_EXHAUSTED rid=%ld trace=%s "
+                                 "budget=64 note=further_reads_unlogged",
+                                 static_cast<long>(request.request_id.value_or(-1)),
+                                 trace_id.c_str());
+            }
+        } catch (...) {
+        }
         if (coordinated)
             coordinated->finalizeForForget();
     }
