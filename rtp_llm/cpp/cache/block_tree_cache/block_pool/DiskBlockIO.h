@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -27,6 +28,18 @@ struct DiskWrite {
     size_t      bytes;
 };
 
+// Optional per-write-batch observation, owned by the caller through the final callback.
+// One write worker fills it; the existing completion publication synchronizes readers.
+struct DiskWriteTiming {
+    int64_t queued_us{0}, worker_start_us{0}, sort_end_us{0}, io_end_us{0};
+    int64_t pwrite_count{0}, pwrite_sum_us{0}, pwrite_max_us{0};
+
+    static int64_t nowUs() noexcept {
+        return std::chrono::duration_cast<std::chrono::microseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+};
+
 // Block-pool-agnostic I/O for one backing file. DiskBlockPool owns
 // allocation policy and maps block indices to offsets.
 class DiskBlockIO {
@@ -46,6 +59,11 @@ public:
     // immediately on the first non-OK status, leaving any remaining requests unissued.
     virtual DiskBlockIOStatus read(const std::vector<DiskRead>& reads)    = 0;
     virtual DiskBlockIOStatus write(const std::vector<DiskWrite>& writes) = 0;
+
+    // Backends without syscall instrumentation retain their original write implementation.
+    virtual DiskBlockIOStatus writeObserved(const std::vector<DiskWrite>& writes, DiskWriteTiming*) {
+        return write(writes);
+    }
 
     // The owner finishes all synchronous and executor-driven I/O before closing.
     virtual void close() = 0;
@@ -67,6 +85,8 @@ public:
     DiskBlockIOStatus read(const std::vector<DiskRead>& reads) override;
     DiskBlockIOStatus write(const std::vector<DiskWrite>& writes) override;
 
+    DiskBlockIOStatus writeObserved(const std::vector<DiskWrite>& writes, DiskWriteTiming* timing) override;
+
     void close() override;
 
     std::string debugString() const override;
@@ -78,6 +98,7 @@ private:
     // open() call actually succeeded in getting O_DIRECT semantics from the
     // filesystem.
     DiskBlockIOStatus validate(uint64_t offset, const void* buffer, size_t bytes) const;
+    DiskBlockIOStatus writeImpl(uint64_t offset, const void* src, size_t bytes, DiskWriteTiming* timing);
     int               fd_{-1};
     std::string       file_path_;
     size_t            bytes_{0};

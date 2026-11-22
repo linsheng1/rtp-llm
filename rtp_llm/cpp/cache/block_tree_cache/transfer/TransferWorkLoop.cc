@@ -501,7 +501,8 @@ void TransferWorkLoop::submitDisk(Entry& entry) {
     // Ordinary rejection has no I/O/callback. Accepted workers own completion.
     // Submission exceptions propagate to withEntry; it handles OOM locally.
     assert(disk_io_executor_ != nullptr);
-    const auto status = write ? pool->asyncWrite(*disk_io_executor_, blocks, write_buffers, stride, std::move(done)) :
+    auto* timing = write && entry.task_timer ? &entry.disk_timing : nullptr;
+    const auto status = write ? pool->asyncWrite(*disk_io_executor_, blocks, write_buffers, stride, std::move(done), timing) :
                                 pool->asyncRead(*disk_io_executor_, blocks, buffers, stride, std::move(done));
     if (status != BlockIOStatus::OK) {
         recordDiskResult(entry, status);
@@ -575,11 +576,40 @@ void TransferWorkLoop::recordResult(Entry& entry, TransferResult result) noexcep
     entry.result.copy_error = result.copy_error;
 }
 
+void TransferWorkLoop::reportDiskWriteTiming(Entry& entry, int64_t end_us) const noexcept {
+    const auto& t = entry.disk_timing;
+    if (entry.step != Step::DISK_WRITE || t.worker_start_us == 0 || t.io_end_us == 0 || end_us < 0)
+        return;  // Rejected/unobserved submissions produce no worker sample.
+    auto interval = [&](const char* stage, int64_t begin, int64_t end, AsyncProfileKind kind) {
+        if (begin <= 0 || end < begin)
+            return;
+        auto observation = timer(entry.task, stage, 0, entry.task.descriptors().size(), kind,
+                                 "worker_batch", &entry.task_timer.trace(), begin);
+        observation.finishAtSteady(end, entry.result.ok());
+    };
+    interval("disk_write_prepare", entry.step_timer.startSteadyUs(), t.queued_us, AsyncProfileKind::Execution);
+    interval("disk_executor_wait", t.queued_us, t.worker_start_us, AsyncProfileKind::Wait);
+    interval("disk_write_sort", t.worker_start_us, t.sort_end_us, AsyncProfileKind::Execution);
+    interval("disk_write_io", t.sort_end_us, t.io_end_us, AsyncProfileKind::Execution);
+    interval("disk_callback_wait", t.io_end_us, end_us, AsyncProfileKind::Wait);
+    if (metrics_reporter_ && t.pwrite_count > 0) {
+        const auto& d = entry.task.descriptors().front();
+        // Weighted syscall samples: sum/qps is the per-pwrite mean, qps is syscall count.
+        metrics_reporter_->reportTransferStage("disk_pwrite", t.pwrite_sum_us, entry.result.ok(), world_rank_,
+            "syscall", transferOperationName(operation_), tierName(d.source_tier), tierName(d.target_tier),
+            static_cast<uint64_t>(t.pwrite_count));
+        // This is a per-batch maximum sample, NOT a maximum across a KMonitor time window.
+        metrics_reporter_->reportTransferStage("disk_pwrite_batch_max", t.pwrite_max_us, entry.result.ok(), world_rank_,
+            "worker_batch", transferOperationName(operation_), tierName(d.source_tier), tierName(d.target_tier));
+    }
+}
+
 void TransferWorkLoop::consumeStage(Entry& entry) {
     auto& terminal = entry.result;
     // End asynchronous stages only after their safe result reaches the owner.
     // Busy retries retain the same timer and do not produce extra samples.
     const auto end_us = entry.task_timer ? AsyncProfileSession::steadyNowUs() : -1;
+    reportDiskWriteTiming(entry, end_us);
     entry.step_timer.finishAtSteady(end_us, terminal.ok());
     entry.step_timer   = {};
     entry.step_started = false;

@@ -67,11 +67,15 @@ CachePoolMetrics makeDevicePoolMetrics(const DeviceBlockPool& pool) {
 BlockTreeCacheMetricsReporter::BlockTreeCacheMetricsReporter(
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter,
     bool                                       enable_stage_metrics,
-    std::chrono::milliseconds                  stage_interval):
+    std::chrono::milliseconds                  stage_interval,
+    std::shared_ptr<kmonitor::MetricsReporter> stage_reporter):
     metrics_reporter_(std::move(metrics_reporter)) {
-    if (metrics_reporter_ && enable_stage_metrics) {
+    // A dedicated reporter enables rank-tagged stages without enabling unranked pool/business metrics.
+    if (!stage_reporter)
+        stage_reporter = metrics_reporter_;
+    if (stage_reporter && enable_stage_metrics) {
         try {
-            stage_metrics_ = std::make_unique<CacheStageMetrics>(metrics_reporter_, stage_interval);
+            stage_metrics_ = std::make_unique<CacheStageMetrics>(std::move(stage_reporter), stage_interval);
         } catch (...) {}  // Optional observer initialization must never fail cache creation.
     }
 }
@@ -488,11 +492,12 @@ void BlockTreeCacheMetricsReporter::reportTransferStage(const char* stage,
                                                         const char* scope,
                                                         const char* operation,
                                                         const char* source_tier,
-                                                        const char* target_tier) const noexcept {
+                                                        const char* target_tier,
+                                                        uint64_t    sample_count) const noexcept {
     if (!stage_metrics_ || latency_us < 0) {
         return;
     }
-    stage_metrics_->record(stage, latency_us, success, rank, scope, operation, source_tier, target_tier);
+    stage_metrics_->record(stage, latency_us, success, rank, scope, operation, source_tier, target_tier, sample_count);
 }
 
 int BlockTreeCacheMetricsReporter::transferDirectionIndex(Tier source_tier, Tier target_tier) {

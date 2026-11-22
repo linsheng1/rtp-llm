@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
+#include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyGeometry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheLayout.h"
 
@@ -830,7 +831,12 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                       
         parallelism_config.tp_rank == 0 && !parallelism_config.ffn_disaggregate_config.is_ffn_service();
     config.full_prefix_scan_interval_ms = owns_mutable_block_tree ? configured_scan_interval_ms : 0;
 
-    auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(std::move(metrics_reporter));
+    // Reuse the optional per-rank factory, but keep this reporter stage-only.
+    // EngineInitParams and the original rank-0 pool/business metrics remain unchanged.
+    auto stage_reporter = remoteCachePayloadReporter(
+        disk_enabled && !metrics_reporter, parallelism_config.tp_rank, metrics_reporter);
+    auto cache_metrics_reporter = std::make_shared<BlockTreeCacheMetricsReporter>(
+        std::move(metrics_reporter), true, std::chrono::seconds(1), std::move(stage_reporter));
     auto per_rank_engine        = std::make_shared<PerRankBlockTransferEngine>(group_sets,
                                                                         kv_cache_config.enable_disk_cache,
                                                                         DeviceHostCopyOptions{},

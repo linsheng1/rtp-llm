@@ -13,6 +13,7 @@ public:
     explicit CacheStageMetrics(std::shared_ptr<kmonitor::MetricsReporter> reporter,
                                std::chrono::milliseconds                  interval = std::chrono::seconds(1));
     ~CacheStageMetrics();
+    // latency is the sum over sample_count observations (one batch by default).
     void record(const char* stage,
                 int64_t     latency,
                 bool        success,
@@ -20,7 +21,8 @@ public:
                 const char* scope,
                 const char* operation,
                 const char* source,
-                const char* target) noexcept;
+                const char* target,
+                uint64_t    sample_count = 1) noexcept;
     void flush();
 
 private:

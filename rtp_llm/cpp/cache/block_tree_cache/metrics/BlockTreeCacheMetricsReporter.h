@@ -35,7 +35,8 @@ class BlockTreeCacheMetricsReporter final {
 public:
     explicit BlockTreeCacheMetricsReporter(std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter,
                                            bool                                       enable_stage_metrics = true,
-                                           std::chrono::milliseconds stage_interval = std::chrono::seconds(1));
+                                           std::chrono::milliseconds stage_interval = std::chrono::seconds(1),
+                                           std::shared_ptr<kmonitor::MetricsReporter> stage_reporter = nullptr);
     ~BlockTreeCacheMetricsReporter();
     bool enabled() const noexcept {
         return metrics_reporter_ != nullptr;
@@ -61,7 +62,8 @@ public:
                              const char* scope,
                              const char* operation,
                              const char* source_tier,
-                             const char* target_tier) const noexcept;
+                             const char* target_tier,
+                             uint64_t    sample_count = 1) const noexcept;
 
     std::vector<CachePoolMetrics>
          collectPoolMetrics(const std::vector<GroupSetPtr>&       group_sets,

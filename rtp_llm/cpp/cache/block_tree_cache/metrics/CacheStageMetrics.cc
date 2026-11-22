@@ -41,11 +41,12 @@ struct CacheStageMetrics::Impl {
         wake.notify_one();
         worker.join();
     }
-    void record(const std::array<std::string_view, 5>& labels, int64_t latency, int64_t rank, bool success) noexcept {
+    void record(const std::array<std::string_view, 5>& labels, int64_t latency, int64_t rank, bool success,
+                uint64_t sample_count) noexcept {
         uint64_t hash = 1469598103934665603ULL;
         for (auto label : labels) {
             if (label.size() >= kLabelSize) {
-                dropped.fetch_add(1, std::memory_order_relaxed);
+                dropped.fetch_add(sample_count, std::memory_order_relaxed);
                 return;
             }
             for (auto c : label)
@@ -60,7 +61,7 @@ struct CacheStageMetrics::Impl {
             if (state == 0) {
                 uint8_t expected = 0;
                 if (!slot.state.compare_exchange_strong(expected, 1, std::memory_order_acq_rel)) {
-                    dropped.fetch_add(1, std::memory_order_relaxed);
+                    dropped.fetch_add(sample_count, std::memory_order_relaxed);
                     return;
                 }
                 for (size_t i = 0; i < labels.size(); ++i)
@@ -69,7 +70,7 @@ struct CacheStageMetrics::Impl {
                 slot.success    = success;
                 slot.state.store(2, std::memory_order_release);
             } else if (state == 1) {
-                dropped.fetch_add(1, std::memory_order_relaxed);
+                dropped.fetch_add(sample_count, std::memory_order_relaxed);
                 return;
             }
             bool match = slot.rank == rank && slot.success == success;
@@ -78,15 +79,15 @@ struct CacheStageMetrics::Impl {
             if (!match)
                 continue;
             if (slot.busy.test_and_set(std::memory_order_acquire)) {
-                dropped.fetch_add(1, std::memory_order_relaxed);
+                dropped.fetch_add(sample_count, std::memory_order_relaxed);
                 return;
             }
-            ++slot.count;
+            slot.count += sample_count;
             slot.sum_us += static_cast<uint64_t>(latency);
             slot.busy.clear(std::memory_order_release);
             return;
         }
-        dropped.fetch_add(1, std::memory_order_relaxed);
+        dropped.fetch_add(sample_count, std::memory_order_relaxed);
     }
     void flush() noexcept {
         std::lock_guard<std::mutex> lock(flush_mutex);
@@ -151,8 +152,11 @@ void CacheStageMetrics::record(const char* stage,
                                const char* scope,
                                const char* operation,
                                const char* source,
-                               const char* target) noexcept {
-    impl_->record({stage, scope, operation, source, target}, latency, rank, success);
+                               const char* target,
+                               uint64_t    sample_count) noexcept {
+    if (sample_count == 0 || latency < 0)
+        return;
+    impl_->record({stage, scope, operation, source, target}, latency, rank, success, sample_count);
 }
 void CacheStageMetrics::flush() {
     impl_->flush();

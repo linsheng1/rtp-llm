@@ -227,7 +227,8 @@ BlockIOStatus DiskBlockPool::asyncWrite(DiskIOExecutor&                 executor
                                         const BlockIdList&              blocks,
                                         const std::vector<const void*>& srcs,
                                         size_t                          bytes_per_block,
-                                        Callback                        callback) {
+                                        Callback                        callback,
+                                        DiskWriteTiming*                timing) {
     if (!callback)
         return BlockIOStatus::IO_ERROR;
     std::vector<DiskWrite> writes;
@@ -244,7 +245,7 @@ BlockIOStatus DiskBlockPool::asyncWrite(DiskIOExecutor&                 executor
             if (status == DiskBlockIOStatus::OK)
                 write_bytes_.fetch_add(bytes, std::memory_order_relaxed);
             callback(mapStatus(status));
-        }));
+        }, timing));
 }
 
 size_t DiskBlockPool::payloadBytes() const {

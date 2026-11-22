@@ -49,7 +49,9 @@ public:
     // Reads share blocks across workers; each write batch is sorted by file offset
     // and executed by one worker.
     DiskBlockIOStatus asyncRead(DiskBlockIO& io, std::vector<DiskRead> reads, Callback callback);
-    DiskBlockIOStatus asyncWrite(DiskBlockIO& io, std::vector<DiskWrite> writes, Callback callback);
+    // timing is optional and must remain alive through the final callback, like buffers.
+    DiskBlockIOStatus asyncWrite(DiskBlockIO& io, std::vector<DiskWrite> writes, Callback callback,
+                                 DiskWriteTiming* timing = nullptr);
 
     // Close both queues and join all accepted I/O and callbacks. The external
     // lifecycle owner drains its WorkLoops first; never call from a worker/callback.

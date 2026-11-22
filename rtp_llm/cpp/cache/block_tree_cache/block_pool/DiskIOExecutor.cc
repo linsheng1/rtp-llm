@@ -60,6 +60,8 @@ struct DiskIOExecutor::State {
             requests(std::move(requests)), callback(std::move(callback)) {}
 
         void run(DiskBlockIO& io) {
+            if (timing)
+                timing->worker_start_us = DiskWriteTiming::nowUs();
             try {
                 process(io);
             } catch (const std::exception& e) {
@@ -69,6 +71,8 @@ struct DiskIOExecutor::State {
                 fail(DiskBlockIOStatus::IO_ERROR);
                 RTP_LLM_LOG_ERROR("async disk worker threw an unknown exception");
             }
+            if (timing)
+                timing->io_end_us = DiskWriteTiming::nowUs();
             finish();
         }
 
@@ -78,7 +82,9 @@ struct DiskIOExecutor::State {
                 std::sort(requests.begin(), requests.end(), [](const DiskWrite& lhs, const DiskWrite& rhs) {
                     return lhs.offset < rhs.offset;
                 });
-                const auto result = io.write(requests);
+                if (timing)
+                    timing->sort_end_us = DiskWriteTiming::nowUs();
+                const auto result = timing ? io.writeObserved(requests, timing) : io.write(requests);
                 if (result != DiskBlockIOStatus::OK) {
                     fail(result);
                 }
@@ -127,6 +133,7 @@ struct DiskIOExecutor::State {
             }
         }
 
+        DiskWriteTiming*     timing{nullptr};  // Writes only; never accessed after callback publication.
         std::vector<Request> requests;
         Callback             callback;
         std::mutex           mutex;
@@ -136,7 +143,8 @@ struct DiskIOExecutor::State {
     };
 
     template<typename Request>
-    DiskBlockIOStatus submit(DiskBlockIO& io, std::vector<Request> requests, Callback callback) {
+    DiskBlockIOStatus submit(DiskBlockIO& io, std::vector<Request> requests, Callback callback,
+                             DiskWriteTiming* timing = nullptr) {
         if (!callback) {
             RTP_LLM_LOG_WARNING("async disk submission rejected: empty callback");
             return DiskBlockIOStatus::IO_ERROR;
@@ -156,6 +164,9 @@ struct DiskIOExecutor::State {
         const size_t task_count = std::is_same_v<Request, DiskRead> ?
                                       std::max(size_t{1}, std::min(batch->requests.size(), pool->getThreadNum())) :
                                       1;
+        batch->timing = timing;
+        if (timing)
+            timing->queued_us = DiskWriteTiming::nowUs();
         for (size_t i = 0; i < task_count; ++i) {
             try {
                 const auto error = pool->pushTask([batch, &io] { batch->run(io); }, false, false);
@@ -200,8 +211,9 @@ DiskBlockIOStatus DiskIOExecutor::asyncRead(DiskBlockIO& io, std::vector<DiskRea
     return state_->submit(io, std::move(reads), std::move(callback));
 }
 
-DiskBlockIOStatus DiskIOExecutor::asyncWrite(DiskBlockIO& io, std::vector<DiskWrite> writes, Callback callback) {
-    return state_->submit(io, std::move(writes), std::move(callback));
+DiskBlockIOStatus DiskIOExecutor::asyncWrite(DiskBlockIO& io, std::vector<DiskWrite> writes, Callback callback,
+                                            DiskWriteTiming* timing) {
+    return state_->submit(io, std::move(writes), std::move(callback), timing);
 }
 
 void DiskIOExecutor::stop() {

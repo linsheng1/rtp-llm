@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockIO.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstring>
 #include <fcntl.h>
@@ -157,6 +158,11 @@ DiskBlockIOStatus BlockTreePosixDiskBlockIO::read(uint64_t offset, void* dst, si
 }
 
 DiskBlockIOStatus BlockTreePosixDiskBlockIO::write(uint64_t offset, const void* src, size_t bytes) {
+    return writeImpl(offset, src, bytes, nullptr);
+}
+
+DiskBlockIOStatus BlockTreePosixDiskBlockIO::writeImpl(
+    uint64_t offset, const void* src, size_t bytes, DiskWriteTiming* timing) {
     const auto validation = validate(offset, src, bytes);
     if (validation != DiskBlockIOStatus::OK) {
         return validation;
@@ -168,8 +174,17 @@ DiskBlockIOStatus BlockTreePosixDiskBlockIO::write(uint64_t offset, const void* 
 
     size_t done = 0;
     while (done < bytes) {
+        const auto start_us = timing ? DiskWriteTiming::nowUs() : 0;
         const auto rc =
             ::pwrite(fd_, static_cast<const char*>(src) + done, bytes - done, static_cast<off_t>(offset + done));
+        if (timing) {
+            const int saved_errno = errno;
+            const auto elapsed_us = DiskWriteTiming::nowUs() - start_us;
+            ++timing->pwrite_count;  // Includes EINTR/short-write attempts, not just blocks.
+            timing->pwrite_sum_us += elapsed_us;
+            timing->pwrite_max_us = std::max(timing->pwrite_max_us, elapsed_us);
+            errno = saved_errno;
+        }
         if (rc < 0) {
             if (errno == EINTR) {
                 continue;
@@ -206,8 +221,14 @@ DiskBlockIOStatus BlockTreePosixDiskBlockIO::read(const std::vector<DiskRead>& r
 }
 
 DiskBlockIOStatus BlockTreePosixDiskBlockIO::write(const std::vector<DiskWrite>& writes) {
+    return writeObserved(writes, nullptr);
+}
+
+DiskBlockIOStatus BlockTreePosixDiskBlockIO::writeObserved(
+    const std::vector<DiskWrite>& writes, DiskWriteTiming* timing) {
     for (const auto& item : writes) {
-        const auto status = write(item.offset, item.buffer, item.bytes);
+        const auto status = timing ? writeImpl(item.offset, item.buffer, item.bytes, timing) :
+                                     write(item.offset, item.buffer, item.bytes);
         if (status != DiskBlockIOStatus::OK) {
             return status;
         }

@@ -81,7 +81,8 @@ public:
                              const BlockIdList&              blocks,
                              const std::vector<const void*>& srcs,
                              size_t                          bytes_per_block,
-                             Callback                        callback);
+                             Callback                        callback,
+                             DiskWriteTiming*                timing = nullptr);
 
     size_t             payloadBytes() const;
     size_t             strideBytes() const;
