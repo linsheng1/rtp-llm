@@ -16,7 +16,7 @@ struct DiskIOExecutorConfig {
     size_t read_queue_size{20000};
     size_t write_queue_size{20000};
 
-    // Reads fan out up to read_thread_count tasks per batch; writes use one task per batch.
+    // Each direction fans out up to its existing worker count per batch.
     // Converts resident batch budgets to worker-task queue capacities, conservatively
     // covering both waiting and running batches even though queues count only waiting tasks.
     // Rejects invalid/overflowing capacities.
@@ -46,8 +46,8 @@ public:
     // Owns the request vector; the caller keeps io open and buffers alive until all
     // accepted I/O and callbacks have returned, and orders conflicting accesses.
     // Empty batches complete asynchronously; failed batches may be partly applied.
-    // Reads share blocks across workers; each write batch is sorted by file offset
-    // and executed by one worker.
+    // Reads share blocks across workers. Writes sort once on a worker, then share
+    // disjoint requests; overlap and degenerate inputs retain whole-batch serial order.
     DiskBlockIOStatus asyncRead(DiskBlockIO& io, std::vector<DiskRead> reads, Callback callback);
     // timing is optional and must remain alive through the final callback, like buffers.
     DiskBlockIOStatus asyncWrite(DiskBlockIO& io, std::vector<DiskWrite> writes, Callback callback,

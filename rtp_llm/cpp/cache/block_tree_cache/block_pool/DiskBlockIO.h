@@ -29,7 +29,9 @@ struct DiskWrite {
 };
 
 // Optional per-write-batch observation, owned by the caller through the final callback.
-// One write worker fills it; the existing completion publication synchronizes readers.
+// Write workers merge private samples before the final callback publishes this batch.
+// Batch wall time runs from the earliest worker start through the last worker exit;
+// syscall sums/counts cover actual calls, not a sum of overlapping batch wall times.
 struct DiskWriteTiming {
     int64_t queued_us{0}, worker_start_us{0}, sort_end_us{0}, io_end_us{0};
     int64_t pwrite_count{0}, pwrite_sum_us{0}, pwrite_max_us{0};
@@ -64,6 +66,9 @@ public:
     virtual DiskBlockIOStatus writeObserved(const std::vector<DiskWrite>& writes, DiskWriteTiming*) {
         return write(writes);
     }
+    virtual DiskBlockIOStatus writeBlockObserved(uint64_t offset, const void* src, size_t bytes, DiskWriteTiming*) {
+        return write(offset, src, bytes);
+    }
 
     // The owner finishes all synchronous and executor-driven I/O before closing.
     virtual void close() = 0;
@@ -86,6 +91,7 @@ public:
     DiskBlockIOStatus write(const std::vector<DiskWrite>& writes) override;
 
     DiskBlockIOStatus writeObserved(const std::vector<DiskWrite>& writes, DiskWriteTiming* timing) override;
+    DiskBlockIOStatus writeBlockObserved(uint64_t offset, const void* src, size_t bytes, DiskWriteTiming* timing) override;
 
     void close() override;
 

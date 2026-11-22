@@ -236,6 +236,11 @@ DiskBlockIOStatus BlockTreePosixDiskBlockIO::writeObserved(
     return DiskBlockIOStatus::OK;
 }
 
+DiskBlockIOStatus BlockTreePosixDiskBlockIO::writeBlockObserved(
+    uint64_t offset, const void* src, size_t bytes, DiskWriteTiming* timing) {
+    return timing ? writeImpl(offset, src, bytes, timing) : write(offset, src, bytes);
+}
+
 void BlockTreePosixDiskBlockIO::close() {
     if (fd_ >= 0) {
         ::close(fd_);

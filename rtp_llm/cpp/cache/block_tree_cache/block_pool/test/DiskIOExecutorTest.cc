@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskIOExecutor.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -116,15 +117,15 @@ TEST(DiskIOExecutorConfigTest, ConvertsBatchBudgetsAndCapsFanoutAtDirectionWorke
     DiskIOExecutorConfig config;
     ASSERT_TRUE(config.setQueueSizesFromBatchCapacity(20000, 10000, 8));
     EXPECT_EQ(config.read_queue_size, 160000u);
-    EXPECT_EQ(config.write_queue_size, 10000u);
+    EXPECT_EQ(config.write_queue_size, 80000u);
     ASSERT_TRUE(config.setQueueSizesFromBatchCapacity(20000, 10000, 64));
     EXPECT_EQ(config.read_queue_size, 320000u);
-    EXPECT_EQ(config.write_queue_size, 10000u);
+    EXPECT_EQ(config.write_queue_size, 160000u);
     config.read_thread_count  = 3;
     config.write_thread_count = 5;
     ASSERT_TRUE(config.setQueueSizesFromBatchCapacity(14, 7, 9));
     EXPECT_EQ(config.read_queue_size, 42u);
-    EXPECT_EQ(config.write_queue_size, 7u);
+    EXPECT_EQ(config.write_queue_size, 35u);
 }
 
 TEST(DiskIOExecutorConfigTest, RejectsInvalidOrOverflowingBudgetsWithoutPartialUpdates) {
@@ -150,6 +151,10 @@ TEST(DiskIOExecutorConfigTest, EnforcesAutilCircularQueueCapacityLimit) {
     ASSERT_TRUE(config.setQueueSizesFromBatchCapacity(limit, 1, 1));
     EXPECT_EQ(config.read_queue_size, limit);
     EXPECT_FALSE(config.setQueueSizesFromBatchCapacity(limit + 1, 1, 1));
+    EXPECT_EQ(config.read_queue_size, limit);
+    EXPECT_EQ(config.write_queue_size, 1u);
+    config.write_thread_count = 2;
+    EXPECT_FALSE(config.setQueueSizesFromBatchCapacity(1, limit / 2 + 1, 2));
     EXPECT_EQ(config.read_queue_size, limit);
     EXPECT_EQ(config.write_queue_size, 1u);
 }
@@ -259,49 +264,219 @@ TEST(DiskIOExecutorTest, PartialEnqueueOwnsWholeBatchAndFullQueueRejectsWithoutC
     }
 }
 
-TEST(DiskIOExecutorTest, FailureWaitsForOtherIssuedIOAndKeepsCapturedOwnerAlive) {
-    Signal             started, fail, failure_returned, release_other;
-    Completion         done, failure_processed;
-    FakeDiskIO         io;
-    DiskIOExecutor     executor(smallConfig());
-    executor.start();
-    auto               owner = std::make_shared<int>(42);
-    std::weak_ptr<int> weak  = owner;
-    io.operation             = [&](bool, uint64_t offset) {
-        started.arrive();
-        if (offset == 0) {
-            EXPECT_TRUE(fail.wait());
-            failure_returned.arrive();
-            return DiskBlockIOStatus::PARTIAL_FAILURE;
+TEST(DiskIOExecutorTest, DisjointWriteBatchSharesWorkersAndMergesObservedCallsBeforeCallback) {
+    class ObservedIO: public FakeDiskIO {
+    public:
+        DiskBlockIOStatus writeBlockObserved(uint64_t offset, const void* data, size_t bytes,
+                                             DiskWriteTiming* timing) override {
+            const auto status = write(offset, data, bytes);
+            // Inject deterministic accounting; this unit test does not measure real syscalls.
+            if (timing) {
+                const auto cost = static_cast<int64_t>(offset) + 1;
+                ++timing->pwrite_count;
+                timing->pwrite_sum_us += cost;
+                timing->pwrite_max_us = std::max(timing->pwrite_max_us, cost);
+            }
+            return status;
         }
-        EXPECT_TRUE(release_other.wait());
-        EXPECT_FALSE(weak.expired());
+    } io;
+    Signal started, release;
+    Completion done;
+    DiskIOExecutor executor(smallConfig());
+    executor.start();
+    std::vector<std::atomic<size_t>> visits(6);
+    for (auto& count : visits)
+        count = 0;
+    io.operation = [&](bool writing, uint64_t offset) {
+        EXPECT_TRUE(writing);
+        ++visits.at(offset);
+        started.arrive();
+        EXPECT_TRUE(release.wait());
         return DiskBlockIOStatus::OK;
     };
-    ASSERT_EQ(io.openAndPreallocate("", 0, true), DiskBlockIOStatus::OK);
     char buffer = 0;
-    ASSERT_EQ(executor.asyncRead(io,
-                                 {{0, &buffer, 1}, {1, &buffer, 1}, {2, &buffer, 1}},
-                                 [owner, cb = done.callback()](DiskBlockIOStatus status) { cb(status); }),
-              DiskBlockIOStatus::OK);
-    owner.reset();
-    EXPECT_TRUE(started.wait(2));
-    // An empty queued batch can complete only after the failing participant
-    // records its status and exits. Keep the other participant blocked until it
-    // does, so checking that block 2 remains unissued is deterministic.
-    EXPECT_EQ(executor.asyncRead(io, {}, failure_processed.callback()), DiskBlockIOStatus::OK);
-    fail.arrive();
-    EXPECT_TRUE(failure_returned.wait());
-    EXPECT_EQ(failure_processed.get(), DiskBlockIOStatus::OK);
+    std::vector<DiskWrite> batch;
+    for (size_t i = visits.size(); i != 0; --i)
+        batch.push_back({i - 1, &buffer, 1});
+    auto timing = std::make_unique<DiskWriteTiming>();
+    DiskWriteTiming snapshot;
+    EXPECT_EQ(executor.asyncWrite(io, std::move(batch), [&](DiskBlockIOStatus status) {
+                  snapshot = *timing;
+                  timing.reset();  // Final callback may immediately destroy caller-owned observation.
+                  done.callback()(status);
+              }, timing.get()), DiskBlockIOStatus::OK);
+    EXPECT_TRUE(started.wait(2));  // Serial baseline cannot reach this before release.
     EXPECT_EQ(done.calls, 0u);
-    EXPECT_FALSE(weak.expired());
-    release_other.arrive();
-    EXPECT_EQ(done.get(), DiskBlockIOStatus::PARTIAL_FAILURE);
+    release.arrive();
+    EXPECT_EQ(done.get(), DiskBlockIOStatus::OK);
     executor.stop();
-    io.close();
-    EXPECT_EQ(io.reads, 2u);
     EXPECT_EQ(done.calls, 1u);
-    EXPECT_TRUE(weak.expired());
+    EXPECT_EQ(snapshot.pwrite_count, 6);
+    EXPECT_EQ(snapshot.pwrite_sum_us, 21);
+    EXPECT_EQ(snapshot.pwrite_max_us, 6);
+    EXPECT_GT(snapshot.queued_us, 0);
+    EXPECT_LE(snapshot.queued_us, snapshot.worker_start_us);
+    EXPECT_LE(snapshot.worker_start_us, snapshot.sort_end_us);
+    EXPECT_LE(snapshot.sort_end_us, snapshot.io_end_us);
+    for (const auto& count : visits)
+        EXPECT_EQ(count, 1u);
+}
+
+TEST(DiskIOExecutorTest, ReusedObservationResetsWallTimesButRetainsSyscallTotals) {
+    FakeDiskIO io;
+    DiskIOExecutor executor(smallConfig());
+    executor.start();
+    Completion done;
+    DiskWriteTiming timing;
+    // Stand in for a previous batch without relying on timing or sleeping.
+    timing.worker_start_us = 1;
+    timing.io_end_us = std::numeric_limits<int64_t>::max();
+    timing.pwrite_count = 17;
+    timing.pwrite_sum_us = 99;
+    timing.pwrite_max_us = 33;
+    ASSERT_EQ(executor.asyncWrite(io, {}, done.callback(), &timing), DiskBlockIOStatus::OK);
+    EXPECT_EQ(done.get(), DiskBlockIOStatus::OK);
+    executor.stop();
+    EXPECT_GT(timing.worker_start_us, 1);
+    EXPECT_LE(timing.queued_us, timing.worker_start_us);
+    EXPECT_LE(timing.sort_end_us, timing.io_end_us);
+    EXPECT_LT(timing.io_end_us, std::numeric_limits<int64_t>::max());
+    EXPECT_EQ(timing.pwrite_count, 17);
+    EXPECT_EQ(timing.pwrite_sum_us, 99);
+    EXPECT_EQ(timing.pwrite_max_us, 33);
+    EXPECT_EQ(io.writes, 0u);
+    EXPECT_EQ(done.calls, 1u);
+}
+
+TEST(DiskIOExecutorTest, PartialWriteEnqueueDrainsEveryRequestAndRejectedBatchHasNoCallback) {
+    Signal started, release;
+    Completion first, second, queued, rejected, read;
+    auto config = smallConfig();
+    config.write_queue_size = 1;
+    FakeDiskIO io;
+    DiskIOExecutor executor(config);
+    executor.start();
+    std::vector<std::atomic<size_t>> visits(10);
+    for (auto& count : visits)
+        count = 0;
+    io.operation = [&](bool writing, uint64_t offset) {
+        if (writing) {
+            ++visits.at(offset);
+            if (offset < 2) {
+                started.arrive();
+                EXPECT_TRUE(release.wait());
+            }
+        }
+        return DiskBlockIOStatus::OK;
+    };
+    char buffer = 0;
+    ASSERT_EQ(executor.asyncWrite(io, {{0, &buffer, 1}}, first.callback()), DiskBlockIOStatus::OK);
+    EXPECT_TRUE(started.wait());
+    ASSERT_EQ(executor.asyncWrite(io, {{1, &buffer, 1}}, second.callback()), DiskBlockIOStatus::OK);
+    EXPECT_TRUE(started.wait(2));
+    std::vector<DiskWrite> batch;
+    for (size_t i = 2; i < visits.size(); ++i)
+        batch.push_back({i, &buffer, 1});
+    // Both write workers are blocked; only one of the planned participants fits.
+    EXPECT_EQ(executor.asyncWrite(io, std::move(batch), queued.callback()), DiskBlockIOStatus::OK);
+    EXPECT_EQ(executor.asyncWrite(io, {{0, &buffer, 1}}, rejected.callback()), DiskBlockIOStatus::IO_ERROR);
+    EXPECT_EQ(io.writes, 2u);
+    EXPECT_EQ(executor.asyncRead(io, {{0, &buffer, 1}}, read.callback()), DiskBlockIOStatus::OK);
+    EXPECT_EQ(read.get(), DiskBlockIOStatus::OK);
+    release.arrive();
+    EXPECT_EQ(first.get(), DiskBlockIOStatus::OK);
+    EXPECT_EQ(second.get(), DiskBlockIOStatus::OK);
+    EXPECT_EQ(queued.get(), DiskBlockIOStatus::OK);
+    executor.stop();
+    EXPECT_EQ(rejected.calls, 0u);
+    EXPECT_EQ(queued.calls, 1u);
+    for (const auto& count : visits)
+        EXPECT_EQ(count, 1u);
+}
+
+TEST(DiskIOExecutorTest, DuplicateOffsetsAcrossFanoutBoundaryRetainSerialOrder) {
+    Signal started, release;
+    Completion done, independent;
+    FakeDiskIO io;
+    DiskIOExecutor executor(smallConfig());
+    executor.start();
+    std::mutex mutex;
+    std::vector<uint64_t> offsets;
+    io.operation = [&](bool, uint64_t offset) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            offsets.push_back(offset);
+        }
+        if (offset == 0) {
+            started.arrive();
+            EXPECT_TRUE(release.wait());
+        }
+        return DiskBlockIOStatus::OK;
+    };
+    char buffer = 0;
+    EXPECT_EQ(executor.asyncWrite(io, {{128, &buffer, 1}, {64, &buffer, 1}, {0, &buffer, 1}, {64, &buffer, 1}},
+                                  done.callback()), DiskBlockIOStatus::OK);
+    EXPECT_TRUE(started.wait());
+    EXPECT_EQ(executor.asyncWrite(io, {}, independent.callback()), DiskBlockIOStatus::OK);
+    EXPECT_EQ(independent.get(), DiskBlockIOStatus::OK);
+    EXPECT_EQ(done.calls, 0u);
+    release.arrive();
+    EXPECT_EQ(done.get(), DiskBlockIOStatus::OK);
+    executor.stop();
+    EXPECT_EQ(offsets, (std::vector<uint64_t>{0, 64, 64, 128}));
+    EXPECT_EQ(done.calls, 1u);
+}
+
+TEST(DiskIOExecutorTest, FailureWaitsForOtherIssuedIOAndKeepsCapturedOwnerAlive) {
+    for (bool writing : {false, true}) {
+        SCOPED_TRACE(writing ? "write" : "read");
+        Signal             started, fail, failure_returned, release_other;
+        Completion         done, failure_processed;
+        FakeDiskIO         io;
+        DiskIOExecutor     executor(smallConfig());
+        executor.start();
+        auto               owner = std::make_shared<int>(42);
+        std::weak_ptr<int> weak  = owner;
+        io.operation             = [&](bool, uint64_t offset) {
+            started.arrive();
+            if (offset == 0) {
+                EXPECT_TRUE(fail.wait());
+                failure_returned.arrive();
+                return DiskBlockIOStatus::PARTIAL_FAILURE;
+            }
+            EXPECT_TRUE(release_other.wait());
+            EXPECT_FALSE(weak.expired());
+            return DiskBlockIOStatus::OK;
+        };
+        ASSERT_EQ(io.openAndPreallocate("", 0, true), DiskBlockIOStatus::OK);
+        char buffer = 0;
+        auto callback = [owner, cb = done.callback()](DiskBlockIOStatus status) { cb(status); };
+        const auto status = writing ?
+                                executor.asyncWrite(io, {{0, &buffer, 1}, {1, &buffer, 1}, {2, &buffer, 1}},
+                                                    std::move(callback)) :
+                                executor.asyncRead(io, {{0, &buffer, 1}, {1, &buffer, 1}, {2, &buffer, 1}},
+                                                   std::move(callback));
+        ASSERT_EQ(status, DiskBlockIOStatus::OK);
+        owner.reset();
+        EXPECT_TRUE(started.wait(2));
+        // The empty batch runs after the failing participant retires. Keep the
+        // other issued operation blocked, proving callback/owner release must wait.
+        const auto queued = writing ? executor.asyncWrite(io, {}, failure_processed.callback()) :
+                                      executor.asyncRead(io, {}, failure_processed.callback());
+        EXPECT_EQ(queued, DiskBlockIOStatus::OK);
+        fail.arrive();
+        EXPECT_TRUE(failure_returned.wait());
+        EXPECT_EQ(failure_processed.get(), DiskBlockIOStatus::OK);
+        EXPECT_EQ(done.calls, 0u);
+        EXPECT_FALSE(weak.expired());
+        release_other.arrive();
+        EXPECT_EQ(done.get(), DiskBlockIOStatus::PARTIAL_FAILURE);
+        executor.stop();
+        io.close();
+        EXPECT_EQ(writing ? io.writes.load() : io.reads.load(), 2u);
+        EXPECT_EQ(done.calls, 1u);
+        EXPECT_TRUE(weak.expired());
+    }
 }
 
 TEST(DiskIOExecutorTest, IOAndCallbackExceptionsDoNotKillWorkersOrRepeatCompletion) {
@@ -578,6 +753,7 @@ class PosixDiskIOAsyncTest: public ::testing::TestWithParam<bool> {};
 
 TEST_P(PosixDiskIOAsyncTest, RoundTripValidationDrainAndReopen) {
     Completion                write, read, invalid;
+    DiskWriteTiming           timing;
     BlockTreePosixDiskBlockIO io;
     DiskIOExecutor            executor(smallConfig());
     executor.start();
@@ -593,9 +769,10 @@ TEST_P(PosixDiskIOAsyncTest, RoundTripValidationDrainAndReopen) {
     for (size_t i = 0; i < sizeof(source); ++i) {
         source[i] = static_cast<char>(i % 251);
     }
-    ASSERT_EQ(executor.asyncWrite(io, {{4096, source + 4096, 4096}, {0, source, 4096}}, write.callback()),
+    ASSERT_EQ(executor.asyncWrite(io, {{4096, source + 4096, 4096}, {0, source, 4096}}, write.callback(), &timing),
               DiskBlockIOStatus::OK);
     EXPECT_EQ(write.get(), DiskBlockIOStatus::OK);
+    EXPECT_GE(timing.pwrite_count, 2);
     ASSERT_EQ(executor.asyncRead(io, {{0, destination, 4096}, {4096, destination + 4096, 4096}}, read.callback()),
               DiskBlockIOStatus::OK);
     // The caller drains the executor before closing or reopening the synchronous file.

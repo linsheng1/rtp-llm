@@ -2135,7 +2135,7 @@ TEST_F(BlockTreeCacheFactoryTest, DiskIOQueueBudgetsDeriveFromTransferQueueAndBa
         size_t  write_queue;
     };
     const QueueBudgetCase cases[]{
-        {0, 5, 128, 20000, 20000}, {37, 5, 128, 185, 37}, {307, 32, 128, 4912, 307}, {37, 32, 64, 592, 37}};
+        {0, 5, 128, 20000, 20000}, {37, 5, 128, 185, 185}, {307, 32, 128, 4912, 4912}, {37, 32, 64, 592, 592}};
     for (const auto& expected : cases) {
         auto                                     allocator = initAllocator<CoordinatorCacheManager>(config);
         block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_disk_io_queues");
@@ -2204,7 +2204,7 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentDiskThreadsPropagateBeforeQueueBudg
         EXPECT_EQ(io.read_thread_count, 3u);
         EXPECT_EQ(io.write_thread_count, 5u);
         EXPECT_EQ(io.read_queue_size, 21u);
-        EXPECT_EQ(io.write_queue_size, 7u);
+        EXPECT_EQ(io.write_queue_size, 35u);
     }
 }
 

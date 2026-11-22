@@ -988,7 +988,7 @@ TEST_F(TransferWorkLoopTest, ResidentDiskBatchesFitDerivedWorkerQueues) {
                                                               true,
                                                               config);
         EXPECT_EQ(engine->diskIOExecutor()->config().read_queue_size, 8u);
-        EXPECT_EQ(engine->diskIOExecutor()->config().write_queue_size, 4u);
+        EXPECT_EQ(engine->diskIOExecutor()->config().write_queue_size, 8u);
         const auto source = write ? Tier::HOST : Tier::DISK;
         const auto target = write ? Tier::DISK : Tier::HOST;
         const auto task   = [&](size_t offset, size_t count) {

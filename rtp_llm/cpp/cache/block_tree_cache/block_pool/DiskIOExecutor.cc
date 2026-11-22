@@ -17,14 +17,15 @@ bool DiskIOExecutorConfig::setQueueSizesFromBatchCapacity(size_t read_batches,
                                                           size_t write_batches,
                                                           size_t max_blocks_per_batch) {
     const size_t read_tasks = std::min(max_blocks_per_batch, read_thread_count);
+    const size_t write_tasks = std::min(max_blocks_per_batch, write_thread_count);
     // autil::CircularQueue requires capacity < INT32_MAX.
     constexpr size_t max_queue_size = std::numeric_limits<int32_t>::max() - 1;
-    if (read_batches == 0 || write_batches == 0 || read_tasks == 0 || write_thread_count == 0
-        || read_batches > max_queue_size / read_tasks || write_batches > max_queue_size) {
+    if (read_batches == 0 || write_batches == 0 || read_tasks == 0 || write_tasks == 0
+        || read_batches > max_queue_size / read_tasks || write_batches > max_queue_size / write_tasks) {
         return false;
     }
     read_queue_size  = read_batches * read_tasks;
-    write_queue_size = write_batches;
+    write_queue_size = write_batches * write_tasks;
     return true;
 }
 
@@ -60,10 +61,12 @@ struct DiskIOExecutor::State {
             requests(std::move(requests)), callback(std::move(callback)) {}
 
         void run(DiskBlockIO& io) {
-            if (timing)
-                timing->worker_start_us = DiskWriteTiming::nowUs();
+            DiskWriteTiming local_timing;
+            auto* observed = timing ? &local_timing : nullptr;
+            if (observed)
+                observed->worker_start_us = DiskWriteTiming::nowUs();
             try {
-                process(io);
+                process(io, observed);
             } catch (const std::exception& e) {
                 fail(DiskBlockIOStatus::IO_ERROR);
                 RTP_LLM_LOG_ERROR("async disk worker threw: %s", e.what());
@@ -71,24 +74,78 @@ struct DiskIOExecutor::State {
                 fail(DiskBlockIOStatus::IO_ERROR);
                 RTP_LLM_LOG_ERROR("async disk worker threw an unknown exception");
             }
-            if (timing)
-                timing->io_end_us = DiskWriteTiming::nowUs();
+            if (observed) {
+                observed->io_end_us = DiskWriteTiming::nowUs();
+                std::lock_guard<std::mutex> lock(mutex);
+                if (timing->worker_start_us == 0 || observed->worker_start_us < timing->worker_start_us)
+                    timing->worker_start_us = observed->worker_start_us;
+                timing->io_end_us = std::max(timing->io_end_us, observed->io_end_us);
+                timing->pwrite_count += observed->pwrite_count;
+                timing->pwrite_sum_us += observed->pwrite_sum_us;
+                timing->pwrite_max_us = std::max(timing->pwrite_max_us, observed->pwrite_max_us);
+            }
+            // No worker touches caller-owned timing after giving up its participant.
             finish();
         }
 
-        void process(DiskBlockIO& io) {
+        void process(DiskBlockIO& io, DiskWriteTiming* observed) {
             if constexpr (std::is_same_v<Request, DiskWrite>) {
-                // One worker owns the whole write batch. Keep buffers paired with their file offsets.
-                std::sort(requests.begin(), requests.end(), [](const DiskWrite& lhs, const DiskWrite& rhs) {
-                    return lhs.offset < rhs.offset;
-                });
-                if (timing)
-                    timing->sort_end_us = DiskWriteTiming::nowUs();
-                const auto result = timing ? io.writeObserved(requests, timing) : io.write(requests);
-                if (result != DiskBlockIOStatus::OK) {
-                    fail(result);
+                bool serial = false;
+                {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    if (!write_prepared) {
+                        // Prepare once on a worker, before anyone claims from this vector.
+                        std::sort(requests.begin(), requests.end(), [](const DiskWrite& lhs, const DiskWrite& rhs) {
+                            return lhs.offset < rhs.offset;
+                        });
+                        serial_writes = requests.size() <= 1;
+                        for (size_t i = 0; i < requests.size(); ++i) {
+                            const auto& request = requests[i];
+                            serial_writes = serial_writes || !request.buffer || request.bytes == 0
+                                            || request.bytes > std::numeric_limits<uint64_t>::max() - request.offset;
+                            if (i != 0) {
+                                const auto& previous = requests[i - 1];
+                                serial_writes = serial_writes || previous.offset == request.offset
+                                                || previous.bytes > request.offset - previous.offset;
+                            }
+                        }
+                        if (timing)
+                            timing->sort_end_us = DiskWriteTiming::nowUs();
+                        write_prepared = true;
+                    }
+                    if (serial_writes) {
+                        if (serial_claimed || status != DiskBlockIOStatus::OK)
+                            return;
+                        serial_claimed = true;
+                        serial = true;
+                    }
+                }
+                if (serial) {
+                    // Preserve whole-batch ordering and backend validation on overlap/degenerate input.
+                    const auto result = observed ? io.writeObserved(requests, observed) : io.write(requests);
+                    if (result != DiskBlockIOStatus::OK)
+                        fail(result);
+                    return;
+                }
+                while (true) {
+                    size_t index;
+                    {
+                        std::lock_guard<std::mutex> lock(mutex);
+                        if (status != DiskBlockIOStatus::OK || next == requests.size())
+                            break;
+                        index = next++;
+                    }
+                    const auto& request = requests[index];
+                    const auto result = observed ?
+                                            io.writeBlockObserved(request.offset, request.buffer, request.bytes, observed) :
+                                            io.write(request.offset, request.buffer, request.bytes);
+                    if (result != DiskBlockIOStatus::OK) {
+                        fail(result);
+                        break;
+                    }
                 }
             } else {
+                (void)observed;  // Read ownership and work sharing retain their original path.
                 while (true) {
                     size_t index;
                     {
@@ -139,6 +196,9 @@ struct DiskIOExecutor::State {
         std::mutex           mutex;
         size_t               next{0};
         size_t               workers{0};
+        bool                 write_prepared{false};
+        bool                 serial_writes{false};
+        bool                 serial_claimed{false};
         DiskBlockIOStatus    status{DiskBlockIOStatus::OK};
     };
 
@@ -161,12 +221,14 @@ struct DiskIOExecutor::State {
         // Register all participants before any worker can finish.
         std::lock_guard<std::mutex> batch_lock(batch->mutex);
 
-        const size_t task_count = std::is_same_v<Request, DiskRead> ?
-                                      std::max(size_t{1}, std::min(batch->requests.size(), pool->getThreadNum())) :
-                                      1;
+        const size_t task_count = std::max(size_t{1}, std::min(batch->requests.size(), pool->getThreadNum()));
         batch->timing = timing;
-        if (timing)
+        if (timing) {
+            // Wall-clock fields describe this submission; syscall totals retain original accumulation.
+            timing->worker_start_us = 0;
+            timing->io_end_us = 0;
             timing->queued_us = DiskWriteTiming::nowUs();
+        }
         for (size_t i = 0; i < task_count; ++i) {
             try {
                 const auto error = pool->pushTask([batch, &io] { batch->run(io); }, false, false);
