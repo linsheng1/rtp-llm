@@ -584,7 +584,8 @@ void BlockTreeCacheMetricsReporter::reportTransferFinished(TransferOperation    
                                                            int64_t                         begin_time_us,
                                                            bool                            success,
                                                            DescriptorView                  successful_descriptors,
-                                                           const std::vector<GroupSetPtr>& group_sets) {
+                                                           const std::vector<GroupSetPtr>& group_sets,
+                                                           DescriptorView attempted_descriptors) {
     if (metrics_reporter_ == nullptr) {
         return;
     }
@@ -614,6 +615,27 @@ void BlockTreeCacheMetricsReporter::reportTransferFinished(TransferOperation    
         entry.transfer_bytes = static_cast<int64_t>(transfer_bytes_entry.second);
         collector.transfer_bytes.push_back(std::move(entry));
     }
+    // Valid eviction dispatch attempts include failures/rejections. This is
+    // requested payload, not physical I/O or unique/retried data. Reuse the
+    // successful aggregate when both views are identical; never change the
+    // meaning of a caller's successful subset.
+    if (!attempted_descriptors.empty()) {
+        if (attempted_descriptors.data() == successful_descriptors.data()
+            && attempted_descriptors.size() == successful_descriptors.size()) {
+            for (auto& entry : collector.transfer_bytes)
+                entry.attempted_bytes = entry.transfer_bytes;
+        } else {
+            transfer_bytes.clear();
+            accumulateTransferBytes(attempted_descriptors, group_sets, transfer_bytes);
+            for (const auto& bytes : transfer_bytes) {
+                RtpLLMCacheTransferMetricsCollector::TransferBytesEntry entry;
+                entry.pool_name = bytes.first.pool_name;
+                entry.group_type = metricCacheGroupTypeName(bytes.first.group_type);
+                entry.attempted_bytes = static_cast<int64_t>(bytes.second);
+                collector.transfer_bytes.push_back(std::move(entry));
+            }
+        }
+    }
     metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
 }
 
@@ -622,14 +644,15 @@ void BlockTreeCacheMetricsReporter::accumulateTransferBytes(const TransferDescri
                                                             BlockTreeTransferBytes&   transfer_bytes) const {
     if (desc.source_tier == Tier::DEVICE) {
         for (const DeviceBlockPoolPtr& pool : group_set->devicePools()) {
-            transfer_bytes[{pool->poolName(), group_set->groupType()}] += pool->blockSizeBytes();
+            if (pool)
+                transfer_bytes[{pool->poolName(), group_set->groupType()}] += pool->blockSizeBytes();
         }
     } else if (desc.source_tier == Tier::HOST) {
-        transfer_bytes[{group_set->hostPool()->poolName(), group_set->groupType()}] +=
-            group_set->hostPool()->blockSizeBytes();
-    } else {
-        transfer_bytes[{group_set->diskPool()->poolName(), group_set->groupType()}] +=
-            group_set->diskPool()->blockSizeBytes();
+        if (const auto& pool = group_set->hostPool())
+            transfer_bytes[{pool->poolName(), group_set->groupType()}] += pool->blockSizeBytes();
+    } else if (desc.source_tier == Tier::DISK) {
+        if (const auto& pool = group_set->diskPool())
+            transfer_bytes[{pool->poolName(), group_set->groupType()}] += pool->blockSizeBytes();
     }
 }
 
@@ -637,6 +660,10 @@ void BlockTreeCacheMetricsReporter::accumulateTransferBytes(DescriptorView      
                                                             const std::vector<GroupSetPtr>& group_sets,
                                                             BlockTreeTransferBytes&         transfer_bytes) const {
     for (const TransferDescriptor& desc : descs) {
+        // Failed attempts can include executor-rejected group mappings. Unknown
+        // payload sizes must not dereference invalid IDs/pools or invent bytes.
+        if (desc.group_set_id >= group_sets.size() || !group_sets[desc.group_set_id])
+            continue;
         accumulateTransferBytes(desc, group_sets[desc.group_set_id], transfer_bytes);
     }
 }

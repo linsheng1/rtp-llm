@@ -1144,6 +1144,7 @@ public:
         std::string pool_name;
         std::string group_type;
         int64_t     transfer_bytes = 0;
+        int64_t     attempted_bytes = 0;
     };
 
     std::string                     source_tier;
@@ -1201,6 +1202,8 @@ private:
     kmonitor::MutableMetric* task_queue_backlog_metric                  = nullptr;
     kmonitor::MutableMetric* transfer_in_flight_metric                  = nullptr;
     kmonitor::MutableMetric* transfer_bytes_metric                      = nullptr;
+    kmonitor::MutableMetric* transfer_attempted_bytes_metric            = nullptr;
+    kmonitor::MutableMetric* transfer_failed_attempt_bytes_metric       = nullptr;
     kmonitor::MutableMetric* transfer_stage_latency_us_metric           = nullptr;
     kmonitor::MutableMetric* transfer_stage_qps_metric                  = nullptr;
     kmonitor::MutableMetric* transfer_stage_latency_sum_us_metric       = nullptr;

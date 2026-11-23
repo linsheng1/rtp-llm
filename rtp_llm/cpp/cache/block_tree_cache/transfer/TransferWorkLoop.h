@@ -121,6 +121,7 @@ private:
         TransferStageTimer      task_timer, queue_or_finalize_timer, batch_timer, staging_timer, step_timer;
         CrcCopyExecutor::Timing crc_timing;
         DiskWriteTiming         disk_timing;  // Published by the existing disk completion queue.
+        bool                    disk_trace{false};  // Immutable from disk submission through callback completion.
     };
     struct StagingResource {
         std::array<std::shared_ptr<HostStagingBlockPool>, 2> pools;  // FULL/default, SWA.
@@ -142,6 +143,7 @@ private:
     static void        recordResult(Entry& entry, TransferResult result) noexcept;
     void               consumeStage(Entry& entry);
     void               reportDiskWriteTiming(Entry& entry, int64_t end_us) const noexcept;
+    void               logDiskLifecycle(const Entry& entry, const char* event, int status) const noexcept;
     void               finish(Entry& entry);
     void               fail(Entry& entry, TransferResult result);
     void               cancelStaging();

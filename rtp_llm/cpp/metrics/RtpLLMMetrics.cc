@@ -787,6 +787,8 @@ bool RtpLLMCacheTransferMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(task_queue_backlog_metric, "rtp_llm_kv_cache_task_queue_backlog");
     REGISTER_GAUGE_MUTABLE_METRIC(transfer_in_flight_metric, "rtp_llm_kv_cache_transfer_in_flight");
     REGISTER_QPS_MUTABLE_METRIC(transfer_bytes_metric, "rtp_llm_kv_cache_transfer_bytes");
+    REGISTER_QPS_MUTABLE_METRIC(transfer_attempted_bytes_metric, "rtp_llm_kv_cache_transfer_attempted_bytes");
+    REGISTER_QPS_MUTABLE_METRIC(transfer_failed_attempt_bytes_metric, "rtp_llm_kv_cache_transfer_failed_attempt_bytes");
     return true;
 }
 
@@ -855,7 +857,12 @@ void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*         tag
             bytes_tags.AddTag("target_tier", collector->target_tier);
             bytes_tags.AddTag("pool_name", entry.pool_name);
             bytes_tags.AddTag("group_type", entry.group_type);
-            transfer_bytes_metric->Report(&bytes_tags, entry.transfer_bytes);
+            if (entry.transfer_bytes != 0 || entry.attempted_bytes == 0)
+                transfer_bytes_metric->Report(&bytes_tags, entry.transfer_bytes);
+            if (entry.attempted_bytes != 0) {
+                transfer_attempted_bytes_metric->Report(&bytes_tags, entry.attempted_bytes);
+                transfer_failed_attempt_bytes_metric->Report(&bytes_tags, collector->success ? 0 : entry.attempted_bytes);
+            }
         }
     }
     transfer_in_flight_metric->Report(&transfer_tags, collector->in_flight);

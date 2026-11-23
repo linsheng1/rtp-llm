@@ -25,6 +25,8 @@ void EvictionTaskRunner::runTransfer(std::shared_ptr<const EvictionTransferTask>
     const int64_t transfer_begin =
         metrics_reporter.reportTransferStarted(TransferOperation::EVICT, first.source_tier, first.target_tier);
     if (!valid) {
+        // No attempted-byte accounting for unvalidated descriptors: their group
+        // IDs/directions cannot safely be used to resolve payload sizes.
         metrics_reporter.reportTransferFinished(TransferOperation::EVICT,
                                                 first.source_tier,
                                                 first.target_tier,
@@ -57,7 +59,8 @@ void EvictionTaskRunner::runTransfer(std::shared_ptr<const EvictionTransferTask>
                                                         success,
                                                         success ? task->descriptors() :
                                                                   std::vector<TransferDescriptor>{},
-                                                        group_sets_);
+                                                        group_sets_,
+                                                        task->descriptors());
                 metrics_reporter.maybeReportCopyError(
                     task->descriptors().front().source_tier, task->descriptors().front().target_tier, result);
             }

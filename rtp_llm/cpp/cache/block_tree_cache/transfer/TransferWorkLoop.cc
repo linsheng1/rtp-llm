@@ -1,21 +1,57 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferWorkLoop.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cassert>
+#include <charconv>
 #include <chrono>
 #include <cstring>
+#include <cstdlib>
 #include <limits>
+#include <optional>
 #include <pthread.h>
 #include <stdexcept>
+#include <system_error>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DiskTransferUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
 namespace {
+
+// Opt-in, process-bounded probe for HOST->DISK only. Reserve complete batches,
+// so unrelated work cannot exhaust the probe or suppress its late-completion log.
+bool reserveDiskTrace(const TransferTask& task) noexcept {
+    auto number = [](const char* name) -> std::optional<uint64_t> {
+        const char* value = std::getenv(name);
+        if (!value)
+            return 0;
+        uint64_t result = 0;
+        const auto end = value + std::strlen(value);
+        const auto parsed = std::from_chars(value, end, result);
+        if (parsed.ec != std::errc{} || parsed.ptr != end)
+            return std::nullopt;
+        return result;
+    };
+    static const uint64_t limit = std::min<uint64_t>(number("RTP_LLM_DISK_IO_TRACE_BATCHES").value_or(0), 128);
+    if (limit == 0)
+        return false;
+    static const auto target_trace = number("RTP_LLM_DISK_IO_TRACE_ID");
+    if (!target_trace || (*target_trace != 0 && *target_trace != task.traceId())
+        || !Logger::getEngineLogger().isLevelEnabled(alog::LOG_LEVEL_INFO))
+        return false;
+    static std::atomic<uint64_t> remaining{limit};
+    auto value = remaining.load(std::memory_order_relaxed);
+    while (value != 0) {
+        if (remaining.compare_exchange_weak(value, value - 1, std::memory_order_relaxed))
+            return true;
+    }
+    return false;
+}
 
 TransferResult unsubmittedResult(TransferResult result) {
     // This stage has not submitted I/O. recordResult still ANDs any earlier
@@ -501,23 +537,54 @@ void TransferWorkLoop::submitDisk(Entry& entry) {
     // Ordinary rejection has no I/O/callback. Accepted workers own completion.
     // Submission exceptions propagate to withEntry; it handles OOM locally.
     assert(disk_io_executor_ != nullptr);
-    auto* timing = write && entry.task_timer ? &entry.disk_timing : nullptr;
+    entry.disk_trace = write && descriptors.front().source_tier == Tier::HOST
+                       && reserveDiskTrace(entry.task);
+    logDiskLifecycle(entry, "disk_submit", -1);
+    auto* timing = write && (entry.task_timer || entry.disk_trace) ? &entry.disk_timing : nullptr;
     const auto status = write ? pool->asyncWrite(*disk_io_executor_, blocks, write_buffers, stride, std::move(done), timing) :
                                 pool->asyncRead(*disk_io_executor_, blocks, buffers, stride, std::move(done));
     if (status != BlockIOStatus::OK) {
         recordDiskResult(entry, status);
+        logDiskLifecycle(entry, "disk_rejected", static_cast<int>(status));
         completed_.push(entry);
     }
 }
 
 void TransferWorkLoop::publishDisk(Entry& entry, BlockIOStatus status) noexcept {
     recordDiskResult(entry, status);
+    // The executor has joined all accepted workers; this is physical completion,
+    // even if the coordinator has already timed out. Log before publishing Entry.
+    logDiskLifecycle(entry, "disk_complete", static_cast<int>(status));
     // Hold the lock from publication through the final notification so the owner
     // cannot release admission or exit before this callback finishes accessing the WorkLoop.
     std::lock_guard<std::mutex> lock(mutex_);
     disk_completed_.push(entry);
     // Do not touch entry after publication: the owner may already consume it.
     cv_.notify_all();
+}
+
+void TransferWorkLoop::logDiskLifecycle(const Entry& entry, const char* event, int status) const noexcept {
+    if (!entry.disk_trace)
+        return;
+    try {
+        const auto& d = entry.task.descriptors().front();
+        const auto& t = entry.disk_timing;
+        RTP_LLM_LOG_INFO(
+            "disk_lifecycle event=%s trace=%lu rank=%ld group_set=%zu group_type=%s pool=%s "
+            "first_path_index=%zu first_disk_block=%d blocks=%zu requested_stride_bytes=%zu "
+            "block_io_status=%d result_code=%ld "
+            "steady_us=%ld queued_us=%ld worker_start_us=%ld sort_end_us=%ld io_end_us=%ld "
+            "pwrite_count=%ld pwrite_sum_us=%ld pwrite_max_us=%ld",
+            event, entry.task.traceId(), world_rank_, d.group_set_id,
+            metricCacheGroupTypeName(group(entry)->groupType()), group(entry)->diskPool()->poolName().c_str(),
+            d.path_index, d.singleBlockAt(Tier::DISK), entry.task.descriptors().size(),
+            group(entry)->diskPool()->strideBytes() * entry.task.descriptors().size(), status,
+            static_cast<int64_t>(entry.result.status.code()),
+            AsyncProfileSession::steadyNowUs(), t.queued_us, t.worker_start_us, t.sort_end_us, t.io_end_us,
+            t.pwrite_count, t.pwrite_sum_us, t.pwrite_max_us);
+    } catch (...) {
+        // Diagnostic failures never change completion or buffer ownership.
+    }
 }
 
 void TransferWorkLoop::pollOnce() {
@@ -672,6 +739,8 @@ void TransferWorkLoop::finish(Entry& entry) {
     } catch (...) {
         RTP_LLM_LOG_WARNING("async transfer before_complete callback failed");
     }
+    // This is worker response readiness, not CQ receipt or coordinator adoption.
+    logDiskLifecycle(entry, "worker_reply_ready", -1);
     entry.context->complete(std::move(entry.result));
     // Context ready precedes callback return. Neither permits early reuse of
     // admission capacity or destruction of the callback's captured resources.

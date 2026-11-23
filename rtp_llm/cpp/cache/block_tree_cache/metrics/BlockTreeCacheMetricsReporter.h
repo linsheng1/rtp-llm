@@ -100,6 +100,8 @@ public:
     int64_t reportTransferStarted(TransferOperation operation, Tier source_tier, Tier target_tier);
     // Report once after all batches/ranks of a logical copy have completed.
     void maybeReportCopyError(Tier source_tier, Tier target_tier, const TransferResult& result) const;
+    // Optional attempted_descriptors are valid requested payload, independently
+    // accounted from successful_descriptors; only the eviction runner supplies them.
     void reportTransferFinished(TransferOperation               operation,
                                 Tier                            source_tier,
                                 Tier                            target_tier,
@@ -107,7 +109,8 @@ public:
                                 int64_t                         begin_time_us,
                                 bool                            success,
                                 DescriptorView                  successful_descriptors,
-                                const std::vector<GroupSetPtr>& group_sets);
+                                const std::vector<GroupSetPtr>& group_sets,
+                                DescriptorView                  attempted_descriptors = {});
     void reportQueueBacklog(const BlockTreeQueueSizes& queue_sizes, const char* pool_type) const;
 
 private:
